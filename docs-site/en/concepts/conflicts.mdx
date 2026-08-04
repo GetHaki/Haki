@@ -1,0 +1,70 @@
+---
+title: "Conflicts"
+description: "Two facts contradict each other: Haki hides both instead of guessing — ConflictSet"
+---
+
+When the Consolidator extracts an `action="create"` fact whose value
+differs from a fact already **active** for the same predicate, it does
+not choose on the user's behalf: it opens a **conflict**.
+
+## The principle: hide both, never guess
+
+<Warning>
+  An open conflict blocks **both facts** from `/v1/context` — the
+  potential winner as much as the potential loser — until it is
+  explicitly resolved. This is a deliberate PRD guarantee, not a bug to
+  fix: Haki would rather serve nothing than serve a possibly wrong
+  answer.
+</Warning>
+
+In the Context Assembler, any fact whose id appears in a `ConflictSet`
+with `status="open"` is excluded from scoring and **blocked** with
+`reason_code = conflict_open` — including facts still `candidate` (which
+would never have been served anyway, but are now explicitly traced as
+blocked). The returned packet then carries a warning:
+
+```text
+open_conflict: 2 fact(s) hidden pending conflict resolution
+```
+
+## `ConflictSet` model
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | uuid | |
+| `project_id` / `subject_id` | string | Scope |
+| `fact_ids` | uuid[] | All contradicting facts (2 or more if the same predicate contradicts itself several times) |
+| `status` | `"open"` \| `"resolved"` | |
+| `reason` | string \| null | Generated text, e.g. `predicate 'invoice_language': {"language":"fr"} vs {"language":"en"}` |
+| `created_at` / `resolved_at` | datetime | |
+
+## Observability
+
+`GET /v1/conflicts` returns, alongside the list, two counters designed
+for monitoring without parsing the list: `open_count` and
+`oldest_open_seconds` (age of the oldest still-open conflict, `null` if
+there is none). Nothing auto-resolves a conflict — that is intentional
+("hide both, never guess"); this counter is the guardrail against silent
+accumulation.
+
+## Resolving a conflict
+
+`POST /v1/conflicts/{id}/resolve` with `{project_id, keep_fact_id}`:
+
+1. the kept fact moves to `active` (transition
+   `candidate/disputed → active` if needed);
+2. **every other** fact of the set moves to `superseded`, with
+   `supersedes_id` pointing at the kept fact;
+3. the set moves to `resolved` (+ `resolved_at`).
+
+From then on, `/v1/context` serves the kept fact normally — it is no
+longer blocked by `conflict_open`.
+
+Typed errors: `conflict_not_found` (404 — including a conflict from
+another project, same error as an unknown id, no leak),
+`conflict_already_resolved` (409), `fact_not_in_conflict` (422, if
+`keep_fact_id` does not belong to the set).
+
+<Card title="API reference — Conflicts" icon="triangle-exclamation" href="/en/api-reference/conflicts">
+  `GET /v1/conflicts`, `POST /v1/conflicts/{id}/resolve`: exact schemas.
+</Card>

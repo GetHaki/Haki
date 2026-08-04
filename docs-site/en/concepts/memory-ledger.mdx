@@ -1,0 +1,99 @@
+---
+title: "Memory Ledger"
+description: "Append-only event capture, bitemporality, idempotency — app/ledger/"
+---
+
+The Memory Ledger (`app/ledger/`) is Haki's durable capture layer: it
+writes **events** (the raw proof) and manages **facts** (what is true),
+behind a deliberately small interface — write an event, read an object,
+list a timeline, apply a versioned status mutation.
+
+## Event (`Event`)
+
+An event is **the proof**: "this message was said on this date." Table
+`events` (`app/models/event.py`), **append-only** — business content is
+never modified after insert. The only write tolerated afterwards is the
+derived embedding (episodic memory, computed once by the Consolidator).
+
+<ResponseField name="org_id / project_id" type="string" required>
+  The event's full scope.
+</ResponseField>
+<ResponseField name="subject_type" type="string" default="user">
+  Type of the subject (customer, user…).
+</ResponseField>
+<ResponseField name="subject_id" type="string" required>
+  Stable identity of the subject. **Required** — validated by the Ledger
+  (typed `missing_scope` error), not by Pydantic, so the error message
+  can carry the exact index of the offending event in the batch.
+</ResponseField>
+<ResponseField name="actor_type / actor_id / agent_id / thread_id / run_id" type="string | null">
+  Provenance: who/what produced the event, in which conversation thread,
+  in which run.
+</ResponseField>
+<ResponseField name="kind" type="string" required>
+  Free-form type, e.g. `conversation.message`, `conversation.turn`,
+  `agent.observation`. No closed enum server-side.
+</ResponseField>
+<ResponseField name="occurred_at" type="datetime" required>
+  **Business time** — when the event actually happened.
+</ResponseField>
+<ResponseField name="recorded_at" type="datetime">
+  **System time** — when Haki recorded it. Generated server-side
+  (`server_default=func.now()`).
+</ResponseField>
+<ResponseField name="payload" type="object" required>
+  Free-form content (JSONB).
+</ResponseField>
+<ResponseField name="classification" type="string[]">
+  Free-form tags, e.g. `["customer-data"]`.
+</ResponseField>
+<ResponseField name="hash" type="string">
+  `sha256:` + canonical hash of the business content (org/project/subject/
+  kind/occurred_at/payload, sorted keys). Computed server-side, never
+  sent by the client.
+</ResponseField>
+
+## Bitemporality
+
+Haki systematically separates two time axes:
+
+| Axis | On `Event` | On `Fact` | Meaning |
+|---|---|---|---|
+| **Business time** | `occurred_at` | `valid_from` / `valid_to` | When the thing is true in the real world |
+| **System time** | `recorded_at` | `recorded_from` / `recorded_to` | When Haki learned it / wrote it |
+
+This separation answers two different questions: "what did we know at
+date X?" (system time) and "what was true at date X?" (business time) —
+without ever conflating them. A `deleted` fact (terminal) gets
+`recorded_to` at the moment of the transition; `valid_to`, on the other
+hand, marks the end of business validity (set by the Consolidator at
+supersession time).
+
+## Write-time idempotency
+
+`write_events` (`app/ledger/core.py`) batch-inserts with
+`ON CONFLICT DO NOTHING` on the unique constraint
+`(project_id, idempotency_key)`. Each event's effective key is chosen in
+this order:
+
+1. the **batch** `idempotency_key` (`CaptureRequest.idempotency_key`),
+   **namespaced by each event's content hash**
+   (`f"{batch_key}:{content_hash}"`) — several events in one batch never
+   collide with each other;
+2. else the event's own `idempotency_key` (`EventIn.idempotency_key`);
+3. else a fallback derived from the content hash + `subject_id`.
+
+A network retry that replays the exact same batch with the same key
+therefore **never** creates a duplicate: `POST /v1/capture` returns the
+same event ids, with `deduplicated: true` on the ones already known.
+
+## Timeline
+
+`GET /v1/timeline?project_id=...&subject_id=...` (both parameters are
+required — never a cross-subject timeline) returns events ordered by
+`(occurred_at, recorded_at)`. It is the "raw proof" view used by the
+console and by the MCP `haki_inspect` flow.
+
+<Card title="API reference — Capture" icon="inbox" href="/en/api-reference/capture">
+  Exact schema of `POST /v1/capture`, request/response examples.
+</Card>

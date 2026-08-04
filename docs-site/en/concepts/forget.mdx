@@ -1,0 +1,74 @@
+---
+title: "Forget"
+description: "Two scopes, two modes, one timestamped receipt — app/ledger/forget.py"
+---
+
+`POST /v1/forget` is Haki's minimal erasure endpoint. Every call is
+journaled in `forget_receipts` and the response carries the receipt id
+plus exact counters of what actually happened.
+
+## Two scopes, exactly one per call
+
+<ResponseField name="fact_id" type="uuid">
+  Forgets **a single fact**.
+</ResponseField>
+<ResponseField name="subject_id" type="string">
+  Forgets **an entire subject** within the project.
+</ResponseField>
+
+The request must supply **exactly one** of the two (validated by Pydantic
+at the HTTP level, and again by the Ledger for direct, non-HTTP callers
+such as the MCP tools) — otherwise `invalid_forget_scope`.
+
+## Two modes
+
+<Tabs>
+  <Tab title="disable — reversible">
+    - **One fact**: transitions to `disabled` (can become `active` again
+      later).
+    - **One subject**: every `active` or `candidate` fact of the subject
+      moves to `disabled`. History stays intact.
+  </Tab>
+  <Tab title="delete — real erasure">
+    - **One fact**: transitions to `deleted` (terminal — also sets
+      `recorded_to`).
+    - **One subject**: **real SQL deletion** of every fact of the subject
+      in this project (embeddings go with the rows), of its
+      `ConflictSet`s, of its events and of its context traces. Not
+      reversible.
+  </Tab>
+</Tabs>
+
+## The receipt
+
+Every call creates a `forget_receipts` row and returns:
+
+```json
+{
+  "status": "ok",
+  "mode": "delete",
+  "scope": "subject",
+  "forget_id": "b1e2...",
+  "facts_disabled": 0,
+  "facts_deleted": 12,
+  "conflict_sets_deleted": 1,
+  "events_deleted": 34,
+  "traces_deleted": 5
+}
+```
+
+Only the counters relevant to the chosen mode/scope are non-zero —
+`facts_disabled` stays `0` on a `delete`, for instance. Forgetting is
+also **audited** (`policy.audit_forget`, structured `haki.policy` JSON
+line) on every call, regardless of mode.
+
+## Typed errors
+
+`fact_not_found` (404 — including a fact from another project: same
+error as an unknown id, no cross-project leak) and
+`invalid_forget_scope` (422 — neither or both of `fact_id`/`subject_id`,
+or an unknown `mode`).
+
+<Card title="API reference — Forget" icon="eraser" href="/en/api-reference/forget">
+  `POST /v1/forget`: exact request and response schema.
+</Card>

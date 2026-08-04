@@ -1,0 +1,144 @@
+---
+title: "Python SDK"
+description: "HakiClient, AsyncHakiClient, the before/after LLM hooks, the haki CLI — sdk/python/"
+---
+
+## Installation
+
+Inside the Haki repository, the SDK is a **local editable** dependency
+(`pyproject.toml`, `[tool.uv.sources]`): `uv sync` at the repo root
+installs it automatically, alongside the API itself.
+
+Used outside the repository (your own project):
+
+```bash
+pip install -e path/to/haki/sdk/python
+```
+
+## `HakiClient` — synchronous (httpx)
+
+Sync by default: the main consumers are scripts and agent hooks.
+`transport` is injectable for tests
+(`httpx.ASGITransport(app=app)`).
+
+```python
+from haki import HakiClient
+
+client = HakiClient("http://localhost:8100", api_key="hk_...", timeout=10.0)
+```
+
+<ResponseField name="health()" type="dict">`GET /health`.</ResponseField>
+<ResponseField name="capture(events, idempotency_key=None)" type="dict">
+  `POST /v1/capture`. `events`: list of dicts in `EventIn` shape.
+</ResponseField>
+<ResponseField name="context(subject_id, query, project_id, *, purpose=None, budget_tokens=900)" type="dict">
+  `POST /v1/context` → `{packet, token_count, trace_id}`.
+</ResponseField>
+<ResponseField name="inspect(trace_id, *, project_id, subject_id)" type="dict">`GET /v1/inspect/{trace_id}` (scope required).</ResponseField>
+<ResponseField name="timeline(subject_id, project_id)" type="dict">`GET /v1/timeline`.</ResponseField>
+<ResponseField name="consolidate()" type="dict">`POST /v1/consolidate` → `{processed}`.</ResponseField>
+<ResponseField name="forget(*, project_id, mode='disable', subject_id=None, fact_id=None)" type="dict">`POST /v1/forget`.</ResponseField>
+<ResponseField name="feedback(*, project_id, rating, trace_id=None, fact_id=None, comment=None)" type="dict">`POST /v1/feedback`.</ResponseField>
+<ResponseField name="resolve_conflict(conflict_id, *, project_id, keep_fact_id)" type="dict">`POST /v1/conflicts/{id}/resolve`.</ResponseField>
+<ResponseField name="create_key(*, project_id, org_id, label=None)" type="dict">`POST /v1/keys` — the clear key only appears here.</ResponseField>
+<ResponseField name="list_keys()" type="dict">`GET /v1/keys` (masked).</ResponseField>
+<ResponseField name="revoke_key(key_id)" type="dict">`DELETE /v1/keys/{key_id}`.</ResponseField>
+
+`AsyncHakiClient` exposes the exact same methods, `await`-able
+(backed by `httpx.AsyncClient`).
+
+## Typed errors
+
+```python
+from haki.errors import HakiApiError, HakiConnectionError, HakiError
+```
+
+<ResponseField name="HakiConnectionError" type="HakiError">
+  The API is unreachable (network, timeout, DNS…).
+</ResponseField>
+<ResponseField name="HakiApiError" type="HakiError">
+  The API responded with `{"error": {...}}`. Carries `status_code`,
+  `error_type`, `field`, `payload` — see the
+  [list of error types](/en/api-reference/introduction).
+</ResponseField>
+
+## The two agent hooks (`haki.runtime`)
+
+```python
+from haki import HakiClient
+from haki.runtime import build_prompt_context, capture_turn
+
+client = HakiClient("http://localhost:8100")
+
+# BEFORE the LLM call: memory becomes an instruction block
+packet = client.context(subject_id="usr_42", query=user_msg, project_id="prj")
+prompt = build_prompt_context(packet) + "\n" + system_prompt
+
+answer = my_llm(prompt, user_msg)   # your LLM, your code, unchanged
+
+# AFTER the LLM call: the conversation turn goes back into memory
+capture_turn(client, "usr_42", "prj", user_msg, answer)
+```
+
+<Accordion title="What build_prompt_context() actually produces">
+  A delimited `<haki_memory>...</haki_memory>` block with a fixed
+  instruction ("apply these facts, especially the reply language, cite
+  the source"), one line per fact (`predicate: value (valid from ...;
+  sources: ...)`), then the dated episodes, then the `warnings` prefixed
+  `!`. An empty packet (no facts, no episodes) → empty string.
+  **Identical text** between the Python SDK and the TypeScript SDK.
+
+  ```text
+  <haki_memory>
+  Verified long-term memory facts about this subject. You MUST apply them...
+  - invoice_language: {'language': 'fr'} (valid from 2026-08-01T10:00:00+00:00; sources: 7c21e4c2-...)
+  Dated events from the source history (episodic memory):
+  - [2026-08-01T10:00:00+00:00] conversation.message: conversation.message {"content": "..."} (event: 7c21e4c2-...)
+  </haki_memory>
+  ```
+</Accordion>
+
+`capture_turn(client, subject_id, project_id, user_msg, assistant_msg, *, org_id="org_default", agent_id=None, thread_id=None, kind="conversation.turn")`
+writes an event with `payload.messages = [{role: user, content}, {role: assistant, content}]`
+and a per-call unique `idempotency_key` (`f"turn-{uuid4()}"`).
+
+## Gateway (`haki.gateway`)
+
+```python
+from haki.gateway import gateway_client, async_gateway_client
+
+client = gateway_client(
+    "http://localhost:8100/gateway/v1", "hk_...", "usr_42",
+    thread_id=None, run_id=None, purpose=None, timeout=120.0,
+)
+response = client.post("/chat/completions", json={"model": "...", "messages": [...]})
+```
+
+Returns a preconfigured `httpx.Client`/`httpx.AsyncClient` with
+`Authorization` and the `X-Haki-*` headers already set — see the
+[Gateway reference](/en/api-reference/gateway) for the full contract.
+
+## CLI `haki`
+
+<ResponseField name="haki connect --api-url URL [--api-key KEY]" type="command">
+  Tests `/health`, writes `~/.haki/config.json`.
+</ResponseField>
+<ResponseField name="haki verify" type="command">
+  Full timed scenario: capture → consolidate → new thread → context
+  recalls the fact. Exit 0/1. Attempts a key bootstrap if none is
+  configured.
+</ResponseField>
+<ResponseField name="haki status" type="command">API health + latency.</ResponseField>
+<ResponseField name="haki keys create --project-id P --org-id O [--label L] [--save]" type="command" />
+<ResponseField name="haki keys list" type="command" />
+<ResponseField name="haki keys revoke KEY_ID" type="command" />
+<ResponseField name="haki mcp [--mcp-url URL]" type="command">
+  Cursor MCP packaging — see [Cursor](/en/integrations/cursor).
+</ResponseField>
+<ResponseField name="haki hooks --subject-id S --project-id P [--org-id O]" type="command">
+  Cursor Hooks packaging — see [Cursor](/en/integrations/cursor).
+</ResponseField>
+<ResponseField name="haki hook-capture / haki hook-session-start" type="command">
+  **Internal**: invoked by Cursor itself (`.cursor/hooks.json`), never by
+  hand.
+</ResponseField>

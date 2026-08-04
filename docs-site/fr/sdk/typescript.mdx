@@ -1,0 +1,102 @@
+---
+title: "SDK TypeScript"
+description: "HakiClient (fetch natif), buildPromptContext, captureTurn, le CLI haki-ts — sdk/typescript/"
+---
+
+Parité avec le SDK Python : mêmes méthodes (en camelCase côté options),
+mêmes erreurs typées, même bloc `<haki_memory>` généré — **zéro
+dépendance runtime** (`fetch` natif Node ≥ 18).
+
+## Installation
+
+```bash
+cd sdk/typescript
+npm install
+npm run build
+npm test
+```
+
+## `HakiClient`
+
+```typescript
+import { HakiClient } from "haki";
+
+const client = new HakiClient({
+  baseUrl: "http://localhost:8100",
+  apiKey: "hk_...",   // optionnel
+  timeout: 10_000,     // ms, défaut 10 000
+});
+```
+
+<ResponseField name="health()" type="Promise<HealthResponse>" />
+<ResponseField name="capture(events, idempotencyKey?)" type="Promise<CaptureResponse>">`events: EventInput[]`.</ResponseField>
+<ResponseField name="context({ subjectId, query, projectId, purpose?, budgetTokens? })" type="Promise<ContextResponse>" />
+<ResponseField name="inspect(traceId, { projectId, subjectId })" type="Promise<TraceResponse>" />
+<ResponseField name="timeline({ projectId, subjectId })" type="Promise<TimelineResponse>" />
+<ResponseField name="consolidate()" type="Promise<ConsolidateResponse>" />
+<ResponseField name="forget({ projectId, mode?, subjectId?, factId? })" type="Promise<ForgetResponse>" />
+<ResponseField name="feedback({ projectId, rating, traceId?, factId?, comment? })" type="Promise<FeedbackResponse>" />
+<ResponseField name="resolveConflict(conflictId, { projectId, keepFactId })" type="Promise<ResolveConflictResponse>" />
+<ResponseField name="createKey({ projectId, orgId, label? })" type="Promise<KeyCreatedResponse>" />
+<ResponseField name="listKeys()" type="Promise<KeyListResponse>" />
+<ResponseField name="revokeKey(keyId)" type="Promise<KeyRevokedResponse>" />
+
+Le format sur le fil reste `snake_case` (contrat B.1 et schémas de
+routes) : les types exportés (`EventInput`, `CaptureResponse`,
+`ContextResponse`…) exposent des champs comme `project_id`,
+`source_event_ids`, `trace_id` tels quels — seules les **options** des
+méthodes du client sont en camelCase (`projectId`, `subjectId`…).
+
+## Erreurs typées
+
+```typescript
+import { HakiApiError, HakiConnectionError, HakiError } from "haki";
+```
+
+Mêmes sémantiques que côté Python : `HakiConnectionError` (réseau),
+`HakiApiError` (`statusCode`, `errorType`, `field`, `payload`).
+
+## Les deux hooks agent (`haki/runtime`)
+
+```typescript
+import { HakiClient, buildPromptContext, captureTurn } from "haki";
+
+const client = new HakiClient({ baseUrl: "http://localhost:8100", apiKey: "hk_..." });
+
+const { packet } = await client.context({ subjectId: "usr_42", query: userMsg, projectId: "prj" });
+const prompt = buildPromptContext(packet) + "\n" + systemPrompt;
+
+const answer = await myLlm(prompt, userMsg);   // votre LLM, inchangé
+
+await captureTurn(client, { subjectId: "usr_42", projectId: "prj", userMsg, assistantMsg: answer });
+```
+
+`buildPromptContext` produit un texte **identique** au SDK Python (même
+instruction fixe, même format `- predicate: value (valid from ...;
+sources: ...)`). `captureTurn(client, { subjectId, projectId, userMsg,
+assistantMsg, orgId?, agentId?, threadId?, kind? })` écrit un événement
+`conversation.turn` avec `idempotency_key: "turn-" + randomUUID()`.
+
+## CLI `haki-ts`
+
+```bash
+node dist/cli.js connect --api-url http://localhost:8100
+node dist/cli.js verify
+node dist/cli.js status
+```
+
+<ResponseField name="haki-ts connect --api-url URL [--api-key KEY]" type="command">Teste `/health`, écrit `~/.haki/config.json`.</ResponseField>
+<ResponseField name="haki-ts verify" type="command">Scénario minuté complet, sortie 0/1.</ResponseField>
+<ResponseField name="haki-ts status" type="command">Santé de l'API.</ResponseField>
+
+<Tip>
+  Le fichier de config (`~/.haki/config.json`, `{api_url, api_key}`) est
+  **le même** que celui du CLI Python : les deux CLI sont interchangeables
+  sur une même machine.
+</Tip>
+
+<Card title="Exemple runnable" icon="file-code">
+  `sdk/typescript/examples/basic-agent.mjs` dans le dépôt — un agent
+  minimal complet utilisant `HakiClient`, `buildPromptContext` et
+  `captureTurn`.
+</Card>

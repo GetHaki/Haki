@@ -1,0 +1,50 @@
+---
+title: "POST /v1/consolidate"
+description: "Déclencher la consolidation immédiatement — endpoint dev/ops"
+---
+
+```http
+POST /v1/consolidate
+```
+
+Traite **synchroniquement** tous les jobs `consolidate` en attente
+(`pending` ou `failed` — rejouables) via
+`run_pending_consolidations`. Voir [Consolidator](/fr/concepts/consolidator)
+pour le pipeline complet.
+
+<Warning>
+  Endpoint **dev/ops**, documenté comme tel : il utilise une session sans
+  contexte RLS (`get_session_ops`) et traite les jobs **de tous les
+  projets**, pas seulement celui de la clé appelante. Aucune limite de
+  débit en V1. Utile pour le développement local, les tests
+  end-to-end, les flows n8n auto-hébergés et le scénario `haki verify`.
+  En production, un worker séparé prend typiquement le relais (Redis est
+  déjà provisionné dans `docker-compose.yml` dans cette optique).
+</Warning>
+
+### Réponse — `200 OK`
+
+<ResponseField name="processed" type="integer" required>
+  Nombre de jobs traités **avec succès** dans cet appel.
+</ResponseField>
+
+<RequestExample>
+
+```bash curl
+curl -X POST http://localhost:8100/v1/consolidate \
+  -H "Authorization: Bearer hk_..."
+```
+
+```python Python (SDK)
+client.consolidate()  # -> {"processed": 1}
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200
+{"processed": 1}
+```
+
+</ResponseExample>

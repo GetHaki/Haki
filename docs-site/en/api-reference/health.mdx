@@ -1,0 +1,35 @@
+---
+title: "GET /health"
+description: "API health — unauthenticated"
+---
+
+```http
+GET /health
+```
+
+The only endpoint that never requires a key, regardless of
+`HAKI_AUTH_REQUIRED`. Runs `SELECT 1` to check the Postgres connection.
+
+### Response — `200 OK`
+
+<ResponseField name="status" type="string" default="ok" />
+<ResponseField name="database" type="string" default="up" />
+
+<RequestExample>
+
+```bash curl
+curl http://localhost:8100/health
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200
+{"status": "ok", "database": "up"}
+```
+
+</ResponseExample>
+
+Used by `haki connect` and `haki status` (both the Python and TypeScript
+CLIs) to measure connection latency.

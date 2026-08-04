@@ -1,0 +1,122 @@
+---
+title: "POST /v1/capture"
+description: "Send events — idempotent ingestion, immediate ack"
+---
+
+Idempotent ingestion of a batch of events. Responds **202** as soon as
+the write is done; consolidation runs as a background job (`pending`,
+processed by `POST /v1/consolidate` — see
+[Consolidator](/en/concepts/consolidator)).
+
+## Request body
+
+<ParamField body="events" type="EventIn[]" required>
+  One or more events (`min_length=1`).
+
+  <Expandable title="EventIn fields">
+    <ParamField body="org_id" type="string" required>1 to 128 characters.</ParamField>
+    <ParamField body="project_id" type="string" required>1 to 128 characters.</ParamField>
+    <ParamField body="subject_type" type="string" default="user">Max 64 characters.</ParamField>
+    <ParamField body="subject_id" type="string">
+      Max 128 characters. **Not marked required by Pydantic** but
+      validated by the Ledger (`missing_scope` if empty) — so the error
+      can carry the exact index of the offending event in the batch.
+    </ParamField>
+    <ParamField body="actor_type" type="string">Max 64 characters.</ParamField>
+    <ParamField body="actor_id" type="string">Max 128 characters.</ParamField>
+    <ParamField body="agent_id" type="string">Max 128 characters.</ParamField>
+    <ParamField body="thread_id" type="string">Max 128 characters.</ParamField>
+    <ParamField body="run_id" type="string">Max 128 characters.</ParamField>
+    <ParamField body="kind" type="string" required>
+      1 to 128 characters. Free-form — e.g. `conversation.message`,
+      `conversation.turn`, `agent.observation`.
+    </ParamField>
+    <ParamField body="occurred_at" type="datetime" required>ISO 8601.</ParamField>
+    <ParamField body="payload" type="object" required>Free-form content.</ParamField>
+    <ParamField body="source" type="object">Free-form provenance, e.g. `{"tool": "mcp", "server": "haki"}`.</ParamField>
+    <ParamField body="classification" type="string[]" default="[]">Free-form tags.</ParamField>
+    <ParamField body="retention_policy" type="string">Max 128 characters.</ParamField>
+    <ParamField body="idempotency_key" type="string">
+      Max 256 characters. Per-event key (see [Memory Ledger](/en/concepts/memory-ledger)
+      for the priority order against the batch key).
+    </ParamField>
+  </Expandable>
+</ParamField>
+<ParamField body="idempotency_key" type="string">
+  Max 256 characters. **Batch** key: namespaced by each event's content
+  hash, so several events in the same batch never collide with each
+  other.
+</ParamField>
+
+## Response — `202 Accepted`
+
+<ResponseField name="status" type="string" default="accepted" />
+<ResponseField name="events" type="CapturedEvent[]" required>
+  <Expandable title="fields">
+    <ResponseField name="id" type="uuid" required />
+    <ResponseField name="deduplicated" type="boolean" required>
+      `true` if this event already existed (same idempotency key) — the
+      row returned is the original, no new write happened.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+<ResponseField name="consolidation_job_id" type="uuid | null">
+  `null` if the **whole** batch was deduplicated — nothing new to
+  consolidate.
+</ResponseField>
+<ResponseField name="policy" type="string">
+  The applied policy (`HAKI_DEFAULT_POLICY`, `"default"` locally).
+</ResponseField>
+
+<RequestExample>
+
+```bash curl
+curl -X POST http://localhost:8100/v1/capture \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer hk_..." \
+  -d '{
+    "idempotency_key": "demo-1",
+    "events": [{
+      "org_id": "org_acme", "project_id": "prj_support",
+      "subject_type": "user", "subject_id": "usr_42",
+      "kind": "conversation.message",
+      "occurred_at": "2026-08-01T10:00:00Z",
+      "payload": {"role": "user", "content": "I prefer my invoices in French."},
+      "classification": ["customer-data"]
+    }]
+  }'
+```
+
+```python Python (SDK)
+client.capture(
+    events=[{
+        "org_id": "org_acme", "project_id": "prj_support",
+        "subject_type": "user", "subject_id": "usr_42",
+        "kind": "conversation.message",
+        "occurred_at": "2026-08-01T10:00:00Z",
+        "payload": {"role": "user", "content": "I prefer my invoices in French."},
+    }],
+    idempotency_key="demo-1",
+)
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 202
+{
+  "status": "accepted",
+  "events": [{"id": "7c21e4c2-...", "deduplicated": false}],
+  "consolidation_job_id": "9b0f1a3e-...",
+  "policy": "default"
+}
+```
+
+</ResponseExample>
+
+## Possible errors
+
+`missing_scope` (an event's `subject_id` is empty — 422),
+`forbidden_scope` (an event's `project_id` ≠ the key's — 403),
+`invalid_payload` (malformed body — 422).

@@ -1,0 +1,131 @@
+---
+title: "POST/GET/DELETE /v1/keys"
+sidebarTitle: "Clés API"
+description: "Créer, lister (masqué), révoquer — règles d'accès V1"
+---
+
+<Note>
+  `/v1/keys` est **exclu** de l'authentification standard `/v1/*`
+  (`ApiKeyAuthMiddleware`) : il a sa propre logique, décrite ici. Voir
+  aussi [Sécurité](/fr/security) pour le modèle complet.
+</Note>
+
+## Règles d'accès (V1, volontairement simples)
+
+<Tabs>
+  <Tab title="HAKI_ADMIN_KEY défini — mode admin">
+    Toute la gestion des clés exige
+    `Authorization: Bearer <HAKI_ADMIN_KEY>`. L'admin choisit librement
+    `org_id`/`project_id` à la création et voit toutes les clés en liste.
+  </Tab>
+  <Tab title="HAKI_ADMIN_KEY absent — bootstrap">
+    La **première** création de clé est libre (table `api_keys` vide).
+    Ensuite, une clé valide ne gère que les clés de **son propre**
+    projet : création liée à son scope, liste et révocation bornées à
+    ce scope. Une révocation visant la clé d'un autre projet renvoie le
+    même `404 key_not_found` qu'un id inconnu.
+  </Tab>
+</Tabs>
+
+## Créer une clé
+
+```http
+POST /v1/keys
+```
+
+<ParamField body="org_id" type="string" required>1 à 128 caractères.</ParamField>
+<ParamField body="project_id" type="string" required>1 à 128 caractères.</ParamField>
+<ParamField body="label" type="string">Max 128 caractères.</ParamField>
+
+### Réponse — `201 Created`
+
+<ResponseField name="key" type="string" required>
+  La clé en clair (`hk_...`) — **retournée une seule fois, ici**. Seul
+  son hash sha256 est stocké ensuite ; elle ne peut plus jamais être
+  récupérée.
+</ResponseField>
+<ResponseField name="id" type="uuid" required />
+<ResponseField name="prefix" type="string" required>Les 8 premiers caractères, pour les affichages masqués.</ResponseField>
+<ResponseField name="org_id" type="string" required />
+<ResponseField name="project_id" type="string" required />
+<ResponseField name="label" type="string | null" />
+<ResponseField name="created_at" type="datetime" required />
+
+<RequestExample>
+
+```bash curl
+curl -X POST http://localhost:8100/v1/keys \
+  -H "Content-Type: application/json" \
+  -d '{"org_id": "org_acme", "project_id": "prj_support", "label": "dev"}'
+```
+
+```python CLI
+uv run haki keys create --project-id prj_support --org-id org_acme --label dev --save
+```
+
+</RequestExample>
+
+---
+
+## Lister les clés (masqué)
+
+```http
+GET /v1/keys
+```
+
+Sans `HAKI_ADMIN_KEY`, la liste est bornée au projet de la clé appelante.
+
+<ResponseField name="keys" type="KeyOut[]" required>
+  Jamais la clé ni son hash — seulement `prefix`.
+  <Expandable title="KeyOut">
+    <ResponseField name="id" type="uuid" required />
+    <ResponseField name="prefix" type="string" required />
+    <ResponseField name="org_id" type="string" required />
+    <ResponseField name="project_id" type="string" required />
+    <ResponseField name="label" type="string | null" />
+    <ResponseField name="created_at" type="datetime" required />
+    <ResponseField name="revoked_at" type="datetime | null" />
+  </Expandable>
+</ResponseField>
+
+---
+
+## Révoquer une clé
+
+```http
+DELETE /v1/keys/{key_id}
+```
+
+Pose `revoked_at` — effet **immédiat** : la clé renvoie `401 unauthorized`
+dès l'appel suivant.
+
+<ResponseField name="id" type="uuid" required />
+<ResponseField name="status" type="string" default="revoked" />
+
+## Erreurs possibles
+
+`unauthorized` (401), `forbidden_scope` (403 — une clé tente de créer une
+clé pour un autre `org_id`/`project_id` que le sien), `key_not_found`
+(404).
+
+---
+
+## Provisioning d'organisation (console uniquement)
+
+```http
+POST /v1/orgs/provision
+```
+
+<Warning>
+  Endpoint **interne**, appelé uniquement par le backend Next.js de la
+  console avec une identité Clerk déjà vérifiée — jamais par un navigateur
+  ni par la clé `hk_` d'un client. Authentifié par un secret partagé
+  unique (`HAKI_CONSOLE_SERVICE_KEY`), pas par le modèle de clés
+  standard. Non couvert par le SDK.
+</Warning>
+
+Prend `{owner_ref, name}` ; génère un `org_id` **serveur** (jamais fourni
+par l'appelant, contrairement au bootstrap `/v1/keys`), crée un projet
+`prj_<org_id>_default` et une clé. Un appel répété pour un `owner_ref`
+déjà connu **ne recrée pas** l'organisation : il émet une nouvelle clé sur
+le même projet (`org_created: false`).

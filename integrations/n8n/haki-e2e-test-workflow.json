@@ -1,0 +1,86 @@
+{
+  "name": "Haki E2E — nœuds communautaires",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "haki-e2e-test",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "e2e00000-0000-4000-8000-000000000001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-300, 0],
+      "webhookId": "haki-e2e-test"
+    },
+    {
+      "parameters": {
+        "project_id": "prj_n8n_e2e",
+        "subject_id": "={{ $json.body.subject_id }}",
+        "query": "={{ $json.body.message }}",
+        "budget_tokens": 900,
+        "purpose": "support"
+      },
+      "credentials": {
+        "hakiApi": {
+          "id": "qG1OhwR3KLe9ibLJ",
+          "name": "Haki API local"
+        }
+      },
+      "id": "e2e00000-0000-4000-8000-000000000002",
+      "name": "Haki Context",
+      "type": "n8n-nodes-haki.hakiContext",
+      "typeVersion": 1,
+      "position": [-80, 0]
+    },
+    {
+      "parameters": {
+        "project_id": "prj_n8n_e2e",
+        "subject_id": "={{ $('Haki Context').item.json.subject_id }}",
+        "user_message": "={{ $('Webhook').item.json.body.message }}",
+        "assistant_message": "={{ 'Réponse E2E déterministe (sans LLM). Mémoire injectée : ' + $json.context_text }}",
+        "thread_id": "={{ 'thread-' + $('Webhook').item.json.body.subject_id }}",
+        "run_id": "",
+        "wait_consolidation": true,
+        "org_id": "org_default"
+      },
+      "credentials": {
+        "hakiApi": {
+          "id": "qG1OhwR3KLe9ibLJ",
+          "name": "Haki API local"
+        }
+      },
+      "id": "e2e00000-0000-4000-8000-000000000003",
+      "name": "Haki Capture",
+      "type": "n8n-nodes-haki.hakiCapture",
+      "typeVersion": 1,
+      "position": [160, 0]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { reply: 'captured', trace_id: $('Haki Context').item.json.trace_id, context_text: $('Haki Context').item.json.context_text, capture: { events: $json.events, consolidation_job_id: $json.consolidation_job_id, processed: $json.processed, idempotency_key: $json.idempotency_key } } }}",
+        "options": {}
+      },
+      "id": "e2e00000-0000-4000-8000-000000000004",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [400, 0]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Haki Context", "type": "main", "index": 0 }]]
+    },
+    "Haki Context": {
+      "main": [[{ "node": "Haki Capture", "type": "main", "index": 0 }]]
+    },
+    "Haki Capture": {
+      "main": [[{ "node": "Respond", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" }
+}

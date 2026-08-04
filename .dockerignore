@@ -1,0 +1,20 @@
+# Build context for the API image (Dockerfile) — keep this small, the
+# image only ever needs app/, alembic/, sdk/python/, pyproject.toml, uv.lock.
+.git
+.venv
+node_modules
+__pycache__
+*.pyc
+.pytest_cache
+
+# Console (Next.js) has its own deploy target (Vercel), not this image.
+console
+
+# Large, not needed at runtime.
+eval
+research
+scratch_design
+docs
+*.md
+.env
+.env.local

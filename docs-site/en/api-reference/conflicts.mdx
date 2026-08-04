@@ -1,0 +1,109 @@
+---
+title: "GET /v1/conflicts · POST /v1/conflicts/{id}/resolve"
+sidebarTitle: "Conflicts"
+description: "List open contradictions and resolve them"
+---
+
+See [Conflicts](/en/concepts/conflicts) for the full mechanics.
+
+## Listing open conflicts
+
+```http
+GET /v1/conflicts
+```
+
+<ParamField query="project_id" type="string" required />
+<ParamField query="subject_id" type="string">Optional — narrows to one subject.</ParamField>
+
+<ResponseField name="conflicts" type="ConflictSetOut[]" required>
+  Ordered by `created_at` ascending (oldest first).
+  <Expandable title="ConflictSetOut">
+    <ResponseField name="id" type="uuid" required />
+    <ResponseField name="project_id" type="string" required />
+    <ResponseField name="subject_id" type="string" required />
+    <ResponseField name="fact_ids" type="uuid[]" required />
+    <ResponseField name="status" type="string" required />
+    <ResponseField name="reason" type="string | null" />
+    <ResponseField name="created_at" type="datetime" required />
+    <ResponseField name="resolved_at" type="datetime | null" />
+  </Expandable>
+</ResponseField>
+<ResponseField name="open_count" type="integer" required>
+  Built for monitoring: alert on this counter without parsing the list.
+</ResponseField>
+<ResponseField name="oldest_open_seconds" type="number | null">
+  Age in seconds of the oldest still-open conflict.
+</ResponseField>
+
+<RequestExample>
+
+```bash curl
+curl "http://localhost:8100/v1/conflicts?project_id=prj_support" \
+  -H "Authorization: Bearer hk_..."
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200
+{
+  "conflicts": [{
+    "id": "c1a2...",
+    "project_id": "prj_support",
+    "subject_id": "usr_42",
+    "fact_ids": ["f1...", "f2..."],
+    "status": "open",
+    "reason": "predicate 'invoice_language': {\"language\":\"fr\"} vs {\"language\":\"en\"}",
+    "created_at": "2026-08-01T10:05:00+00:00",
+    "resolved_at": null
+  }],
+  "open_count": 1,
+  "oldest_open_seconds": 412.7
+}
+```
+
+</ResponseExample>
+
+---
+
+## Resolving a conflict
+
+```http
+POST /v1/conflicts/{conflict_id}/resolve
+```
+
+<ParamField path="conflict_id" type="uuid" required />
+<ParamField body="project_id" type="string" required />
+<ParamField body="keep_fact_id" type="uuid" required>
+  Must belong to the `ConflictSet` — otherwise `fact_not_in_conflict`.
+</ParamField>
+
+<ResponseField name="conflict_id" type="uuid" required />
+<ResponseField name="status" type="string" required>`"resolved"`</ResponseField>
+<ResponseField name="kept_fact_id" type="uuid" required />
+<ResponseField name="superseded_fact_ids" type="uuid[]" required>
+  Every other fact of the set, now `superseded`.
+</ResponseField>
+<ResponseField name="resolved_at" type="datetime" required />
+
+<RequestExample>
+
+```bash curl
+curl -X POST http://localhost:8100/v1/conflicts/c1a2.../resolve \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer hk_..." \
+  -d '{"project_id": "prj_support", "keep_fact_id": "f1..."}'
+```
+
+```python Python (SDK)
+client.resolve_conflict("c1a2...", project_id="prj_support", keep_fact_id="f1...")
+```
+
+</RequestExample>
+
+## Possible errors
+
+`missing_scope` (422 — `project_id` missing on the list endpoint),
+`conflict_not_found` (404 — unknown or from another project),
+`conflict_already_resolved` (409), `fact_not_in_conflict` (422).

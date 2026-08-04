@@ -1,0 +1,70 @@
+import enum
+import uuid
+from datetime import datetime
+
+from sqlalchemy import Computed, DateTime, Enum, Float, ForeignKey, Integer, String, Uuid, func
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR
+from sqlalchemy.orm import Mapped, mapped_column
+
+from pgvector.sqlalchemy import Vector
+
+from app.models.base import Base
+
+
+class FactStatus(str, enum.Enum):
+    candidate = "candidate"
+    active = "active"
+    superseded = "superseded"
+    disputed = "disputed"
+    disabled = "disabled"
+    deleted = "deleted"
+
+
+class Fact(Base):
+    """Versioned, bitemporal memory fact (contract B.2)."""
+
+    __tablename__ = "facts"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+
+    # Full scope
+    org_id: Mapped[str] = mapped_column(String(128))
+    project_id: Mapped[str] = mapped_column(String(128))
+    subject_type: Mapped[str] = mapped_column(String(64), default="user")
+    subject_id: Mapped[str] = mapped_column(String(128))
+    agent_id: Mapped[str | None] = mapped_column(String(128))
+
+    predicate: Mapped[str] = mapped_column(String(128))
+    value: Mapped[dict] = mapped_column(JSONB)
+    qualifiers: Mapped[dict] = mapped_column(JSONB, default=dict)
+
+    status: Mapped[FactStatus] = mapped_column(
+        Enum(FactStatus, name="fact_status"), default=FactStatus.candidate
+    )
+    confidence: Mapped[float | None] = mapped_column(Float)
+
+    # Bitemporality
+    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recorded_from: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    recorded_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    supersedes_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("facts.id"))
+    source_event_ids: Mapped[list[uuid.UUID]] = mapped_column(
+        ARRAY(Uuid), default=list
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+    # Retrieval (sprint 2): dense embedding + pre-rendered full-text column.
+    # vector(384) since migration 0003 (default embedder: local fastembed,
+    # paraphrase-multilingual-MiniLM-L12-v2).
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(384))
+    search_text: Mapped[str | None] = mapped_column(String)
+    # Precomputed tsvector of search_text (generated column, migration 0004):
+    # ts_rank_cd reads it directly instead of re-parsing text on every query.
+    search_vector: Mapped[str | None] = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('simple', coalesce(search_text, ''))", persisted=True),
+    )

@@ -1,0 +1,129 @@
+---
+title: "Memory Consolidator"
+description: "Extraction LLM validée, dédup, supersession, conflits — app/consolidator/"
+---
+
+Le Consolidator (`app/consolidator/`) transforme des événements bruts en
+faits durables. Il tourne en arrière-plan (déclenché par
+`POST /v1/consolidate`, voir [Référence API](/fr/api-reference/consolidate))
+sur les jobs `consolidate` en attente (`pending` ou `failed` —
+rejouables).
+
+## Le pipeline, événement par événement
+
+<Steps>
+  <Step title="Extraction">
+    Pour chaque événement du job, l'extracteur LLM configuré
+    (`HAKI_LLM_PROVIDER=fake|openai`) reçoit l'événement **et** les faits
+    actifs déjà connus du sujet, pour pouvoir proposer `action: "supersede"`
+    plutôt que d'empiler des contradictions.
+  </Step>
+  <Step title="Validation Pydantic">
+    Chaque candidat brut est validé par `ExtractedFact.model_validate(...)`.
+    Un candidat invalide est **rejeté et journalisé**, jamais fatal — il
+    ne fait jamais planter le lot (`result["rejected"] += 1`).
+  </Step>
+  <Step title="Embedding">
+    Les candidats valides sont embarqués en un seul appel batch
+    (`embedder.embed(texts)`), texte = `f"{predicate} {json(value)}"`.
+    Les événements eux-mêmes sont aussi embarqués une fois (mémoire
+    épisodique, sprint 10), donnée dérivée recalculable — c'est la seule
+    écriture tolérée sur un événement après insertion.
+  </Step>
+  <Step title="Adjudication contre l'existant">
+    Voir la section dédiée ci-dessous : trouver le fait actif auquel
+    comparer le candidat.
+  </Step>
+  <Step title="Application">
+    Dédup, supersession ou création de conflit — voir « Les quatre issues »
+    ci-dessous.
+  </Step>
+</Steps>
+
+## Trouver le fait à adjuguer : exact puis sémantique
+
+`_resolve_existing_fact` cherche le fait actif du sujet à comparer au
+candidat :
+
+1. **Correspondance exacte de prédicat** (chemin rapide — le cas le plus
+   fréquent, quand l'extraction est lexicalement cohérente) ;
+2. **si aucune**, repli **sémantique** : le fait actif dont l'embedding est
+   le plus proche du candidat (distance cosinus), accepté seulement si la
+   distance est **≤ 0.28** (`SEMANTIC_MATCH_MAX_DISTANCE`).
+
+<Warning>
+  Ce seuil de 0.28 a été calibré **empiriquement** contre l'embedder réel
+  (`fastembed`, `paraphrase-multilingual-MiniLM-L12-v2`), pas déduit d'une
+  valeur de la littérature — `scripts/check_semantic_threshold.py`. Les
+  paires de même concept mesurées (`bike_count`/`bikes_owned`,
+  `personal_best_5k`/`goal_personal_best_time`,
+  `favorite_color`/`preferred_color`) se regroupent entre 0.09 et 0.23 ;
+  les paires non liées (y compris lexicalement proches, comme
+  `bike_count`/`car_count`) restent au-dessus de 0.35. Ce repli sémantique
+  a été ajouté après une mesure de **87.5 % de fuite de contradiction**
+  (contradiction leakage) sur l'échantillon d'évaluation sprint 10, causée
+  par un prédicat légèrement différent d'un appel à l'autre qui laissait
+  l'ancien fait, périmé, actif et servi en parallèle du nouveau.
+</Warning>
+
+## Les quatre issues d'un candidat
+
+<Steps>
+  <Step title="Duplicate">
+    Même `(subject, predicate, valeur canonique)` déjà présent parmi les
+    faits non supprimés → aucune nouvelle ligne. C'est aussi ce qui rend
+    le rejeu d'un job **idempotent**.
+  </Step>
+  <Step title="Supersede">
+    `action="supersede"` avec un fait existant trouvé : l'ancien fait
+    passe `active → superseded` (`valid_to = occurred_at` de l'événement
+    qui déclenche le changement), le nouveau devient `active` avec
+    `supersedes_id` pointant l'ancien. Les clés que le candidat **ne**
+    redéfinit **pas** sont reprises de l'ancien fait
+    (`value = {**existing.value, **candidate.value}`) — une mise à jour de
+    statut seule (`"researching" → "completed"`) ne doit pas faire perdre
+    silencieusement un champ comme `target` que le nouveau message ne
+    répète pas.
+  </Step>
+  <Step title="Conflict">
+    `action="create"` mais un fait actif existe déjà pour ce prédicat avec
+    une **valeur différente** : les deux faits entrent dans un
+    `ConflictSet` ouvert (créé ou complété), le nouveau reste `candidate`
+    — voir [Conflits](/fr/concepts/conflicts).
+  </Step>
+  <Step title="Create">
+    Aucun fait existant pour ce prédicat : le candidat passe directement
+    `candidate → active`.
+  </Step>
+</Steps>
+
+## Le scope vient toujours de l'événement
+
+Le `subject_id` (et tout le scope) d'un fait créé provient **toujours de
+l'événement source**, jamais du candidat renvoyé par le LLM — même si le
+schéma d'extraction porte encore un champ `subject_id` (conservé pour
+compatibilité arrière avec les providers existants). C'est l'invariant de
+sécurité « le modèle ne choisit jamais les scopes », appliqué ici à
+l'écriture : un candidat dont le `subject_id` dérive (le LLM nomme une
+personne au lieu de réutiliser le sujet de l'événement) créait
+silencieusement un fait sous un sujet orphelin, injoignable par tout appel
+`/v1/context` — un vrai bug de perte de données trouvé en auditant les
+résultats d'évaluation sprint 10 à l'échelle.
+
+## Résilience
+
+- Un échec provider ou base de données fait échouer **le job**
+  (`status=failed`, erreur dans `payload`), **jamais** les événements
+  source, qui restent intacts et rejouables au run suivant.
+- Chaque job est traité dans un **savepoint** (`session.begin_nested()`) :
+  un échec ne fait rollback que sur ce job, pas sur les autres du même
+  run.
+- Sur un **429** (rate limit) du provider LLM, le batch **s'arrête net**
+  plutôt que de continuer à échouer job après job : mesuré en conditions
+  réelles sur un run Groq free-tier (budget 6000 tokens/min épuisé au job
+  #3, jobs #4-19 échouant instantanément et gaspillant le retry/backoff de
+  l'appelant).
+
+<Card title="Référence API — Consolidation" icon="gears" href="/fr/api-reference/consolidate">
+  `POST /v1/consolidate` : déclenchement synchrone, dev/ops.
+</Card>

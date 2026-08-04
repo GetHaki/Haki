@@ -1,0 +1,148 @@
+---
+title: "Sécurité"
+description: "Clés API par projet, Policy Engine, Row-Level Security, ce que V1 ne fait pas — docs/SECURITY.md"
+---
+
+<Note>
+  Cette page reprend `docs/SECURITY.md`, qui fait autorité sur le modèle
+  de sécurité V1 (sprint 6). Le ton reste volontairement le même :
+  honnête sur ce qui est fait **et** sur ce qui ne l'est pas encore.
+</Note>
+
+## Modèle d'auth : clés API par projet
+
+Une clé (`hk_<hex>`) est liée à **un** `org_id` + **un** `project_id`.
+Seul le **hash sha256** est stocké (table `api_keys`, migration 0006) ; la
+clé en clair n'est retournée **qu'à la création**. Le `prefix` (8 premiers
+caractères) sert aux affichages masqués.
+
+- `HAKI_AUTH_REQUIRED=true` (**défaut**) : tout endpoint `/v1/*` (sauf
+  gestion des clés) et `/gateway/v1/*` exige
+  `Authorization: Bearer hk_...`. Clé absente, invalide ou révoquée →
+  **401 `unauthorized`**.
+- **Liaison de scope** : si le corps ou la query contient un `project_id`
+  différent de celui de la clé → **403 `forbidden_scope`**, message
+  générique, aucun indice sur l'existence d'autres projets. Vérifié sur
+  capture (`project_id` de chaque événement), context, feedback, forget,
+  resolve (corps) et timeline, inspect, conflicts (query).
+- **`/gateway/v1/*`** : même middleware, même clé. Le corps
+  chat-completions ne porte pas de `project_id` : le scope mémoire est
+  **celui de la clé**, sans exception. La clé Haki n'est **jamais**
+  transmise au provider LLM — l'appel en amont utilise uniquement les
+  credentials `HAKI_LLM_*` côté serveur.
+- `HAKI_AUTH_REQUIRED=false` = **mode dev ouvert**, documenté, jamais en
+  production : avertissement explicite loggué au démarrage (`haki.main`).
+
+### Gestion des clés
+
+| Endpoint | Description |
+|---|---|
+| `POST /v1/keys` | Création. `201` avec la clé en clair (unique affichage). |
+| `GET /v1/keys` | Liste **masquée** (prefix, jamais la clé ni le hash). |
+| `DELETE /v1/keys/{id}` | Révocation (`revoked_at`). Effet immédiat : 401 aux appels suivants. |
+
+Règles d'accès (V1, volontairement simples) :
+
+- **`HAKI_ADMIN_KEY` défini** → mode admin : toute la gestion des clés
+  exige `Authorization: Bearer <HAKI_ADMIN_KEY>`.
+- **Non défini** → **bootstrap documenté** : la **première** création
+  est libre (table vide). Ensuite, une clé valide gère les clés de **son
+  propre projet** — une clé d'un autre projet renvoie le même 404
+  `key_not_found` qu'un id inconnu, sans fuite.
+
+Détails complets : [Référence API — Clés](/fr/api-reference/keys).
+
+## Policy Engine V1 (`app/policy/`)
+
+Module **déterministe** (pas de LLM), appelé **avant** l'action par
+capture, context, forget et par le middleware d'auth. Trois règles en V1
+(pas de règles custom utilisateur — sprint ultérieur) :
+
+<Steps>
+  <Step title="Scope présent">
+    `subject_id` non vide sur chaque événement capturé (`missing_scope`,
+    cohérent avec le Ledger).
+  </Step>
+  <Step title="Clé ↔ projet">
+    La liaison de scope ci-dessus (403 `forbidden_scope`).
+  </Step>
+  <Step title="purpose recommandé sur context">
+    Warning `missing_purpose` dans le packet (et la trace persistée),
+    **pas** une erreur en V1.
+  </Step>
+</Steps>
+
+Chaque décision deny/warn est journalisée en ligne JSON structurée
+(`haki.policy`, `policy_decision {...}`) ; chaque oubli est audité.
+Erreurs typées : `unauthorized`, `forbidden_scope`, `missing_scope`,
+jamais de révélation cross-projet.
+
+## Row-Level Security (migration 0006)
+
+RLS activé + `FORCE ROW LEVEL SECURITY` sur `events`, `facts`,
+`context_traces`, `conflict_sets`, policy `haki_project_isolation` :
+
+```sql
+NULLIF(current_setting('haki.project_id', true), '') IS NULL
+OR project_id = current_setting('haki.project_id', true)
+```
+
+- La dépendance `get_session` pose `SELECT set_config('haki.project_id',
+  :pid, true)` (`SET LOCAL`, portée transaction) depuis la clé résolue
+  par l'auth. **Garantie PRD** : une requête qui oublie le filtre
+  `project_id` dans le code ne voit que les lignes du projet de la clé —
+  prouvée par `tests/test_rls.py` (`SELECT` sans `.where`, `INSERT`
+  cross-projet rejeté par le `WITH CHECK`).
+- **Mode dev ouvert** : pas de `SET`, GUC `NULL` → policy permissive.
+  C'est aussi le mode du worker interne et du serveur MCP (project **et**
+  subject fixés par config serveur — aucun des deux outils `haki_*`
+  n'accepte de `subject_id` en paramètre).
+- **`NULLIF(..., '')` est indispensable** : après un `SET LOCAL` annulé
+  en fin de transaction, Postgres laisse le GUC custom à `''` (pas
+  `NULL`), et les connexions mutualisées (pool) le réutilisent — sans ça,
+  toute connexion ayant servi une requête authentifiée cachait **toutes**
+  les lignes (bug trouvé en démo live, test de régression
+  `test_rls_empty_string_setting_is_permissive`).
+- **Deux rôles** : les migrations tournent avec le rôle propriétaire
+  `haki` (DDL) ; le **runtime** utilise `haki_app` (créé par la
+  migration, mot de passe `haki` — credential de dev local à remplacer en
+  déploiement), qui n'est **ni** superuser **ni** propriétaire. Un
+  superuser contourne RLS même avec `FORCE` : sans ce rôle dédié la
+  garantie serait factice. Config : `HAKI_DATABASE_URL` (runtime,
+  `haki_app`) et `HAKI_MIGRATION_DATABASE_URL` (alembic, `haki`).
+- `/v1/consolidate` reste un endpoint **dev/ops cross-projets** :
+  session sans contexte RLS (`get_session_ops`), documenté.
+
+## Feedback et résolution de conflits
+
+`POST /v1/feedback` : un `rating="incorrect"` sur un `fact_id` transitionne
+le fait vers **`disputed`** — le Context Assembler ne le sert plus comme
+actif. `POST /v1/conflicts/{id}/resolve` tranche une contradiction avec
+historique complet (l'ancien devient `superseded`, jamais supprimé). Voir
+[Feedback](/fr/api-reference/feedback) et
+[Conflits](/fr/api-reference/conflicts).
+
+## Secrets
+
+La clé LLM vit dans `.env` (ignoré par git, modèle fourni dans
+`.env.example`), jamais dans le code, le terminal ou le frontend.
+
+## Preuve multilingue
+
+`scripts/check_multilingual.py` (serveur lancé avec
+`HAKI_LLM_PROVIDER=openai`, embedder local
+`paraphrase-multilingual-MiniLM-L12-v2`) : capture FR + EN + ES pour un
+sujet, consolidation, requêtes croisées (EN→FR, FR→ES, ES→EN) —
+**3/3 PASS** au dernier run documenté. Les predicate/value extraits
+restent en anglais technique quelle que soit la langue d'entrée : voulu
+et documenté — la langue d'entrée ne contraint pas le schéma de faits,
+seule compte la fidélité sémantique.
+
+## Ce que V1 ne fait pas (bornes honnêtes)
+
+<Warning>
+  Pas de RBAC/rôles, pas d'OAuth, pas de BYOK, pas de règles policy
+  custom, pas de rate limiting — sprint entreprise ultérieur. L'auth MCP
+  reste le bearer de dev `HAKI_API_KEY`. n8n : credential Header Auth déjà
+  supportée, rien à changer.
+</Warning>

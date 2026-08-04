@@ -1,0 +1,120 @@
+---
+title: "POST /v1/capture"
+description: "Envoyer des événements — ingestion idempotente, ack immédiat"
+---
+
+Ingestion idempotente d'un lot d'événements. Répond **202** dès l'écriture
+faite ; la consolidation part en tâche de fond (job `pending`, traité par
+`POST /v1/consolidate` — voir [Consolidator](/fr/concepts/consolidator)).
+
+## Corps de la requête
+
+<ParamField body="events" type="EventIn[]" required>
+  Un ou plusieurs événements (`min_length=1`).
+
+  <Expandable title="champs de EventIn">
+    <ParamField body="org_id" type="string" required>1 à 128 caractères.</ParamField>
+    <ParamField body="project_id" type="string" required>1 à 128 caractères.</ParamField>
+    <ParamField body="subject_type" type="string" default="user">Max 64 caractères.</ParamField>
+    <ParamField body="subject_id" type="string">
+      Max 128 caractères. **Non marqué requis par Pydantic** mais validé
+      par le Ledger (`missing_scope` si vide) — pour produire une erreur
+      avec l'index exact de l'événement en cause dans le lot.
+    </ParamField>
+    <ParamField body="actor_type" type="string">Max 64 caractères.</ParamField>
+    <ParamField body="actor_id" type="string">Max 128 caractères.</ParamField>
+    <ParamField body="agent_id" type="string">Max 128 caractères.</ParamField>
+    <ParamField body="thread_id" type="string">Max 128 caractères.</ParamField>
+    <ParamField body="run_id" type="string">Max 128 caractères.</ParamField>
+    <ParamField body="kind" type="string" required>
+      1 à 128 caractères. Libre — ex. `conversation.message`,
+      `conversation.turn`, `agent.observation`.
+    </ParamField>
+    <ParamField body="occurred_at" type="datetime" required>ISO 8601.</ParamField>
+    <ParamField body="payload" type="object" required>Contenu libre.</ParamField>
+    <ParamField body="source" type="object">Provenance libre, ex. `{"tool": "mcp", "server": "haki"}`.</ParamField>
+    <ParamField body="classification" type="string[]" default="[]">Étiquettes libres.</ParamField>
+    <ParamField body="retention_policy" type="string">Max 128 caractères.</ParamField>
+    <ParamField body="idempotency_key" type="string">
+      Max 256 caractères. Clé par événement (voir [Memory Ledger](/fr/concepts/memory-ledger)
+      pour l'ordre de priorité avec la clé de lot).
+    </ParamField>
+  </Expandable>
+</ParamField>
+<ParamField body="idempotency_key" type="string">
+  Max 256 caractères. Clé de **lot** : namespacée par le hash de contenu
+  de chaque événement, donc plusieurs événements du même lot ne
+  collisionnent jamais entre eux.
+</ParamField>
+
+## Réponse — `202 Accepted`
+
+<ResponseField name="status" type="string" default="accepted" />
+<ResponseField name="events" type="CapturedEvent[]" required>
+  <Expandable title="champs">
+    <ResponseField name="id" type="uuid" required />
+    <ResponseField name="deduplicated" type="boolean" required>
+      `true` si cet événement existait déjà (même clé d'idempotence) — la
+      ligne renvoyée est l'originale, aucune nouvelle écriture.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+<ResponseField name="consolidation_job_id" type="uuid | null">
+  `null` si **tout** le lot était dupliqué — rien de nouveau à consolider.
+</ResponseField>
+<ResponseField name="policy" type="string">
+  La policy appliquée (`HAKI_DEFAULT_POLICY`, `"default"` en local).
+</ResponseField>
+
+<RequestExample>
+
+```bash curl
+curl -X POST http://localhost:8100/v1/capture \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer hk_..." \
+  -d '{
+    "idempotency_key": "demo-1",
+    "events": [{
+      "org_id": "org_acme", "project_id": "prj_support",
+      "subject_type": "user", "subject_id": "usr_42",
+      "kind": "conversation.message",
+      "occurred_at": "2026-08-01T10:00:00Z",
+      "payload": {"role": "user", "content": "Je préfère mes factures en français."},
+      "classification": ["customer-data"]
+    }]
+  }'
+```
+
+```python Python (SDK)
+client.capture(
+    events=[{
+        "org_id": "org_acme", "project_id": "prj_support",
+        "subject_type": "user", "subject_id": "usr_42",
+        "kind": "conversation.message",
+        "occurred_at": "2026-08-01T10:00:00Z",
+        "payload": {"role": "user", "content": "Je préfère mes factures en français."},
+    }],
+    idempotency_key="demo-1",
+)
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 202
+{
+  "status": "accepted",
+  "events": [{"id": "7c21e4c2-...", "deduplicated": false}],
+  "consolidation_job_id": "9b0f1a3e-...",
+  "policy": "default"
+}
+```
+
+</ResponseExample>
+
+## Erreurs possibles
+
+`missing_scope` (`subject_id` vide sur un événement — 422),
+`forbidden_scope` (un `project_id` d'événement ≠ celui de la clé — 403),
+`invalid_payload` (corps malformé — 422).

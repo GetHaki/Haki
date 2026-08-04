@@ -1,0 +1,183 @@
+---
+title: "POST /v1/context · GET /v1/inspect"
+sidebarTitle: "Context & Inspect"
+description: "The ContextPacket and its full decision trace"
+---
+
+## Asking for memory
+
+```http
+POST /v1/context
+```
+
+<ParamField body="project_id" type="string" required>1 to 128 characters.</ParamField>
+<ParamField body="subject_id" type="string" required>1 to 128 characters.</ParamField>
+<ParamField body="query" type="string" required>Non-empty.</ParamField>
+<ParamField body="purpose" type="string">
+  Max 128 characters. **Recommended, not required** in V1: its absence
+  adds a `missing_purpose` warning to the packet (Policy Engine rule 3),
+  never an error.
+</ParamField>
+<ParamField body="budget_tokens" type="integer" default="900">
+  Must be a positive integer — otherwise `budget_exceeded` (422).
+</ParamField>
+
+### Response — `200 OK`
+
+<ResponseField name="packet" type="ContextPacket" required>
+  <Expandable title="ContextPacket">
+    <ResponseField name="facts" type="PacketFact[]" required>
+      <Expandable title="PacketFact">
+        <ResponseField name="id" type="string" required />
+        <ResponseField name="predicate" type="string" required />
+        <ResponseField name="value" type="object" required />
+        <ResponseField name="confidence" type="number | null" />
+        <ResponseField name="valid_from" type="string | null" />
+        <ResponseField name="source_event_ids" type="string[]" required />
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="episodes" type="PacketEpisode[]" default="[]">
+      Episodic memory (sprint 10): the closest source events, under the
+      same budget.
+      <Expandable title="PacketEpisode">
+        <ResponseField name="event_id" type="string" required />
+        <ResponseField name="kind" type="string" required />
+        <ResponseField name="occurred_at" type="string | null" />
+        <ResponseField name="excerpt" type="string" required>Truncated to 300 characters.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="warnings" type="string[]" required>
+      E.g. `missing_purpose: ...`, `open_conflict: N fact(s) hidden pending conflict resolution`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+<ResponseField name="token_count" type="integer" required>
+  Actual packet total (facts + episodes), estimated as `max(1, len(text) // 4)`.
+</ResponseField>
+<ResponseField name="trace_id" type="uuid" required>
+  Inspectable via `GET /v1/inspect/{trace_id}`.
+</ResponseField>
+
+<RequestExample>
+
+```bash curl
+curl -X POST http://localhost:8100/v1/context \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer hk_..." \
+  -d '{
+    "project_id": "prj_support", "subject_id": "usr_42",
+    "query": "what language should the invoice be sent in?",
+    "budget_tokens": 900
+  }'
+```
+
+```python Python (SDK)
+response = client.context(
+    subject_id="usr_42",
+    query="what language should the invoice be sent in?",
+    project_id="prj_support",
+    budget_tokens=900,
+)
+```
+
+```typescript TypeScript (SDK)
+const { packet, trace_id } = await client.context({
+  subjectId: "usr_42",
+  query: "what language should the invoice be sent in?",
+  projectId: "prj_support",
+});
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200
+{
+  "packet": {
+    "facts": [{
+      "id": "f8a1c9de-...",
+      "predicate": "invoice_language",
+      "value": {"language": "fr"},
+      "confidence": 0.9,
+      "valid_from": "2026-08-01T10:00:00+00:00",
+      "source_event_ids": ["7c21e4c2-..."]
+    }],
+    "episodes": [],
+    "warnings": []
+  },
+  "token_count": 18,
+  "trace_id": "0587fc4f-74a1-46af-a592-5789d1269072"
+}
+```
+
+</ResponseExample>
+
+## Inspecting a trace
+
+```http
+GET /v1/inspect/{trace_id}
+```
+
+Scope is **required** in the query string and checked against the trace:
+it never leaks outside `(project_id, subject_id)`.
+
+<ParamField path="trace_id" type="uuid" required />
+<ParamField query="project_id" type="string" required />
+<ParamField query="subject_id" type="string" required />
+
+### Response — `200 OK`
+
+<ResponseField name="decisions" type="TraceDecision[]" required>
+  One entry **per fact or episode considered**, including the ones never
+  returned in the packet.
+  <Expandable title="TraceDecision">
+    <ResponseField name="fact_id" type="string | null" />
+    <ResponseField name="episode_id" type="string | null" />
+    <ResponseField name="action" type="string" required>
+      `included` · `excluded` · `blocked`
+    </ResponseField>
+    <ResponseField name="reason_code" type="string" required>
+      `top_score` · `over_budget` · `conflict_open` · `multi_hop_expansion`
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+<ResponseField name="packet" type="ContextPacket" required>The exact packet that was served.</ResponseField>
+<ResponseField name="query" type="string" required />
+<ResponseField name="purpose" type="string | null" />
+<ResponseField name="token_count" type="integer" required />
+
+<RequestExample>
+
+```bash curl
+curl "http://localhost:8100/v1/inspect/0587fc4f-74a1-46af-a592-5789d1269072?project_id=prj_support&subject_id=usr_42" \
+  -H "Authorization: Bearer hk_..."
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200
+{
+  "trace_id": "0587fc4f-74a1-46af-a592-5789d1269072",
+  "project_id": "prj_support",
+  "subject_id": "usr_42",
+  "query": "what language should the invoice be sent in?",
+  "purpose": null,
+  "packet": { "facts": [ /* ... */ ], "episodes": [], "warnings": [] },
+  "decisions": [
+    {"fact_id": "f8a1c9de-...", "episode_id": null, "action": "included", "reason_code": "top_score"}
+  ],
+  "token_count": 18
+}
+```
+
+</ResponseExample>
+
+## Possible errors
+
+`missing_scope` (422 — `project_id`/`subject_id` missing on
+`/v1/inspect`), `budget_exceeded` (422 — `budget_tokens ≤ 0`),
+`trace_not_found` (404 — unknown trace or outside scope),
+`forbidden_scope` (403).

@@ -1,0 +1,138 @@
+---
+title: "Context Assembler"
+description: "Hard filters, hybrid score, token budget, multi-hop expansion — app/context/"
+---
+
+The Context Assembler (`app/context/__init__.py`) builds the
+`ContextPacket` served by `POST /v1/context`: a hybrid retrieval over the
+facts of one exact scope, assembled under a token budget, with a decision
+trace persisted for **every** fact considered.
+
+## Hard filters, before any scoring
+
+Applied **before** score computation, never after:
+
+- `status = active` only;
+- exact `(project_id, subject_id)` scope;
+- `valid_to IS NULL OR valid_to > now()` — still business-valid;
+- a fact listed in an **open** `ConflictSet` is never served: it is
+  blocked with `reason_code = conflict_open`.
+
+## The hybrid score
+
+```text
+score = 0.6 × cosine similarity (pgvector embedding)
+      + 0.25 × full-text rank (ts_rank_cd, GENERATED search_vector column)
+      + 0.15 × recency (exponential decay, 30-day time constant)
+```
+
+<ResponseField name="0.6 — cosine similarity" type="pgvector">
+  `1 - cosine_distance(embedding, query_embedding)`, **hnsw** index.
+</ResponseField>
+<ResponseField name="0.25 — full text" type="PostgreSQL">
+  `ts_rank_cd(search_vector, websearch_to_tsquery('simple', query))`.
+  `search_vector` is a **generated** column (migration 0004): the
+  tsvector is built once at write time, never re-parsed per query.
+  `websearch_to_tsquery` accepts arbitrary user text (unlike
+  `to_tsquery`, which raises on a query without `&`/`|` operators).
+</ResponseField>
+<ResponseField name="0.15 — recency" type="exponential">
+  `exp(-Δt / τ)` with `τ = 30 days`,
+  `Δt = now() - coalesce(valid_from, recorded_from)`.
+</ResponseField>
+
+These weights are documented in the code but are **not part of the
+public contract** — they may change between versions without being
+treated as an API breaking change.
+
+## Two-phase retrieval
+
+Scoring **every** active fact of a scope costs ~200 ms at 10,000 facts
+(measured, sprint 3) — too slow for the critical path. Retrieval
+therefore happens in two steps:
+
+<Steps>
+  <Step title="Phase 1 — candidate generation via the indexes">
+    Union of two indexed queries, each capped at
+    `RETRIEVAL_TOP_K = 64` rows: the top-K by cosine distance (hnsw)
+    **UNION** the top-K by full-text rank (GIN).
+  </Step>
+  <Step title="Phase 2 — full score on the union only">
+    The full hybrid score is computed only on this union (≤ 128 rows),
+    then capped at `CANDIDATE_LIMIT = 256`. Only the columns needed for
+    packing are selected: decoding the 384-dim embedding of every
+    returned row costs more than the scoring itself (measured).
+  </Step>
+</Steps>
+
+<Warning>
+  Documented trade-off: a fact that is **neither** in the vector top-K
+  **nor** in the full-text top-K can never be served, even if recency
+  would have lifted it. Facts beyond `CANDIDATE_LIMIT` are not traced
+  either.
+</Warning>
+
+## Token budget
+
+`budget_tokens` (default **900**, must be a positive integer — otherwise
+`budget_exceeded`). Text is estimated as `max(1, len(text) // 4)`. Facts
+are packed **by decreasing score** until the budget is exhausted; the
+rest is excluded with `reason_code = over_budget`. Every decision
+(`included` / `excluded` / `blocked`) is written to `context_traces`.
+
+## Multi-hop expansion (sprint 10)
+
+After the main pack, if budget remains, a **second** full-text pass (no
+new embedding call) looks for facts linked by **shared entities** with
+the facts already kept — useful when two facts are related by a common
+name but not by semantic closeness to the original query.
+
+- Rule-based entity detection (no NER, no LLM): capitalized tokens
+  (regex `[A-ZÀ-Ý][a-zà-ÿ]{2,}`), ranked by frequency, excluding common
+  sentence-starter words (`the`, `le`, `and`, `et`…) and words already
+  present in the query.
+- Bounded: at most `MULTI_HOP_MAX_ENTITIES = 2` entities, at most
+  `MULTI_HOP_MAX_PER_ENTITY = 5` facts per entity, **one hop only**,
+  never recursive.
+- Marked `reason_code = multi_hop_expansion` in the trace.
+
+## Episodic memory
+
+After the facts, the `EPISODE_TOP_K = 8` closest **source events**
+(cosine, `events.embedding`, hnsw) of the same scope are packed into
+**the same budget** — facts first, episodes with what's left. This is
+what answers "what happened / when?" questions: the extractor keeps only
+durable facts, episodes keep the dated events.
+
+## The `ContextPacket`
+
+```json
+{
+  "facts": [
+    {
+      "id": "f8a1...",
+      "predicate": "invoice_language",
+      "value": {"language": "fr"},
+      "confidence": 0.9,
+      "valid_from": "2026-08-01T10:00:00+00:00",
+      "source_event_ids": ["7c21..."]
+    }
+  ],
+  "episodes": [
+    {
+      "event_id": "7c21...",
+      "kind": "conversation.message",
+      "occurred_at": "2026-08-01T10:00:00+00:00",
+      "excerpt": "conversation.message {\"content\": \"I prefer...\"}"
+    }
+  ],
+  "warnings": []
+}
+```
+
+A `open_conflict: N fact(s) hidden pending conflict resolution` warning
+appears as soon as at least one fact is blocked by an open conflict.
+
+<Card title="API reference — Context" icon="brain-circuit" href="/en/api-reference/context">
+  `POST /v1/context` and `GET /v1/inspect/{trace_id}`: exact schemas.
+</Card>

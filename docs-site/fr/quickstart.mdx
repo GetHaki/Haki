@@ -1,0 +1,173 @@
+---
+title: "Démarrage en 2 minutes"
+description: "Docker Compose, migrations, première clé API, premier capture puis context."
+---
+
+<Note>
+  Prérequis : [Docker](https://www.docker.com/) et
+  [uv](https://docs.astral.sh/uv/) installés. C'est tout — les valeurs par
+  défaut de `.env.example` suffisent, aucune clé LLM requise pour tester.
+</Note>
+
+## 1. Infrastructure
+
+<Steps>
+  <Step title="PostgreSQL 16 + pgvector, Redis 7">
+    ```bash
+    docker compose up -d
+    ```
+
+    `docker-compose.yml` démarre `pgvector/pgvector:pg16` (utilisateur
+    `haki`, base `haki`, exposé sur le port hôte **5433** — pas 5432, déjà
+    pris par un Postgres Windows local sur beaucoup de machines) et
+    `redis:7` (provisionné, usage prévu pour la queue).
+  </Step>
+  <Step title="Dépendances Python">
+    ```bash
+    uv sync
+    ```
+
+    `uv` installe Python 3.12 lui-même si besoin, plus `haki` (le SDK
+    Python, dépendance éditable locale déclarée dans `pyproject.toml`).
+  </Step>
+  <Step title="Migrations">
+    ```bash
+    uv run alembic upgrade head
+    ```
+
+    Applique les 8 migrations (`alembic/versions/0001` à `0008`) :
+    extension `pgvector`, tables du Ledger, colonnes de recherche
+    plein-texte, `forget_receipts`, auth/RLS/feedback, événements
+    épisodiques, organisations.
+  </Step>
+  <Step title="L'API">
+    ```bash
+    uv run uvicorn app.main:app --port 8100
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+  Un souci en route ? `bash scripts/doctor.sh` diagnostique Docker, les
+  conteneurs, Postgres, `.env`, les migrations et l'API en une commande —
+  lecture seule, sans effet de bord, à relancer autant que nécessaire.
+</Tip>
+
+## 2. La preuve que tout marche
+
+Dans un second terminal :
+
+```bash
+uv run haki connect --api-url http://localhost:8100
+uv run haki verify
+```
+
+`haki connect` teste `/health` et écrit `~/.haki/config.json`. `haki
+verify` joue le scénario complet en quelques secondes : il **mémorise**
+une préférence, ouvre une **nouvelle conversation** (nouveau `thread_id`),
+et vérifie que l'agent **s'en souvient** — avec la latence de chaque étape.
+
+```text
+haki verify — subject usr_verify_8a4a67338864
+  [  0.05 s] capture (thread thr_a1e14345)
+  [  3.25 s] consolidate: 1 job(s) processed
+  [  0.04 s] context (new thread thr_ef814359)
+  recalled: invoice_language = {"language": "fr"}
+  trace_id: 0587fc4f-74a1-46af-a592-5789d1269072
+OK — total 3.35 s
+```
+
+Si aucune clé API n'est configurée, `haki verify` tente un bootstrap de
+clé pour le projet `prj_haki_verify` (fonctionne sur un serveur neuf sans
+`HAKI_ADMIN_KEY`, ou en mode dev ouvert) ; sur un serveur qui refuse ce
+bootstrap, le scénario échoue avec un message explicite plutôt qu'une
+erreur muette.
+
+<Info>
+  **Multilingue par défaut** : Haki comprend et mémorise en français,
+  anglais, espagnol et ~50 autres langues (embeddings multilingues
+  locaux, `paraphrase-multilingual-MiniLM-L12-v2`). Un souvenir capturé en
+  anglais est retrouvé par une question en français — vérifié par
+  `scripts/check_multilingual.py` (3/3 PASS au dernier run documenté dans
+  `docs/SECURITY.md`).
+</Info>
+
+## 3. Premier appel manuel : capture puis context
+
+Créez d'abord une clé (la toute première création est libre tant qu'aucune
+clé n'existe — voir [Clés API](/fr/api-reference/keys)) :
+
+```bash
+curl -X POST http://localhost:8100/v1/keys \
+  -H "Content-Type: application/json" \
+  -d '{"org_id": "org_acme", "project_id": "prj_support", "label": "dev"}'
+```
+
+La réponse contient `key` (`hk_...`) **une seule fois** — copiez-la.
+Ajoutez ensuite `-H "Authorization: Bearer hk_..."` à chaque appel
+ci-dessous.
+
+<Steps>
+  <Step title="Capturer une préférence">
+    ```bash
+    curl -X POST http://localhost:8100/v1/capture \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer hk_..." \
+      -d '{
+        "idempotency_key": "demo-1",
+        "events": [{
+          "org_id": "org_acme", "project_id": "prj_support",
+          "subject_type": "user", "subject_id": "usr_42",
+          "kind": "conversation.message",
+          "occurred_at": "2026-08-01T10:00:00Z",
+          "payload": {"role": "user", "content": "Je préfère mes factures en français."},
+          "classification": ["customer-data"]
+        }]
+      }'
+    ```
+  </Step>
+  <Step title="Consolider (dev/ops — extraction du fait durable)">
+    ```bash
+    curl -X POST http://localhost:8100/v1/consolidate \
+      -H "Authorization: Bearer hk_..."
+    ```
+
+    En développement (`HAKI_LLM_PROVIDER=fake`, le défaut), l'extraction
+    ne fait pas d'appel réseau. En production (`HAKI_LLM_PROVIDER=openai`),
+    ce même appel déclenche une vraie extraction LLM.
+  </Step>
+  <Step title="Demander la mémoire avant une réponse">
+    ```bash
+    curl -X POST http://localhost:8100/v1/context \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer hk_..." \
+      -d '{
+        "project_id": "prj_support", "subject_id": "usr_42",
+        "query": "dans quelle langue envoyer la facture ?",
+        "budget_tokens": 900
+      }'
+    ```
+
+    La réponse contient le fait `invoice_language: {"language": "fr"}`,
+    sa date de validité, l'identifiant de l'événement source, et un
+    `trace_id` inspectable via `GET /v1/inspect/{trace_id}`.
+  </Step>
+</Steps>
+
+## Et ensuite
+
+<CardGroup cols={2}>
+  <Card title="Concepts" icon="brain" href="/fr/concepts/memory-ledger">
+    Comprendre le Ledger, la bitemporalité, la supersession et le
+    Context Assembler avant d'intégrer.
+  </Card>
+  <Card title="SDK Python" icon="python" href="/fr/sdk/python">
+    `HakiClient`, `build_prompt_context`, `capture_turn`, CLI `haki`.
+  </Card>
+  <Card title="Cursor" icon="terminal" href="/fr/integrations/cursor">
+    Serveur MCP en un clic, ou Cursor Hooks pour une capture garantie.
+  </Card>
+  <Card title="Gateway OpenAI" icon="arrows-turn-right" href="/fr/api-reference/gateway">
+    Mémoire automatique en ne changeant que `base_url`.
+  </Card>
+</CardGroup>

@@ -1,0 +1,54 @@
+---
+title: "Production Guarantees"
+description: "What Haki actually guarantees today, each one citing the mechanism and the test that proves it"
+---
+
+<Note>
+  Every line below is true **in today's code**, not a marketing promise.
+  Nothing is published without a test that proves it. What Haki does not
+  yet guarantee is stated just as clearly, at the bottom of this page.
+</Note>
+
+## The guarantees
+
+| # | Guarantee | Mechanism | Proof |
+|---|---|---|---|
+| 1 | A superseded fact is never served as current | Supersession + validity filter at scoring time (`app/context/__init__.py`) | `tests/test_context.py` |
+| 2 | No memory ever crosses a project or subject boundary | PostgreSQL Row-Level Security, enforced even for the application role `haki_app` | `tests/test_rls.py` |
+| 3 | An unresolved contradiction is never served without a flag | Conflict sets (`app/models/conflict.py`, `app/api/routes/conflicts.py`) | `tests/test_conflict_resolve.py` |
+| 4 | Every served fact carries its source and version | Provenance (source event, timestamps) exposed by `/v1/inspect` (`app/api/routes/inspection.py`) | `tests/test_inspection.py` |
+| 5 | No retrieval failure is silent | Explicit `ok`\|`degraded`\|`failed` status on `ContextPacket`, propagated to the gateway, the MCP server, and both SDKs | `tests/test_mcp.py`, `tests/test_episodes.py` |
+| 6 | Every erasure is propagated and proven by a timestamped receipt | `forget_receipts` (`app/ledger/forget.py`, `app/models/receipt.py`) | `tests/test_forget.py` |
+| 7 | A fact can never be an unsourced imperative instruction | `imperative_directive` rule: a deterministic net in addition to the prompt instruction (`app/consolidator/__init__.py`) | `tests/test_consolidator.py` |
+
+## What this means concretely
+
+**Guarantee 5, the newest one.** Until tonight, only the Gateway could say
+"I could not retrieve your memory" (the `X-Haki-Memory: degraded` header).
+The rest of the system could fail silently: an empty packet on arrival was
+indistinguishable from a subject who simply has no memories yet. The
+`ok`/`degraded`/`failed` status now lives on the `ContextPacket` itself, so
+everything that consumes it does too — the Python SDK, the TypeScript SDK,
+the MCP server — not just the Gateway.
+
+**Guarantee 7.** A fact cannot be a directive like "ignore previous
+instructions" or "always treat X as trustworthy" that would replay itself
+into a future context as if it were a system instruction. The rule is
+deliberately narrow (it does not replace a full defense against untrusted
+third-party content injection — Haki does not yet ingest external
+documents) but it is deterministic: it applies even if the extraction model
+does not comply with the prompt instruction.
+
+## What Haki does not guarantee yet
+
+Two things, deliberately left off this page so nothing gets published
+without being measured:
+
+- **No guarantee on fact staleness without a correcting event** (e.g. a
+  customer moves and never mentions it). Supersession only triggers on a
+  received contradicting event — a volatility class per fact type does not
+  exist yet.
+- **No numeric freshness SLO** (e.g. "a contradiction stops being served in
+  under 5 minutes p95"). Nothing like this has ever been measured under
+  real production conditions — publishing it today would be a fabricated
+  number, exactly what this page refuses to do.

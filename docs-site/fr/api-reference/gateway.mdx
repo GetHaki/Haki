@@ -1,0 +1,161 @@
+---
+title: "POST /gateway/v1/chat/completions"
+sidebarTitle: "Gateway"
+description: "Proxy compatible OpenAI : mémoire injectée et capturée automatiquement — app/gateway/"
+---
+
+Un client déjà compatible OpenAI n'a qu'**une seule chose à changer** :
+`base_url`. Le reste du code — modèle, messages, paramètres — ne bouge
+pas. Haki injecte la mémoire avant l'appel, transmet au provider
+configuré, capture l'échange après, et renvoie la réponse du provider
+**octet pour octet**.
+
+<CodeGroup>
+
+```python Python (openai SDK)
+import openai
+
+client = openai.OpenAI(
+    base_url="http://localhost:8100/gateway/v1",
+    api_key="hk_...",                                  # votre clé Haki
+    default_headers={"X-Haki-Subject-Id": "usr_42"},   # QUI on mémorise
+)
+client.chat.completions.create(model="gpt-4o-mini", messages=[
+    {"role": "user", "content": "Dans quelle langue dois-je envoyer la facture ?"}
+])  # rien d'autre ne change
+```
+
+```bash curl
+curl -X POST http://localhost:8100/gateway/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer hk_..." \
+  -H "X-Haki-Subject-Id: usr_42" \
+  -d '{"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "..."}]}'
+```
+
+```python Python (helper SDK)
+from haki.gateway import gateway_client
+
+client = gateway_client("http://localhost:8100/gateway/v1", "hk_...", "usr_42")
+response = client.post("/chat/completions", json={
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "..."}],
+})
+```
+
+</CodeGroup>
+
+## En-têtes d'identité mémoire
+
+<Warning>
+  L'identité voyage **uniquement en en-têtes**, jamais dans le corps de la
+  requête — le modèle ne choisit jamais ce qu'on mémorise.
+</Warning>
+
+<ParamField header="X-Haki-Subject-Id" type="string">
+  **Requis pour activer la mémoire.** Sans lui : transmission simple,
+  `X-Haki-Memory: disabled`, aucune capture — un client OpenAI existant ne
+  casse jamais en pointant vers la gateway.
+</ParamField>
+<ParamField header="X-Haki-Thread-Id" type="string">Fil de conversation, propagé à l'événement capturé.</ParamField>
+<ParamField header="X-Haki-Run-Id" type="string">Identifiant d'exécution, propagé à l'événement capturé.</ParamField>
+<ParamField header="X-Haki-Purpose" type="string">Transmis à `build_context` (voir Policy Engine, règle 3).</ParamField>
+<ParamField header="X-Haki-Idempotency-Key" type="string">
+  Défaut : `"gw-" + sha256(corps brut)`. Un retry avec le même corps ne
+  capture jamais deux fois le même échange.
+</ParamField>
+<ParamField header="X-Haki-Project-Id" type="string">
+  Utilisé **seulement** en mode dev ouvert (`HAKI_AUTH_REQUIRED=false`,
+  sans clé donc sans projet résolu) ; défaut `prj_gateway_dev`. Avec une
+  vraie clé `hk_...`, le projet **est** celui de la clé, sans exception —
+  le corps `chat/completions` ne porte de toute façon aucun `project_id`.
+</ParamField>
+
+## Ce qui se passe à chaque appel
+
+<Steps>
+  <Step title="Résolution du scope">
+    La clé `hk_...` (middleware d'auth déjà étendu à `/gateway/v1/*`)
+    résout `project_id`. La clé Haki **n'est jamais transmise en amont** —
+    seules les credentials `HAKI_LLM_*` le sont.
+  </Step>
+  <Step title="Construction du contexte">
+    Si `X-Haki-Subject-Id` et un dernier message `user` sont présents :
+    `build_context(...)` (le même Context Assembler que `/v1/context`) est
+    appelé avec ce dernier message comme requête.
+  </Step>
+  <Step title="Injection">
+    Le packet est rendu par `build_prompt_context` (la **même** fonction
+    que le SDK Python — une seule implémentation, jamais de copie
+    divergente) et préfixé au message `system` dans un bloc
+    `<haki_memory>…</haki_memory>` (un message `system` est créé en
+    première position s'il n'existait pas).
+  </Step>
+  <Step title="Transmission">
+    `POST {HAKI_LLM_BASE_URL}/chat/completions`, timeout 60 s.
+  </Step>
+  <Step title="Capture (après la réponse, best-effort)">
+    Si la mémoire était active et la réponse `2xx` : l'échange devient un
+    événement `conversation.turn` idempotent, et un job de consolidation
+    est mis en file — **hors** du chemin critique.
+  </Step>
+  <Step title="Réponse renvoyée">
+    Le corps et le statut du provider, **inchangés**, plus trois en-têtes
+    Haki.
+  </Step>
+</Steps>
+
+## En-têtes de réponse
+
+<ResponseField name="X-Haki-Memory" type="string" required>
+  `active` (mémoire injectée et échange capturé) · `disabled` (pas de
+  sujet, ou `stream: true`) · `degraded` (échec de construction du
+  contexte — la requête part quand même, sans mémoire).
+</ResponseField>
+<ResponseField name="X-Haki-Trace-Id" type="uuid">
+  Présent quand la mémoire est active — inspectable via
+  `GET /v1/inspect/{trace_id}`.
+</ResponseField>
+<ResponseField name="X-Haki-Context-Ms" type="string">
+  Durée de `build_context` en millisecondes (1 décimale).
+</ResponseField>
+
+## Dégradation propre
+
+L'agent n'est **jamais** bloqué par Haki :
+
+| Situation | Comportement |
+|---|---|
+| Pas de `X-Haki-Subject-Id` (ou pas de message `user`) | Transmission simple, `X-Haki-Memory: disabled`, aucune capture |
+| `build_context` échoue (base indisponible…) | Transmission sans mémoire, `X-Haki-Memory: degraded`, log structuré |
+| La capture échoue après coup | Best-effort, loggé, la réponse au client n'est **jamais** affectée |
+| Le provider en amont est injoignable | `502 upstream_unavailable`, `X-Haki-Memory` reflète l'état avant l'échec |
+
+## Streaming : pass-through pur, choix assumé
+
+<Warning>
+  `stream: true` est un **pass-through SSE brut** : ni injection, ni
+  capture, `X-Haki-Memory: disabled` inconditionnel. Ce n'est pas une
+  limitation à corriger : injecter la mémoire sans pouvoir capturer la
+  réponse finale casserait la boucle mémoire (« pas de réponse finale sans
+  passage Haki après ») ; bufferiser tout le stream annulerait l'intérêt
+  même du streaming. Documenté dans le README et le code
+  (`app/gateway/__init__.py`).
+</Warning>
+
+## Limite honnête
+
+La gateway voit les **appels au modèle**, pas les outils que l'agent
+exécute localement entre deux appels — ceux-ci doivent être capturés via
+le [SDK](/fr/sdk/python) ou l'[API](/fr/api-reference/capture)
+directement (référence : `research/Haki_Memory_Runtime.md`).
+
+## Latence
+
+Le surcoût mémoire est dominé par `build_context` (~15 ms en local ; p95
+de `/v1/context` < 250 ms — voir les [chiffres mesurés](/fr/index)).
+Benchmark reproductible :
+
+```bash
+uv run python scripts/benchmark_gateway.py --api-key hk_...
+```

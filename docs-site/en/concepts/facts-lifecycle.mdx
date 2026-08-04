@@ -1,0 +1,86 @@
+---
+title: "Facts and lifecycle"
+description: "Statuses, allowed transitions and fields of a fact (Fact, app/models/fact.py)"
+---
+
+A **fact** (`Fact`, table `facts`) is what Haki considers true at a given
+moment: "invoices are in French." Unlike an event, a fact is
+**versioned** and **mutated** over time — through explicit status
+transitions, never through silent overwrite.
+
+## The six statuses
+
+<ResponseField name="candidate" type="FactStatus">
+  Created by the Consolidator, not yet active. Initial state of every new
+  fact (`create_fact`, `status=candidate`, `version=1`).
+</ResponseField>
+<ResponseField name="active" type="FactStatus">
+  Served by `/v1/context`. One active fact per `(subject, predicate)`
+  under normal operation.
+</ResponseField>
+<ResponseField name="superseded" type="FactStatus">
+  Replaced by a more recent fact (`supersedes_id` points to the new one).
+  Stays in history, **never served as current again**.
+</ResponseField>
+<ResponseField name="disputed" type="FactStatus">
+  Disputed — either via `POST /v1/feedback` with `rating=incorrect`, or as
+  the losing side of an unresolved conflict. Not served by the Context
+  Assembler (status filter).
+</ResponseField>
+<ResponseField name="disabled" type="FactStatus">
+  Forgotten **reversibly** (`POST /v1/forget`, `mode=disable`).
+</ResponseField>
+<ResponseField name="deleted" type="FactStatus">
+  Real erasure, **terminal** — no outgoing transition is allowed. Also
+  sets `recorded_to` (system bitemporal end).
+</ResponseField>
+
+## Allowed transition graph
+
+Enforced by `transition_fact_status` (`app/ledger/core.py`); any attempt
+outside this graph raises `illegal_status_transition` (422).
+
+```text
+candidate  → active, superseded, disputed, disabled, deleted
+active     → superseded, disputed, disabled, deleted
+superseded → disputed, deleted
+disputed   → active, superseded, disabled, deleted
+disabled   → active, deleted
+deleted    → (terminal, no outgoing transition)
+```
+
+<Note>
+  `candidate → superseded` exists specifically for **conflict
+  resolution** (sprint 6): the losing fact of a `ConflictSet` is
+  typically still `candidate`, and resolving the set moves it straight to
+  `superseded` — see [Conflicts](/en/concepts/conflicts).
+</Note>
+
+Every transition increments `version` by 1.
+
+## Full fields of a fact
+
+Full read view (`FactOut`, used by `GET /v1/facts`):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `predicate` | string | The fact's name, e.g. `invoice_language` — chosen by the LLM extractor, not a closed enum |
+| `value` | object | The value, e.g. `{"language": "fr"}` |
+| `qualifiers` | object | Additional extracted metadata, free-form |
+| `status` | enum | One of the six statuses above |
+| `confidence` | float \| null | Extraction confidence, if provided by the provider |
+| `valid_from` / `valid_to` | datetime \| null | Business bitemporality |
+| `recorded_from` / `recorded_to` | datetime | System bitemporality |
+| `supersedes_id` | uuid \| null | The fact this one replaces |
+| `source_event_ids` | uuid[] | Exact provenance — the event(s) that produced this fact |
+| `version` | int | Incremented on every transition |
+
+The **predicate is not a guaranteed stable key**: two different phrasings
+of the same concept (`bike_count` vs `bikes_owned`) can coexist if the
+extractor names them differently across calls. That is exactly the
+problem the Consolidator's semantic matching solves — see
+[Consolidator](/en/concepts/consolidator).
+
+<Card title="API reference — Facts and traces" icon="list" href="/en/api-reference/memory-read">
+  `GET /v1/facts`, status filtering, 200-row limit.
+</Card>

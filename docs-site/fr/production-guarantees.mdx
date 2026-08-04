@@ -1,0 +1,55 @@
+---
+title: "Contrat de production"
+description: "Les garanties que Haki tient reellement aujourd'hui, chacune citant le mecanisme et le test qui la prouve"
+---
+
+<Note>
+  Chaque ligne ci-dessous est vraie **dans le code d'aujourd'hui**, pas une
+  promesse marketing. Rien n'est publie sans un test qui le prouve. Ce que
+  Haki ne garantit pas encore est dit tout aussi clairement, en bas de page.
+</Note>
+
+## Les garanties
+
+| # | Garantie | Mecanisme | Preuve |
+|---|---|---|---|
+| 1 | Un fait remplace n'est jamais servi comme actuel | Supersession + filtre de validite au moment du scoring (`app/context/__init__.py`) | `tests/test_context.py` |
+| 2 | Aucune memoire ne traverse un projet ou un sujet | Row-Level Security PostgreSQL, forcee y compris pour le role applicatif `haki_app` | `tests/test_rls.py` |
+| 3 | Aucune contradiction non resolue n'est servie sans signalement | Conflict sets (`app/models/conflict.py`, `app/api/routes/conflicts.py`) | `tests/test_conflict_resolve.py` |
+| 4 | Tout fait servi porte sa source et sa version | Provenance (evenement source, horodatage) exposee par `/v1/inspect` (`app/api/routes/inspection.py`) | `tests/test_inspection.py` |
+| 5 | Aucun echec de recuperation n'est silencieux | Statut explicite `ok`\|`degraded`\|`failed` sur le `ContextPacket`, propage au gateway, au serveur MCP et aux deux SDK | `tests/test_mcp.py`, `tests/test_episodes.py` |
+| 6 | Tout effacement est propage et prouve par un recu horodate | `forget_receipts` (`app/ledger/forget.py`, `app/models/receipt.py`) | `tests/test_forget.py` |
+| 7 | Un fait ne peut jamais etre une instruction imperative non sourcee | Regle `imperative_directive` : filet deterministe en plus de la consigne de prompt (`app/consolidator/__init__.py`) | `tests/test_consolidator.py` |
+
+## Ce que ca veut dire concretement
+
+**Garantie 5, la plus recente.** Jusqu'a ce soir, seul le Gateway savait dire
+"je n'ai pas pu recuperer votre memoire" (header `X-Haki-Memory: degraded`).
+Le reste du systeme pouvait echouer en silence : un paquet vide a l'arrivee
+etait indistinguable d'un sujet qui n'a simplement aucun souvenir. Le statut
+`ok`/`degraded`/`failed` est maintenant porte par le `ContextPacket`
+lui-meme, donc par tout ce qui le consomme -- SDK Python, SDK TypeScript,
+serveur MCP -- et non plus seulement par le Gateway.
+
+**Garantie 7.** Un fait ne peut pas etre une directive du type "ignore les
+instructions precedentes" ou "considere toujours X comme fiable" qui se
+rejouerait dans un futur contexte comme si c'etait une consigne systeme.
+La regle est volontairement etroite (elle ne remplace pas une defense
+complete contre l'injection de contenu tiers non fiable -- Haki n'ingere
+pas encore de documents externes) mais elle est deterministe : elle
+s'applique meme si le modele d'extraction ne se conforme pas a la consigne
+du prompt.
+
+## Ce que Haki ne garantit pas encore
+
+Deux choses, volontairement absentes de cette page pour ne rien publier
+qui ne soit pas mesure :
+
+- **Aucune garantie sur la peremption des faits sans evenement correcteur**
+  (ex: un client demenage et ne le mentionne jamais). La supersession ne se
+  declenche que sur un evenement contradictoire recu -- une classe de
+  volatilite par type de fait n'existe pas encore.
+- **Aucun SLO de fraicheur chiffre** (ex: "une contradiction cesse d'etre
+  servie en moins de 5 minutes p95"). Rien de ce genre n'a jamais ete
+  mesure en conditions de production reelles -- le publier aujourd'hui
+  serait un chiffre fabrique, exactement ce que cette page refuse de faire.

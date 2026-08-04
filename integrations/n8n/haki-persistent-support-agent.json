@@ -1,0 +1,273 @@
+{
+  "name": "Haki Persistent Support Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Haki Persistent Support Agent\n\nMémoire long-terme pour cet agent, sans Qdrant/Supabase/Data Table à configurer.\n\n**Chaîne imposée :** Webhook → **Haki Context** (toujours AVANT l'agent) → AI Agent → **Haki Capture** (toujours APRÈS l'agent) → Respond.\n\n**Payload du webhook :** `{\"subject_id\": \"usr_123\", \"message\": \"...\"}`\n\n**Règle d'or du subject :** `subject_id` est obligatoire, jamais vide, jamais `default`. Le nœud « Subject valide ? » rejette la requête sinon (HTTP 400). Une mémoire durable sans identité stable est une mémoire dangereuse.",
+        "height": 300,
+        "width": 420,
+        "color": 4
+      },
+      "id": "a1b2c3d4-0001-4000-8000-haki00000001",
+      "name": "Note — Principe",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-460, -420]
+    },
+    {
+      "parameters": {
+        "content": "## Seulement 3 choses à configurer\n\n**1. Credential Haki (header)** — les deux nœuds HTTP Request utilisent *Header Auth* : crée une credential avec Name = `Authorization`, Value = `Bearer <ta clé Haki>`.\nEn dev local sans `HAKI_API_KEY` côté serveur, tu peux passer l'authentification des deux nœuds sur *None*.\n\n**2. Credential LLM** — sur le nœud *OpenAI Chat Model* : ta clé OpenAI ou OpenRouter (base URL déjà pré-remplie : `https://openrouter.ai/api/v1`, modèle `gpt-4o-mini`).\n\n**3. Mapping du subject** — le template lit `{{ $json.body.subject_id }}` du webhook. Adapte l'expression à ta source : `sessionId`, email, ID Telegram/WhatsApp… mais jamais une constante partagée.\n\n**Base URL Haki :** les nœuds HTTP pointent `http://localhost:8100`. Si n8n tourne dans Docker et l'API Haki sur la machine hôte : `http://host.docker.internal:8100`.",
+        "height": 460,
+        "width": 420,
+        "color": 5
+      },
+      "id": "a1b2c3d4-0002-4000-8000-haki00000002",
+      "name": "Note — Configuration",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [0, -420]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "haki-support-agent",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0010-4000-8000-haki00000010",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-460, -60],
+      "webhookId": "haki-support-agent"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "cond-subject-not-empty",
+              "leftValue": "={{ $json.body.subject_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "cond-subject-not-default",
+              "leftValue": "={{ $json.body.subject_id }}",
+              "rightValue": "default",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0011-4000-8000-haki00000011",
+      "name": "Subject valide ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [-240, -60]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { error: \"subject_id obligatoire : fournis un identifiant stable (non vide, différent de 'default') dans le payload du webhook\" } }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "id": "a1b2c3d4-0012-4000-8000-haki00000012",
+      "name": "Rejeter — subject manquant",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [0, 120]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:8100/v1/context",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { project_id: \"prj_support_dev\", subject_id: $(\"Webhook\").item.json.body.subject_id, query: $(\"Webhook\").item.json.body.message, budget_tokens: 900, purpose: \"support\" } }}",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Haki API (Header Auth)"
+        }
+      },
+      "id": "a1b2c3d4-0013-4000-8000-haki00000013",
+      "name": "Haki Context",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [0, -160]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $(\"Webhook\").item.json.body.message }}",
+        "options": {
+          "systemMessage": "=Tu es un agent support. Tu disposes d'une mémoire long-terme Haki sur cette personne : préfère ces faits vérifiés à tes propres suppositions et cite-les quand tu les utilises.\n\n{{ $json.packet.facts.length ? \"<haki_memory>\\n\" + $json.packet.facts.map((f) => \"- \" + f.predicate + \": \" + JSON.stringify(f.value) + \" (valid from \" + (f.valid_from || \"unknown date\") + \"; sources: \" + (f.source_event_ids.join(\",\") || \"no-source\") + \")\").join(\"\\n\") + ($json.packet.warnings.length ? \"\\n\" + $json.packet.warnings.map((w) => \"! \" + w).join(\"\\n\") : \"\") + \"\\n</haki_memory>\" : \"(Aucune mémoire enregistrée pour l'instant.)\" }}"
+        }
+      },
+      "id": "a1b2c3d4-0014-4000-8000-haki00000014",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
+      "position": [240, -160]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-4o-mini"
+        },
+        "options": {
+          "baseURL": "https://openrouter.ai/api/v1"
+        }
+      },
+      "credentials": {
+        "openAiApi": {
+          "id": null,
+          "name": "OpenRouter (credential LLM)"
+        }
+      },
+      "id": "a1b2c3d4-0015-4000-8000-haki00000015",
+      "name": "OpenAI Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [240, 40]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:8100/v1/capture",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { events: [ { org_id: \"org_default\", project_id: \"prj_support_dev\", subject_type: \"user\", subject_id: $(\"Webhook\").item.json.body.subject_id, agent_id: \"n8n\", kind: \"conversation.turn\", occurred_at: $now.toISO(), payload: { messages: [ { role: \"user\", content: $(\"Webhook\").item.json.body.message }, { role: \"assistant\", content: $(\"AI Agent\").item.json.output } ] }, source: { integration: \"n8n\", template: \"haki-persistent-support-agent\" }, idempotency_key: \"n8n-turn-\" + $execution.id } ] } }}",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Haki API (Header Auth)"
+        }
+      },
+      "id": "a1b2c3d4-0016-4000-8000-haki00000016",
+      "name": "Haki Capture",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, -160]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { reply: $(\"AI Agent\").item.json.output, trace_id: $(\"Haki Context\").item.json.trace_id } }}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0017-4000-8000-haki00000017",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [700, -160]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Subject valide ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Subject valide ?": {
+      "main": [
+        [
+          {
+            "node": "Haki Context",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Rejeter — subject manquant",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Haki Context": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Haki Capture",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Haki Capture": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "pinData": {}
+}

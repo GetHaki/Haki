@@ -1,0 +1,241 @@
+---
+title: "Cursor — MCP and Hooks"
+description: "MCP server (4 tools) and Cursor Hooks (guaranteed capture) — app/mcp_server/, sdk/python/src/haki/hooks_setup.py"
+---
+
+Haki ships **two** complementary Cursor integration mechanisms, both
+installable together: the **MCP server** (the agent chooses to call
+tools) and **Cursor Hooks** (Cursor invokes commands automatically, with
+no cooperation from the model required). Both are packaged by the `haki`
+CLI — pure generation, nothing is ever written to disk on your behalf.
+
+## MCP server — 4 tools, never more
+
+Mounted inside the FastAPI app itself on `/mcp` (Streamable HTTP
+transport) — a single server to run.
+
+```bash
+uv run haki mcp   # prints the deeplink, the mcp.json and the Project Rule
+```
+
+<Steps>
+  <Step title="Click the deeplink">
+    `Add Haki to Cursor` — installs the MCP server in one click.
+  </Step>
+  <Step title="Paste the Project Rule">
+    Into `.cursor/rules/haki.mdc` — tells the agent **when** to
+    memorize and **when** to recall.
+  </Step>
+  <Step title="That's it">
+    Cursor retains your decisions, conventions and resolved errors
+    **across sessions**.
+  </Step>
+</Steps>
+
+### The four tools
+
+<ResponseField name="haki_context" type="query, budget_tokens=900">
+  Recalls the project memory relevant to a task. Call it **before**
+  planning or editing code. Returns a ready-to-inject block (`context`),
+  the raw facts, warnings, `token_count` and `trace_id`.
+</ResponseField>
+<ResponseField name="haki_capture" type="content, kind='agent.observation'">
+  Memorizes a durable fact: a technical decision, a convention, a
+  resolved error. Call it at the **end** of a task. Idempotent by content
+  (`sha256(kind + content)`, no timestamp) — calling it twice with the
+  same memory never creates a duplicate. Consolidation is **synchronous
+  in dev** (`HAKI_MCP_AUTOCONSOLIDATE=true`, default), so the fact is
+  immediately recallable.
+</ResponseField>
+<ResponseField name="haki_inspect" type="trace_id">
+  Why a memory was used: which facts were included, excluded or blocked,
+  and each one's `reason_code`.
+</ResponseField>
+<ResponseField name="haki_forget" type="mode='disable'">
+  Forgets **all** memory of the subject configured for this server, in
+  this project. `mode="disable"` (reversible) or `mode="delete"` (real
+  erasure). Returns the receipt (`forget_id`) and the counters.
+</ResponseField>
+
+<Warning>
+  No tool accepts a `subject_id` parameter. Scope (**both**
+  `project_id` and `subject_id`) comes **entirely** from server
+  configuration (`HAKI_MCP_PROJECT_ID`, `HAKI_MCP_SUBJECT_ID`), never
+  from the model — this is the "the client must not let the model choose
+  these values" security invariant. A team sharing one Cursor deployment
+  needs **one server configuration per person**, exactly the same way
+  every install already gets its own project.
+</Warning>
+
+### Configuration
+
+| Variable | Default | Role |
+|---|---|---|
+| `HAKI_MCP_PROJECT_ID` | `prj_cursor_dev` | The server's fixed project |
+| `HAKI_MCP_ORG_ID` | `org_cursor_dev` | Fixed organization |
+| `HAKI_MCP_SUBJECT_ID` | `usr_cursor_dev` | Fixed subject — personalize per developer |
+| `HAKI_MCP_AUTOCONSOLIDATE` | `true` | Synchronous consolidation after every `haki_capture` |
+| `HAKI_API_KEY` | empty | If set, `/mcp` requires `Authorization: Bearer <key>` (legacy dev auth, sprint 4 — distinct from `hk_...` keys) |
+
+### Honest limit, measured not promised
+
+<Warning>
+  MCP does not intercept 100% of Cursor conversations: the server only
+  sees the tool calls **Cursor decides to make**. The Project Rule
+  instructs the agent on the *when* — actual coverage is measured, never
+  promised (see `research/Haki_Memory_Runtime.md`).
+</Warning>
+
+This is exactly the gap that **Cursor Hooks**, below, close for capture:
+they depend on no cooperation from the model at all.
+
+---
+
+## Cursor Hooks — guaranteed capture and session recall
+
+<Info>
+  Added and **tested against a real, running local server**
+  (`prj_demo`/`org_demo`): `haki hooks` writes nothing to disk;
+  `hook-session-start` correctly writes `haki-session.mdc` with the real
+  memorized content (a fact + an episode recalled via `/v1/context`), and
+  the "nothing memorized yet" fallback for a blank subject;
+  `hook-capture` creates an `agent.observation` event retrievable via
+  `/v1/timeline`, deduplicated when replayed with the same
+  `conversation_id`/`generation_id`; the fail-open contract was verified
+  across 6 scenarios (unreachable API, no config, invalid stdin JSON,
+  empty stdin, empty text, `.mdc` write failure) — always
+  `stdout "{}"` and exit code 0.
+</Info>
+
+```bash
+uv run haki hooks --subject-id usr_dev --project-id prj_demo --org-id org_demo
+```
+
+Prints three blocks to paste (pure generation, never an automatic write —
+same principle as `haki mcp`): the `.cursor/hooks.json`, the initial
+`.cursor/rules/haki-session.mdc` template, and the install instructions.
+
+### Why this mechanism exists alongside MCP
+
+Cursor Hooks are **local processes** that Cursor itself spawns (JSON
+in/out over stdio, not an HTTP server), configured in
+`.cursor/hooks.json`. Two hooks are packaged:
+
+<Tabs>
+  <Tab title="afterAgentResponse — guaranteed capture">
+    Purely observational on Cursor's side (no known bugs at the time of
+    writing) — the most reliable of the three hooks Cursor exposes.
+    Captures **every agent response** with no cooperation from the model
+    required, unlike `haki_capture` (MCP), which the model can simply
+    choose not to call. Idempotent by
+    `conversation_id` + `generation_id`.
+
+    ```bash
+    haki hook-capture --subject-id S --project-id P --org-id O
+    ```
+  </Tab>
+  <Tab title="sessionStart — session recall">
+    Its native `additional_context` channel is **fire-and-forget** (the
+    agent loop never waits for it) and **documented as broken** in
+    current Cursor releases — a timing bug confirmed by the Cursor team
+    itself on their own forum, with no known workaround at the time of
+    writing (verified against `cursor.com/docs/hooks`, August 2026).
+
+    The **reliable** path — the same workaround used by the only other
+    known memory product shipping Cursor Hooks (Hindsight) — is to write
+    a `.cursor/rules/*.mdc` file with `alwaysApply: true`, which Cursor's
+    rule engine reads reliably, independent of the broken hook channel.
+    `hook-session-start` therefore writes the subject's memory to
+    `.cursor/rules/haki-session.mdc` on **every** session, and still
+    emits the native channel on a best-effort basis (useful if a future
+    Cursor release fixes the bug).
+
+    ```bash
+    haki hook-session-start --subject-id S --project-id P --org-id O
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  `beforeSubmitPrompt` (the third existing Cursor hook) can only allow or
+  deny a submission — its documented output schema has no
+  content-injection field, unlike `sessionStart`. It is therefore not
+  used for memory recall.
+</Note>
+
+### Generated `.cursor/hooks.json`
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "haki hook-session-start --subject-id usr_dev --project-id prj_demo --org-id org_demo",
+        "type": "command",
+        "timeout": 20
+      }
+    ],
+    "afterAgentResponse": [
+      {
+        "command": "haki hook-capture --subject-id usr_dev --project-id prj_demo --org-id org_demo",
+        "type": "command",
+        "timeout": 20,
+        "failClosed": false
+      }
+    ]
+  }
+}
+```
+
+Scope (`subject_id`/`project_id`/`org_id`) is **baked into the command at
+generation time**, never inferred at runtime — the same invariant as for
+MCP. The generated command **never** carries the API key: it is resolved
+by the already-installed `haki` CLI, from `~/.haki/config.json`.
+
+<Warning>
+  `.cursor/hooks.json` and `.cursor/rules/haki-session.mdc` are **code
+  that runs automatically** — review them before committing, the same way
+  you would review a CI config. Writing them automatically (from an
+  agent, or on repo open) is exactly the pattern behind a real Cursor
+  sandbox-escape CVE ("a workspace file writes a hook config that then
+  runs unapproved"). The `hooks_setup.py` module **only** generates and
+  prints — you paste it in yourself.
+</Warning>
+
+### Fail-open contract
+
+<Warning>
+  A Cursor hook must **never** crash the agent loop. On any error
+  (missing config, unreachable API, invalid stdin JSON, empty text,
+  `.mdc` write failure…), `haki hook-capture` and `haki
+  hook-session-start` print a harmless empty JSON (`{}`) and exit with
+  code **0** — never a Python traceback, never a non-zero code. The
+  failure reason is logged to **stderr only**, never mixed into the
+  stdout JSON that Cursor parses.
+</Warning>
+
+### Installation
+
+<Steps>
+  <Step title="Paste the JSON">Into `.cursor/hooks.json` at the project root.</Step>
+  <Step title="Create the rule file">
+    `.cursor/rules/haki-session.mdc` with the printed template — **once
+    only**: the `sessionStart` hook rewrites it on every subsequent
+    session.
+  </Step>
+  <Step title="Verify the CLI install">
+    `haki status` — the hooks invoke `haki` directly, they carry no
+    hardcoded API key.
+  </Step>
+  <Step title="Open a new Cursor session">
+    `hook-session-start` updates the `.mdc` file; `hook-capture`
+    memorizes every agent response automatically, with no action on your
+    part.
+  </Step>
+</Steps>
+
+<Card title="Roadmap" icon="road">
+  OAuth for Cursor (replacing the dev bearer `HAKI_API_KEY`) is still on
+  the roadmap — see the status table in the root README.
+</Card>

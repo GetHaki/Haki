@@ -1,0 +1,71 @@
+---
+title: "Conflits"
+description: "Deux faits se contredisent : Haki cache les deux plutôt que de deviner — ConflictSet"
+---
+
+Quand le Consolidator extrait un fait `action="create"` dont la valeur
+diffère d'un fait déjà **actif** pour le même prédicat, il ne choisit pas
+à la place de l'utilisateur : il ouvre un **conflit**.
+
+## Le principe : cacher les deux, jamais deviner
+
+<Warning>
+  Un conflit ouvert bloque **les deux faits** de `/v1/context` — le
+  gagnant potentiel comme le perdant potentiel — jusqu'à résolution
+  explicite. C'est une garantie délibérée du PRD, pas un défaut à
+  corriger : Haki préfère ne rien servir que de servir une réponse
+  possiblement fausse.
+</Warning>
+
+Dans le Context Assembler, tout fait dont l'id figure dans un
+`ConflictSet` avec `status="open"` est exclu du scoring et **bloqué** avec
+`reason_code = conflict_open` — y compris les faits encore `candidate`
+(qui n'auraient de toute façon jamais été servis, mais sont maintenant
+tracés explicitement comme bloqués). Le packet renvoyé porte alors un
+`warning` :
+
+```text
+open_conflict: 2 fact(s) hidden pending conflict resolution
+```
+
+## Modèle `ConflictSet`
+
+| Champ | Type | Sens |
+|---|---|---|
+| `id` | uuid | |
+| `project_id` / `subject_id` | string | Scope |
+| `fact_ids` | uuid[] | Tous les faits en contradiction (2 ou plus si le même prédicat se contredit plusieurs fois) |
+| `status` | `"open"` \| `"resolved"` | |
+| `reason` | string \| null | Texte généré, ex. `predicate 'invoice_language': {"language":"fr"} vs {"language":"en"}` |
+| `created_at` / `resolved_at` | datetime | |
+
+## Observabilité
+
+`GET /v1/conflicts` renvoie, en plus de la liste, deux compteurs pensés
+pour du monitoring sans avoir à parser la liste : `open_count` et
+`oldest_open_seconds` (âge du plus ancien conflit encore ouvert, `null`
+s'il n'y en a aucun). Rien ne résout un conflit tout seul — c'est
+volontaire (« cacher les deux, ne jamais deviner ») ; ce compteur est le
+garde-fou contre une accumulation silencieuse.
+
+## Résoudre un conflit
+
+`POST /v1/conflicts/{id}/resolve` avec `{project_id, keep_fact_id}` :
+
+1. le fait gardé passe à `active` (transition `candidate/disputed → active`
+   si nécessaire) ;
+2. **tous les autres** faits du set passent à `superseded`, avec
+   `supersedes_id` pointant le fait gardé ;
+3. le set passe à `resolved` (+ `resolved_at`).
+
+Ensuite, `/v1/context` sert le fait gardé normalement — il n'est plus
+bloqué par `conflict_open`.
+
+Erreurs typées : `conflict_not_found` (404 — y compris un conflit d'un
+autre projet, même erreur qu'un id inconnu, aucune fuite),
+`conflict_already_resolved` (409), `fact_not_in_conflict` (422, si
+`keep_fact_id` n'appartient pas au set).
+
+<Card title="Référence API — Conflits" icon="triangle-exclamation" href="/fr/api-reference/conflicts">
+  `GET /v1/conflicts`, `POST /v1/conflicts/{id}/resolve` : schémas exacts.
+</Card>

@@ -1,0 +1,109 @@
+---
+title: "GET /v1/timeline · /v1/facts · /v1/traces"
+sidebarTitle: "Timeline, faits, traces"
+description: "Trois endpoints de lecture seule pour l'inspection (console, débogage)"
+---
+
+Ces trois endpoints ne mutent rien. Ils alimentent la console web
+(mémoires, timeline, traces) et sont utiles en débogage.
+
+## Timeline d'un sujet
+
+```http
+GET /v1/timeline
+```
+
+Les événements bruts d'un sujet, ordonnés par `(occurred_at, recorded_at)`.
+
+<ParamField query="project_id" type="string" required />
+<ParamField query="subject_id" type="string" required>
+  **Obligatoire** — jamais de timeline cross-sujet.
+</ParamField>
+
+<ResponseField name="events" type="EventOut[]" required>
+  Tous les champs du modèle `Event` (voir
+  [Memory Ledger](/fr/concepts/memory-ledger)), y compris `hash` et
+  `idempotency_key`.
+</ResponseField>
+
+<RequestExample>
+
+```bash curl
+curl "http://localhost:8100/v1/timeline?project_id=prj_support&subject_id=usr_42" \
+  -H "Authorization: Bearer hk_..."
+```
+
+</RequestExample>
+
+---
+
+## Faits d'un sujet, tous statuts
+
+```http
+GET /v1/facts
+```
+
+Contrairement à `/v1/context`, cet endpoint renvoie les faits **quel que
+soit leur statut** (candidate, active, superseded, disputed, disabled,
+deleted) — c'est la vue « mémoires » de la console.
+
+<ParamField query="project_id" type="string" required />
+<ParamField query="subject_id" type="string" required />
+<ParamField query="status" type="string">
+  Filtre optionnel : `candidate` · `active` · `superseded` · `disputed` ·
+  `disabled` · `deleted`.
+</ParamField>
+
+<ResponseField name="facts" type="FactOut[]" required>
+  Ordonnés par `recorded_from` décroissant, limités à **200**. Champs
+  complets — voir [Faits et cycle de vie](/fr/concepts/facts-lifecycle).
+</ResponseField>
+
+<RequestExample>
+
+```bash curl
+curl "http://localhost:8100/v1/facts?project_id=prj_support&subject_id=usr_42&status=active" \
+  -H "Authorization: Bearer hk_..."
+```
+
+</RequestExample>
+
+---
+
+## Traces récentes d'un projet
+
+```http
+GET /v1/traces
+```
+
+<ParamField query="project_id" type="string" required />
+<ParamField query="subject_id" type="string">Optionnel — resserre à un sujet.</ParamField>
+
+<ResponseField name="traces" type="TraceSummaryOut[]" required>
+  Les **50** traces les plus récentes du projet (`created_at` décroissant).
+  Résumé seulement — pas de `packet`/`decisions` (récupérez-les via
+  `GET /v1/inspect/{id}`).
+  <Expandable title="TraceSummaryOut">
+    <ResponseField name="id" type="uuid" required />
+    <ResponseField name="project_id" type="string" required />
+    <ResponseField name="subject_id" type="string" required />
+    <ResponseField name="query" type="string" required />
+    <ResponseField name="purpose" type="string | null" />
+    <ResponseField name="token_count" type="integer" required />
+    <ResponseField name="created_at" type="datetime" required />
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+
+```bash curl
+curl "http://localhost:8100/v1/traces?project_id=prj_support" \
+  -H "Authorization: Bearer hk_..."
+```
+
+</RequestExample>
+
+## Erreurs possibles
+
+`missing_scope` (422 — `project_id` absent sur les trois ; `subject_id`
+absent sur `/v1/timeline` et `/v1/facts`), `forbidden_scope` (403).

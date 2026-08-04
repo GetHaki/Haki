@@ -1,0 +1,127 @@
+---
+title: "Memory Consolidator"
+description: "Validated LLM extraction, dedup, supersession, conflicts — app/consolidator/"
+---
+
+The Consolidator (`app/consolidator/`) turns raw events into durable
+facts. It runs in the background (triggered by `POST /v1/consolidate`,
+see [API reference](/en/api-reference/consolidate)) over pending
+(`pending` or `failed` — replayable) `consolidate` jobs.
+
+## The pipeline, event by event
+
+<Steps>
+  <Step title="Extraction">
+    For each event in the job, the configured LLM extractor
+    (`HAKI_LLM_PROVIDER=fake|openai`) receives the event **and** the
+    subject's currently active facts, so it can propose
+    `action: "supersede"` instead of piling up contradictions.
+  </Step>
+  <Step title="Pydantic validation">
+    Every raw candidate is validated via
+    `ExtractedFact.model_validate(...)`. An invalid candidate is
+    **rejected and logged**, never fatal — it never crashes the batch
+    (`result["rejected"] += 1`).
+  </Step>
+  <Step title="Embedding">
+    Valid candidates are embedded in a single batch call
+    (`embedder.embed(texts)`), text = `f"{predicate} {json(value)}"`. The
+    events themselves are also embedded once (episodic memory, sprint
+    10), a derived, re-computable value — the only write tolerated on an
+    event after insert.
+  </Step>
+  <Step title="Adjudicating against the existing fact">
+    See the dedicated section below: finding the active fact to compare
+    the candidate against.
+  </Step>
+  <Step title="Applying the outcome">
+    Dedup, supersession, or conflict creation — see "The four outcomes"
+    below.
+  </Step>
+</Steps>
+
+## Finding the fact to adjudicate against: exact then semantic
+
+`_resolve_existing_fact` looks for the subject's active fact to compare
+the candidate against:
+
+1. **Exact predicate match** (fast path — the common case, when
+   extraction is lexically consistent);
+2. **if none**, a **semantic** fallback: the active fact whose embedding
+   is closest to the candidate's (cosine distance), accepted only if the
+   distance is **≤ 0.28** (`SEMANTIC_MATCH_MAX_DISTANCE`).
+
+<Warning>
+  This 0.28 threshold was calibrated **empirically** against the real
+  embedder (`fastembed`, `paraphrase-multilingual-MiniLM-L12-v2`), not
+  derived from a literature value — `scripts/check_semantic_threshold.py`.
+  Measured same-concept pairs (`bike_count`/`bikes_owned`,
+  `personal_best_5k`/`goal_personal_best_time`,
+  `favorite_color`/`preferred_color`) cluster between 0.09 and 0.23;
+  unrelated pairs (including lexically-similar ones like
+  `bike_count`/`car_count`) stay above 0.35. This semantic fallback was
+  added after measuring **87.5% contradiction leakage** on the sprint-10
+  evaluation sample, caused by a predicate slightly different from one
+  call to the next, which left the stale fact active and served alongside
+  the new one.
+</Warning>
+
+## The four outcomes of a candidate
+
+<Steps>
+  <Step title="Duplicate">
+    The same `(subject, predicate, canonical value)` already exists among
+    non-deleted facts → no new row. This is also what makes replaying a
+    job **idempotent**.
+  </Step>
+  <Step title="Supersede">
+    `action="supersede"` with an existing fact found: the old fact moves
+    `active → superseded` (`valid_to = occurred_at` of the event that
+    triggers the change), the new one becomes `active` with
+    `supersedes_id` pointing at the old one. Keys the candidate does
+    **not** re-state are carried forward from the old fact
+    (`value = {**existing.value, **candidate.value}`) — a status-only
+    update (`"researching" → "completed"`) must not silently drop a field
+    like `target` that the new message does not repeat.
+  </Step>
+  <Step title="Conflict">
+    `action="create"` but an active fact already exists for this
+    predicate with a **different value**: both facts enter an open
+    `ConflictSet` (created or extended), the new one stays `candidate` —
+    see [Conflicts](/en/concepts/conflicts).
+  </Step>
+  <Step title="Create">
+    No existing fact for this predicate: the candidate moves straight to
+    `candidate → active`.
+  </Step>
+</Steps>
+
+## Scope always comes from the event
+
+The `subject_id` (and the entire scope) of a created fact always comes
+from **the source event**, never from the candidate returned by the LLM —
+even though the extraction schema still carries a `subject_id` field
+(kept for backward compatibility with existing providers). This is the
+"the model never chooses scopes" security invariant, applied here at
+write time: a candidate whose `subject_id` drifted (the LLM names a
+person instead of reusing the event's subject) silently created a fact
+under an orphan subject that no `/v1/context` call could ever reach again
+— a real, confirmed data-loss bug found while auditing sprint-10
+evaluation results at scale.
+
+## Resilience
+
+- A provider or database failure fails **the job**
+  (`status=failed`, error in `payload`), **never** the source events,
+  which stay intact and replayable on the next run.
+- Every job runs inside a **savepoint** (`session.begin_nested()`): a
+  failure only rolls back that job, not the others in the same run.
+- On a **429** (rate limit) from the LLM provider, the batch **stops
+  immediately** rather than continuing to fail job after job: measured in
+  a real run on Groq's free tier (a 6,000 tokens/min budget exhausted at
+  job #3, jobs #4-19 failing instantly and wasting the caller's retry/
+  backoff entirely).
+
+<Card title="API reference — Consolidation" icon="gears" href="/en/api-reference/consolidate">
+  `POST /v1/consolidate`: synchronous, dev/ops trigger.
+</Card>

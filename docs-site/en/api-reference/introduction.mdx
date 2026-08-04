@@ -1,0 +1,108 @@
+---
+title: "Introduction & authentication"
+description: "Base URL, authorization header, error format — every /v1/* route"
+---
+
+## Base URL
+
+Locally (see [Quickstart](/en/quickstart)):
+
+```text
+http://localhost:8100
+```
+
+Every route documented in this section is prefixed `/v1/`, except the
+gateway (`/gateway/v1/*`, see its [dedicated page](/en/api-reference/gateway))
+and `/health`.
+
+## Authentication
+
+<ParamField header="Authorization" type="string" required>
+  `Bearer hk_...`. Required on every `/v1/*` endpoint (except `/v1/keys`
+  and `/v1/orgs`, which have their own auth logic) and on
+  `/gateway/v1/*`, when `HAKI_AUTH_REQUIRED=true` (**default**).
+</ParamField>
+
+A key is bound to **one** `org_id` + **one** `project_id`. Any request
+whose `project_id` (in the body or the query) differs from the key's is
+rejected with `403 forbidden_scope` — a generic message, never revealing
+the existence of other projects.
+
+`HAKI_AUTH_REQUIRED=false` = open dev mode (never in production, a
+warning is logged at API startup). See [Security](/en/security) for the
+full model (Row-Level Security, Policy Engine, key bootstrap).
+
+<CodeGroup>
+
+```bash curl
+curl http://localhost:8100/v1/timeline?project_id=prj_support&subject_id=usr_42 \
+  -H "Authorization: Bearer hk_..."
+```
+
+```python Python (SDK)
+from haki import HakiClient
+
+client = HakiClient("http://localhost:8100", api_key="hk_...")
+client.timeline(subject_id="usr_42", project_id="prj_support")
+```
+
+```typescript TypeScript (SDK)
+import { HakiClient } from "haki";
+
+const client = new HakiClient({ baseUrl: "http://localhost:8100", apiKey: "hk_..." });
+await client.timeline({ projectId: "prj_support", subjectId: "usr_42" });
+```
+
+</CodeGroup>
+
+## Error format
+
+Every business error shares the same shape, never a vague
+`invalid request`:
+
+```json
+{
+  "error": {
+    "type": "missing_scope",
+    "message": "subject_id query parameter is required",
+    "field": "subject_id"
+  }
+}
+```
+
+<ResponseField name="error.type" type="string" required>
+  A stable, machine-readable identifier — see the table below.
+</ResponseField>
+<ResponseField name="error.message" type="string" required>
+  Human-readable message.
+</ResponseField>
+<ResponseField name="error.field" type="string | null">
+  The offending field, when identifiable (`events.0.subject_id`,
+  `budget_tokens`…).
+</ResponseField>
+
+### All error types
+
+| `type` | HTTP | Where |
+|---|---|---|
+| `unauthorized` | 401 | Missing, invalid or revoked key; key management without admin credentials |
+| `forbidden_scope` | 403 | The request's `project_id` ≠ the key's `project_id` |
+| `missing_scope` | 422 | `subject_id`/`project_id` missing on a captured event or a required query param |
+| `invalid_payload` | 422 | Malformed JSON body or missing field (Pydantic validation, or a malformed gateway body) |
+| `budget_exceeded` | 422 | `budget_tokens` ≤ 0 on `/v1/context` |
+| `trace_not_found` | 404 | Unknown `trace_id`, or outside the supplied `(project_id, subject_id)` scope |
+| `fact_not_found` | 404 | Unknown `fact_id`, or from another project |
+| `illegal_status_transition` | 422 | Status transition outside the allowed graph |
+| `invalid_forget_scope` | 422 | Neither or both of `fact_id`/`subject_id`, or an unknown `mode`, on `/v1/forget` |
+| `conflict_not_found` | 404 | Unknown `conflict_id`, or from another project |
+| `conflict_already_resolved` | 409 | The `ConflictSet` is no longer `open` |
+| `fact_not_in_conflict` | 422 | `keep_fact_id` does not belong to the `ConflictSet` |
+| `key_not_found` | 404 | Unknown `key_id`, or owned by another project |
+| `upstream_unavailable` | 502 | The gateway could not reach the downstream LLM provider |
+
+<Tip>
+  A consistent principle across the codebase: a resource from **another**
+  scope (project, subject) returns **exactly the same error** as a
+  non-existent resource. Never a leak hinting "it exists, just not for
+  you."
+</Tip>

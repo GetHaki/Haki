@@ -1,0 +1,146 @@
+---
+title: "Déploiement"
+description: "Image Docker, Fly.io, console sur Vercel — docs/DEPLOY.md"
+---
+
+<Note>
+  Portée : un déploiement **pilote à instance unique** — pas encore un
+  self-serve public. `docker-compose.yml` reste la référence pour le
+  développement local ; cette page couvre la mise en ligne réelle de
+  l'API, telle que documentée dans `docs/DEPLOY.md`.
+</Note>
+
+## Image
+
+```bash
+docker build -t haki-api .
+```
+
+Le `Dockerfile` (multi-stage, basé sur `uv`) construit une image qui, au
+démarrage du conteneur, applique les migrations Alembic puis lance
+`uvicorn` sur le port 8100.
+
+<Warning>
+  **Une seule instance à la fois** : `alembic upgrade head` tourne à
+  **chaque** démarrage de conteneur (voir le `CMD` ci-dessous), et
+  plusieurs instances qui démarrent en même temps entreraient en course
+  sur les migrations. Découper « lancer les migrations » et « démarrer
+  l'app » en deux étapes séparées avant de scaler au-delà d'une instance.
+</Warning>
+
+<Accordion title="Contenu du Dockerfile">
+```dockerfile
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
+WORKDIR /app
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
+
+# Dépendances d'abord (couche de cache, invalidée seulement si elles changent).
+COPY pyproject.toml uv.lock ./
+COPY sdk/python ./sdk/python
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project --no-dev
+
+# Code applicatif.
+COPY app ./app
+COPY alembic ./alembic
+COPY alembic.ini ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev
+
+FROM python:3.12-slim-bookworm
+WORKDIR /app
+
+# libgomp1 : onnxruntime (l'embedder local de fastembed, HAKI_EMBED_PROVIDER=
+# local, le défaut) en a besoin à l'import — son absence est un crash au
+# runtime, pas une erreur de build.
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -r haki && useradd -r -g haki -d /app haki
+COPY --from=builder --chown=haki:haki /app /app
+ENV PATH="/app/.venv/bin:$PATH" HOME=/app
+
+USER haki
+EXPOSE 8100
+CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8100"]
+```
+</Accordion>
+
+<Tip>
+  `haki` (`sdk/python`) est une dépendance path **éditable**
+  (`[tool.uv.sources]` de `pyproject.toml`), donc le code du SDK doit être
+  dans le contexte de build **avant** `uv sync` — pas seulement `app/`.
+  C'est pourquoi le Dockerfile copie `sdk/python` avant la première passe
+  `uv sync`.
+</Tip>
+
+## Cible recommandée : Fly.io
+
+Choisie parce que c'est du Docker standard dessous (pas de verrouillage
+fort) et que Fly propose un Postgres managé avec l'extension `pgvector`.
+
+<Steps>
+  <Step title="Détecter le Dockerfile">
+    ```bash
+    fly launch --no-deploy
+    ```
+    Crée `fly.toml`.
+  </Step>
+  <Step title="Postgres managé">
+    ```bash
+    fly postgres create
+    fly postgres attach <nom-postgres-app>
+    ```
+  </Step>
+  <Step title="Activer pgvector">
+    Une fois sur la base, après `fly postgres attach` (les migrations
+    Alembic supposent `CREATE EXTENSION IF NOT EXISTS vector`, déjà dans
+    `alembic/versions/0001_initial.py` — rien à faire côté Fly au-delà
+    d'avoir une image Postgres qui supporte l'extension).
+  </Step>
+  <Step title="Variables d'environnement">
+    `fly secrets set NOM=valeur` pour chacune — voir `.env.example` à la
+    racine du dépôt pour la liste complète et le rôle de chaque variable.
+    <Expandable title="Variables clés">
+      - `HAKI_DATABASE_URL` / `HAKI_MIGRATION_DATABASE_URL` — fournis par
+        `fly postgres attach`, à adapter au rôle applicatif `haki_app`
+        créé par la migration 0006 pour `HAKI_DATABASE_URL` (voir
+        [Sécurité](/fr/security)).
+      - `HAKI_LLM_PROVIDER=openai`, `HAKI_LLM_BASE_URL`, `HAKI_LLM_API_KEY`,
+        `HAKI_LLM_MODEL` — fournisseur LLM réel pour l'extraction (jamais
+        `fake` en prod).
+      - `HAKI_ADMIN_KEY` — **obligatoire** en prod (sans lui, le bootstrap
+        « première clé libre » reste ouvert à quiconque atteint le
+        serveur en premier — faille documentée dans l'audit sprint 10).
+      - `HAKI_CONSOLE_SERVICE_KEY` — secret partagé avec le backend
+        Next.js de la console (provisioning self-serve), jamais exposé au
+        navigateur.
+    </Expandable>
+  </Step>
+  <Step title="Déployer">
+    ```bash
+    fly deploy
+    ```
+  </Step>
+</Steps>
+
+## Console (Next.js)
+
+Déployée séparément sur **Vercel** (adapté nativement à Next.js) :
+
+```bash
+cd console && vercel
+```
+
+Variables à définir côté Vercel : `NEXT_PUBLIC_HAKI_API_URL` (l'URL
+Fly.io de l'API), `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` / `CLERK_SECRET_KEY`
+(Clerk), `HAKI_CONSOLE_SERVICE_KEY` (même valeur que côté API — **jamais**
+`NEXT_PUBLIC_*`, elle ne doit jamais atteindre le navigateur).
+
+## Sauvegardes
+
+<Warning>
+  Non couvertes par cette page — voir l'audit production (section
+  sauvegardes) : c'est un prérequis avant d'accepter la moindre donnée
+  d'un tiers, à traiter séparément de la mise en ligne elle-même.
+</Warning>

@@ -1,0 +1,161 @@
+---
+title: "POST /gateway/v1/chat/completions"
+sidebarTitle: "Gateway"
+description: "OpenAI-compatible proxy: memory injected and captured automatically — app/gateway/"
+---
+
+A client already compatible with OpenAI has **exactly one thing to
+change**: `base_url`. Everything else — model, messages, parameters —
+stays the same. Haki injects memory before the call, forwards to the
+configured provider, captures the exchange afterwards, and returns the
+provider's response **byte for byte**.
+
+<CodeGroup>
+
+```python Python (openai SDK)
+import openai
+
+client = openai.OpenAI(
+    base_url="http://localhost:8100/gateway/v1",
+    api_key="hk_...",                                  # your Haki key
+    default_headers={"X-Haki-Subject-Id": "usr_42"},   # WHO to remember
+)
+client.chat.completions.create(model="gpt-4o-mini", messages=[
+    {"role": "user", "content": "What language should the invoice be sent in?"}
+])  # nothing else changes
+```
+
+```bash curl
+curl -X POST http://localhost:8100/gateway/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer hk_..." \
+  -H "X-Haki-Subject-Id: usr_42" \
+  -d '{"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "..."}]}'
+```
+
+```python Python (helper SDK)
+from haki.gateway import gateway_client
+
+client = gateway_client("http://localhost:8100/gateway/v1", "hk_...", "usr_42")
+response = client.post("/chat/completions", json={
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "..."}],
+})
+```
+
+</CodeGroup>
+
+## Memory identity headers
+
+<Warning>
+  Identity travels **only in headers**, never in the request body — the
+  model never chooses what gets remembered.
+</Warning>
+
+<ParamField header="X-Haki-Subject-Id" type="string">
+  **Required to activate memory.** Without it: plain pass-through,
+  `X-Haki-Memory: disabled`, no capture — an existing OpenAI client never
+  breaks by pointing at the gateway.
+</ParamField>
+<ParamField header="X-Haki-Thread-Id" type="string">Conversation thread, forwarded to the captured event.</ParamField>
+<ParamField header="X-Haki-Run-Id" type="string">Run id, forwarded to the captured event.</ParamField>
+<ParamField header="X-Haki-Purpose" type="string">Forwarded to `build_context` (see Policy Engine, rule 3).</ParamField>
+<ParamField header="X-Haki-Idempotency-Key" type="string">
+  Default: `"gw-" + sha256(raw body)`. A retry with the same body never
+  captures the same exchange twice.
+</ParamField>
+<ParamField header="X-Haki-Project-Id" type="string">
+  Used **only** in open dev mode (`HAKI_AUTH_REQUIRED=false`, no key so
+  no resolved project); defaults to `prj_gateway_dev`. With a real
+  `hk_...` key, the project **is** the key's project, no exception — the
+  `chat/completions` body carries no `project_id` anyway.
+</ParamField>
+
+## What happens on every call
+
+<Steps>
+  <Step title="Scope resolution">
+    The `hk_...` key (auth middleware already extended to
+    `/gateway/v1/*`) resolves `project_id`. The Haki key is **never**
+    forwarded upstream — only the `HAKI_LLM_*` credentials are.
+  </Step>
+  <Step title="Context construction">
+    If `X-Haki-Subject-Id` and a last `user` message are both present:
+    `build_context(...)` (the same Context Assembler as `/v1/context`) is
+    called with that last message as the query.
+  </Step>
+  <Step title="Injection">
+    The packet is rendered by `build_prompt_context` (the **same**
+    function as the Python SDK — one implementation, never a divergent
+    copy) and prepended to the `system` message inside a
+    `<haki_memory>…</haki_memory>` block (a `system` message is created
+    first if none existed).
+  </Step>
+  <Step title="Forwarding">
+    `POST {HAKI_LLM_BASE_URL}/chat/completions`, 60s timeout.
+  </Step>
+  <Step title="Capture (after the response, best-effort)">
+    If memory was active and the response is `2xx`: the exchange becomes
+    an idempotent `conversation.turn` event, and a consolidation job is
+    queued — **off** the critical path.
+  </Step>
+  <Step title="Response returned">
+    The provider's body and status, **unchanged**, plus three Haki
+    headers.
+  </Step>
+</Steps>
+
+## Response headers
+
+<ResponseField name="X-Haki-Memory" type="string" required>
+  `active` (memory injected and exchange captured) · `disabled` (no
+  subject, or `stream: true`) · `degraded` (context construction failed —
+  the request still goes through, without memory).
+</ResponseField>
+<ResponseField name="X-Haki-Trace-Id" type="uuid">
+  Present when memory is active — inspectable via
+  `GET /v1/inspect/{trace_id}`.
+</ResponseField>
+<ResponseField name="X-Haki-Context-Ms" type="string">
+  Duration of `build_context` in milliseconds (1 decimal).
+</ResponseField>
+
+## Clean degradation
+
+The agent is **never** blocked by Haki:
+
+| Situation | Behavior |
+|---|---|
+| No `X-Haki-Subject-Id` (or no `user` message) | Plain pass-through, `X-Haki-Memory: disabled`, no capture |
+| `build_context` fails (database down…) | Forwarded without memory, `X-Haki-Memory: degraded`, structured log |
+| Capture fails afterwards | Best-effort, logged, the client's response is **never** affected |
+| The upstream provider is unreachable | `502 upstream_unavailable`, `X-Haki-Memory` reflects the state before the failure |
+
+## Streaming: pure pass-through, a deliberate choice
+
+<Warning>
+  `stream: true` is a **raw SSE pass-through**: no injection, no capture,
+  unconditional `X-Haki-Memory: disabled`. This is not a limitation to
+  fix: injecting memory without being able to capture the final answer
+  would break the memory loop ("no final answer without a Haki pass
+  afterwards"); buffering the whole stream would defeat the very point of
+  streaming. Documented in the README and in the code
+  (`app/gateway/__init__.py`).
+</Warning>
+
+## Honest limit
+
+The gateway sees **calls to the model**, not the tools an agent runs
+locally between calls — those must be captured via the
+[SDK](/en/sdk/python) or the [API](/en/api-reference/capture) directly
+(reference: `research/Haki_Memory_Runtime.md`).
+
+## Latency
+
+The memory overhead is dominated by `build_context` (~15 ms locally; p95
+of `/v1/context` < 250 ms — see the [measured numbers](/en/index)).
+Reproducible benchmark:
+
+```bash
+uv run python scripts/benchmark_gateway.py --api-key hk_...
+```

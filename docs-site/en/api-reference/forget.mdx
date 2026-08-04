@@ -1,0 +1,71 @@
+---
+title: "POST /v1/forget"
+description: "Forget a fact or a subject — two modes, one timestamped receipt"
+---
+
+See [Forget](/en/concepts/forget) for the full mechanics.
+
+<ParamField body="project_id" type="string" required>1 to 128 characters.</ParamField>
+<ParamField body="subject_id" type="string">
+  **Exactly one** of `fact_id` / `subject_id` is required.
+</ParamField>
+<ParamField body="fact_id" type="uuid" />
+<ParamField body="mode" type="string" required>
+  `"disable"` (reversible) or `"delete"` (real erasure). Regex pattern
+  `^(disable|delete)$`.
+</ParamField>
+
+### Response — `200 OK`
+
+<ResponseField name="status" type="string" default="ok" />
+<ResponseField name="mode" type="string" required />
+<ResponseField name="scope" type="string" required>`"fact"` or `"subject"`.</ResponseField>
+<ResponseField name="forget_id" type="uuid" required>The receipt id, in `forget_receipts`.</ResponseField>
+<ResponseField name="facts_disabled" type="integer" default="0" />
+<ResponseField name="facts_deleted" type="integer" default="0" />
+<ResponseField name="conflict_sets_deleted" type="integer" default="0" />
+<ResponseField name="events_deleted" type="integer" default="0" />
+<ResponseField name="traces_deleted" type="integer" default="0" />
+
+<RequestExample>
+
+```bash curl
+curl -X POST http://localhost:8100/v1/forget \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer hk_..." \
+  -d '{"project_id": "prj_support", "subject_id": "usr_42", "mode": "delete"}'
+```
+
+```python Python (SDK)
+client.forget(project_id="prj_support", subject_id="usr_42", mode="delete")
+```
+
+```typescript TypeScript (SDK)
+await client.forget({ projectId: "prj_support", subjectId: "usr_42", mode: "delete" });
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200
+{
+  "status": "ok",
+  "mode": "delete",
+  "scope": "subject",
+  "forget_id": "b1e2f3a4-...",
+  "facts_disabled": 0,
+  "facts_deleted": 12,
+  "conflict_sets_deleted": 1,
+  "events_deleted": 34,
+  "traces_deleted": 5
+}
+```
+
+</ResponseExample>
+
+## Possible errors
+
+`invalid_forget_scope` (422 — neither or both of `fact_id`/`subject_id`,
+or an unknown `mode`), `fact_not_found` (404 — unknown `fact_id`, or from
+another project).

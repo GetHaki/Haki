@@ -1,0 +1,108 @@
+---
+title: "Introduction & authentification"
+description: "URL de base, en-tête d'autorisation, format d'erreur — toutes les routes /v1/*"
+---
+
+## URL de base
+
+En local (voir [Démarrage](/fr/quickstart)) :
+
+```text
+http://localhost:8100
+```
+
+Toutes les routes documentées dans cette section sont préfixées `/v1/`,
+sauf la gateway (`/gateway/v1/*`, voir sa [page dédiée](/fr/api-reference/gateway))
+et `/health`.
+
+## Authentification
+
+<ParamField header="Authorization" type="string" required>
+  `Bearer hk_...`. Obligatoire sur tout endpoint `/v1/*` (sauf
+  `/v1/keys` et `/v1/orgs`, qui ont leur propre logique d'auth) et sur
+  `/gateway/v1/*`, quand `HAKI_AUTH_REQUIRED=true` (**défaut**).
+</ParamField>
+
+Une clé est liée à **un** `org_id` + **un** `project_id`. Toute requête
+dont le `project_id` (dans le corps ou la query) diffère de celui de la
+clé est refusée avec `403 forbidden_scope` — message générique, sans
+jamais révéler l'existence d'autres projets.
+
+`HAKI_AUTH_REQUIRED=false` = mode dev ouvert (jamais en production, un
+avertissement est loggué au démarrage de l'API). Voir
+[Sécurité](/fr/security) pour le modèle complet (Row-Level Security,
+Policy Engine, bootstrap de clés).
+
+<CodeGroup>
+
+```bash curl
+curl http://localhost:8100/v1/timeline?project_id=prj_support&subject_id=usr_42 \
+  -H "Authorization: Bearer hk_..."
+```
+
+```python Python (SDK)
+from haki import HakiClient
+
+client = HakiClient("http://localhost:8100", api_key="hk_...")
+client.timeline(subject_id="usr_42", project_id="prj_support")
+```
+
+```typescript TypeScript (SDK)
+import { HakiClient } from "haki";
+
+const client = new HakiClient({ baseUrl: "http://localhost:8100", apiKey: "hk_..." });
+await client.timeline({ projectId: "prj_support", subjectId: "usr_42" });
+```
+
+</CodeGroup>
+
+## Format d'erreur
+
+Toutes les erreurs métier partagent la même forme, jamais un vague
+`invalid request` :
+
+```json
+{
+  "error": {
+    "type": "missing_scope",
+    "message": "subject_id query parameter is required",
+    "field": "subject_id"
+  }
+}
+```
+
+<ResponseField name="error.type" type="string" required>
+  Un identifiant stable et machine-readable — voir le tableau ci-dessous.
+</ResponseField>
+<ResponseField name="error.message" type="string" required>
+  Message lisible par un humain.
+</ResponseField>
+<ResponseField name="error.field" type="string | null">
+  Le champ fautif, si identifiable (`events.0.subject_id`, `budget_tokens`…).
+</ResponseField>
+
+### Tous les types d'erreur
+
+| `type` | HTTP | Où |
+|---|---|---|
+| `unauthorized` | 401 | Clé manquante, invalide ou révoquée ; gestion des clés sans credentials admin |
+| `forbidden_scope` | 403 | `project_id` de la requête ≠ `project_id` de la clé |
+| `missing_scope` | 422 | `subject_id`/`project_id` absent sur un événement capturé ou une query obligatoire |
+| `invalid_payload` | 422 | Corps JSON invalide ou champ manquant (validation Pydantic, ou body malformé sur la gateway) |
+| `budget_exceeded` | 422 | `budget_tokens` ≤ 0 sur `/v1/context` |
+| `trace_not_found` | 404 | `trace_id` inconnu, ou hors du scope `(project_id, subject_id)` fourni |
+| `fact_not_found` | 404 | `fact_id` inconnu, ou d'un autre projet |
+| `illegal_status_transition` | 422 | Transition de statut hors du graphe autorisé |
+| `invalid_forget_scope` | 422 | Ni ou les deux de `fact_id`/`subject_id`, ou `mode` inconnu, sur `/v1/forget` |
+| `conflict_not_found` | 404 | `conflict_id` inconnu, ou d'un autre projet |
+| `conflict_already_resolved` | 409 | Le `ConflictSet` n'est plus `open` |
+| `fact_not_in_conflict` | 422 | `keep_fact_id` n'appartient pas au `ConflictSet` |
+| `key_not_found` | 404 | `key_id` inconnu, ou géré par un autre projet |
+| `upstream_unavailable` | 502 | La gateway n'a pas pu joindre le provider LLM en aval |
+
+<Tip>
+  Un principe systématique dans le code : une ressource d'un **autre**
+  scope (projet, sujet) renvoie **exactement la même erreur** qu'une
+  ressource inexistante. Jamais de fuite indiquant « ça existe, mais pas
+  pour vous ».
+</Tip>

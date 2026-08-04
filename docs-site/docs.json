@@ -1,0 +1,171 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "maple",
+  "name": "Haki",
+  "description": "La memoire fiable pour agents IA — reference technique de l'API, des SDK et des integrations Haki.",
+  "colors": {
+    "primary": "#d4a24e",
+    "light": "#e0b36a",
+    "dark": "#d4a24e"
+  },
+  "background": {
+    "color": {
+      "light": "#f2efe8",
+      "dark": "#0a0a0b"
+    }
+  },
+  "appearance": {
+    "default": "dark",
+    "strict": false
+  },
+  "favicon": "/images/favicon.png",
+  "logo": {
+    "light": "/images/logo-light.png",
+    "dark": "/images/logo-dark.png",
+    "href": "/fr/index"
+  },
+  "navigation": {
+    "languages": [
+      {
+        "language": "fr",
+        "tabs": [
+          {
+            "tab": "Documentation",
+            "groups": [
+              {
+                "group": "Bienvenue",
+                "pages": ["fr/index", "fr/quickstart"]
+              },
+              {
+                "group": "Concepts",
+                "pages": [
+                  "fr/concepts/memory-ledger",
+                  "fr/concepts/facts-lifecycle",
+                  "fr/concepts/consolidator",
+                  "fr/concepts/context-assembler",
+                  "fr/concepts/conflicts",
+                  "fr/concepts/forget"
+                ]
+              },
+              {
+                "group": "SDK",
+                "pages": ["fr/sdk/python", "fr/sdk/typescript"]
+              },
+              {
+                "group": "Integrations",
+                "pages": ["fr/integrations/cursor"]
+              },
+              {
+                "group": "Exploitation",
+                "pages": ["fr/security", "fr/deploy", "fr/production-guarantees"]
+              }
+            ]
+          },
+          {
+            "tab": "Reference API",
+            "groups": [
+              {
+                "group": "Demarrer",
+                "pages": ["fr/api-reference/introduction"]
+              },
+              {
+                "group": "Memoire",
+                "pages": [
+                  "fr/api-reference/capture",
+                  "fr/api-reference/context",
+                  "fr/api-reference/memory-read"
+                ]
+              },
+              {
+                "group": "Qualite et correction",
+                "pages": ["fr/api-reference/conflicts", "fr/api-reference/feedback"]
+              },
+              {
+                "group": "Administration",
+                "pages": [
+                  "fr/api-reference/keys",
+                  "fr/api-reference/consolidate",
+                  "fr/api-reference/forget"
+                ]
+              },
+              {
+                "group": "Gateway et sante",
+                "pages": ["fr/api-reference/gateway", "fr/api-reference/health"]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "language": "en",
+        "tabs": [
+          {
+            "tab": "Documentation",
+            "groups": [
+              {
+                "group": "Welcome",
+                "pages": ["en/index", "en/quickstart"]
+              },
+              {
+                "group": "Concepts",
+                "pages": [
+                  "en/concepts/memory-ledger",
+                  "en/concepts/facts-lifecycle",
+                  "en/concepts/consolidator",
+                  "en/concepts/context-assembler",
+                  "en/concepts/conflicts",
+                  "en/concepts/forget"
+                ]
+              },
+              {
+                "group": "SDKs",
+                "pages": ["en/sdk/python", "en/sdk/typescript"]
+              },
+              {
+                "group": "Integrations",
+                "pages": ["en/integrations/cursor"]
+              },
+              {
+                "group": "Operations",
+                "pages": ["en/security", "en/deploy", "en/production-guarantees"]
+              }
+            ]
+          },
+          {
+            "tab": "API Reference",
+            "groups": [
+              {
+                "group": "Getting started",
+                "pages": ["en/api-reference/introduction"]
+              },
+              {
+                "group": "Memory",
+                "pages": [
+                  "en/api-reference/capture",
+                  "en/api-reference/context",
+                  "en/api-reference/memory-read"
+                ]
+              },
+              {
+                "group": "Quality and correction",
+                "pages": ["en/api-reference/conflicts", "en/api-reference/feedback"]
+              },
+              {
+                "group": "Administration",
+                "pages": [
+                  "en/api-reference/keys",
+                  "en/api-reference/consolidate",
+                  "en/api-reference/forget"
+                ]
+              },
+              {
+                "group": "Gateway and health",
+                "pages": ["en/api-reference/gateway", "en/api-reference/health"]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

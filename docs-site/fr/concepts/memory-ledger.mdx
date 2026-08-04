@@ -1,0 +1,101 @@
+---
+title: "Memory Ledger"
+description: "Capture append-only des événements, bitemporalité, idempotence — app/ledger/"
+---
+
+Le Memory Ledger (`app/ledger/`) est la couche de capture durable de Haki :
+il écrit des **événements** (la preuve brute) et gère les **faits** (ce qui
+est vrai), avec une interface volontairement petite — écrire un événement,
+lire un objet, lister une timeline, appliquer une mutation de statut
+versionnée.
+
+## Événement (`Event`)
+
+Un événement est **la preuve** : « ce message a été dit à cette date ».
+Table `events` (`app/models/event.py`), **append-only** — le contenu
+métier n'est jamais modifié après l'insertion. La seule écriture tolérée
+après coup est l'embedding dérivé (mémoire épisodique, calculé une fois
+par le Consolidator).
+
+<ResponseField name="org_id / project_id" type="string" required>
+  Le périmètre complet de l'événement.
+</ResponseField>
+<ResponseField name="subject_type" type="string" default="user">
+  Type du sujet (client, utilisateur…).
+</ResponseField>
+<ResponseField name="subject_id" type="string" required>
+  Identité stable du sujet. **Obligatoire** — validé par le Ledger (erreur
+  typée `missing_scope`), pas par Pydantic, pour produire un message
+  d'erreur exact avec l'index de l'événement fautif dans le batch.
+</ResponseField>
+<ResponseField name="actor_type / actor_id / agent_id / thread_id / run_id" type="string | null">
+  Provenance : qui/quoi a produit l'événement, dans quel fil de
+  conversation, dans quelle exécution.
+</ResponseField>
+<ResponseField name="kind" type="string" required>
+  Type libre, ex. `conversation.message`, `conversation.turn`,
+  `agent.observation`. Aucune énumération fermée côté serveur.
+</ResponseField>
+<ResponseField name="occurred_at" type="datetime" required>
+  **Temps métier** — quand l'événement s'est vraiment produit.
+</ResponseField>
+<ResponseField name="recorded_at" type="datetime">
+  **Temps système** — quand Haki l'a enregistré. Généré côté serveur
+  (`server_default=func.now()`).
+</ResponseField>
+<ResponseField name="payload" type="object" required>
+  Contenu libre (JSONB).
+</ResponseField>
+<ResponseField name="classification" type="string[]">
+  Étiquettes libres, ex. `["customer-data"]`.
+</ResponseField>
+<ResponseField name="hash" type="string">
+  `sha256:` + hash canonique du contenu métier (org/project/subject/kind/
+  occurred_at/payload, clés triées). Calculé côté serveur, pas transmis
+  par le client.
+</ResponseField>
+
+## Bitemporalité
+
+Haki distingue systématiquement deux axes de temps :
+
+| Axe | Sur `Event` | Sur `Fact` | Sens |
+|---|---|---|---|
+| **Temps métier** | `occurred_at` | `valid_from` / `valid_to` | Quand la chose est vraie dans le monde réel |
+| **Temps système** | `recorded_at` | `recorded_from` / `recorded_to` | Quand Haki l'a su / l'a écrit |
+
+Cette séparation permet de répondre à deux questions différentes : « que
+savait-on à la date X ? » (temps système) et « qu'est-ce qui était vrai à
+la date X ? » (temps métier) — sans jamais les confondre. Un fait
+`deleted` (terminal) obtient `recorded_to` au moment de la transition ;
+`valid_to` marque, lui, la fin de validité métier (posée par le
+Consolidator au moment d'une supersession).
+
+## Idempotence à l'écriture
+
+`write_events` (`app/ledger/core.py`) insère par lot avec
+`ON CONFLICT DO NOTHING` sur la contrainte unique
+`(project_id, idempotency_key)`. La clé effective de chaque événement est
+choisie dans cet ordre :
+
+1. `idempotency_key` du **batch** (`CaptureRequest.idempotency_key`),
+   **namespacé par le hash de contenu** de chaque événement
+   (`f"{batch_key}:{content_hash}"`) — plusieurs événements dans un même
+   lot ne collisionnent jamais entre eux ;
+2. sinon `idempotency_key` propre à l'événement (`EventIn.idempotency_key`) ;
+3. sinon un fallback dérivé du hash de contenu + `subject_id`.
+
+Un retry réseau qui rejoue exactement le même batch avec la même clé ne
+crée donc **jamais** de doublon : `POST /v1/capture` renvoie les mêmes
+identifiants d'événements, avec `deduplicated: true` sur ceux déjà connus.
+
+## Timeline
+
+`GET /v1/timeline?project_id=...&subject_id=...` (les deux paramètres sont
+obligatoires — jamais de timeline cross-sujet) renvoie les événements
+ordonnés par `(occurred_at, recorded_at)`. C'est la vue « preuve brute »
+utilisée par la console et par `haki_inspect` côté MCP.
+
+<Card title="Référence API — Capture" icon="inbox" href="/fr/api-reference/capture">
+  Schéma exact de `POST /v1/capture`, exemples de requête/réponse.
+</Card>

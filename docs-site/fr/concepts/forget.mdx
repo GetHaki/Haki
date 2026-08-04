@@ -1,0 +1,73 @@
+---
+title: "Forget (oubli)"
+description: "Deux portées, deux modes, un reçu horodaté — app/ledger/forget.py"
+---
+
+`POST /v1/forget` est l'endpoint d'effacement minimal de Haki. Chaque
+appel est journalisé dans `forget_receipts` et la réponse porte
+l'identifiant du reçu plus les compteurs exacts de ce qui a été fait.
+
+## Deux portées, exactement une par appel
+
+<ResponseField name="fact_id" type="uuid">
+  Oublie **un seul fait**.
+</ResponseField>
+<ResponseField name="subject_id" type="string">
+  Oublie **tout un sujet** dans le projet.
+</ResponseField>
+
+La requête doit fournir **exactement un** des deux (validé par Pydantic
+au niveau HTTP, et de nouveau par le Ledger pour les appelants directs
+non-HTTP comme les outils MCP) — sinon `invalid_forget_scope`.
+
+## Deux modes
+
+<Tabs>
+  <Tab title="disable — réversible">
+    - **Un fait** : transition vers `disabled` (peut redevenir `active`
+      plus tard).
+    - **Un sujet** : chaque fait `active` ou `candidate` du sujet passe à
+      `disabled`. L'historique reste intact.
+  </Tab>
+  <Tab title="delete — effacement réel">
+    - **Un fait** : transition vers `deleted` (terminal — pose aussi
+      `recorded_to`).
+    - **Un sujet** : **suppression SQL réelle** de tous les faits du sujet
+      dans ce projet (les embeddings partent avec les lignes), de ses
+      `ConflictSet`, de ses événements et de ses traces de contexte. Pas
+      réversible.
+  </Tab>
+</Tabs>
+
+## Le reçu
+
+Chaque appel crée une ligne `forget_receipts` et renvoie :
+
+```json
+{
+  "status": "ok",
+  "mode": "delete",
+  "scope": "subject",
+  "forget_id": "b1e2...",
+  "facts_disabled": 0,
+  "facts_deleted": 12,
+  "conflict_sets_deleted": 1,
+  "events_deleted": 34,
+  "traces_deleted": 5
+}
+```
+
+Seuls les compteurs pertinents au mode/à la portée choisis sont non nuls
+— `facts_disabled` reste à `0` sur un `delete`, par exemple. L'oubli est
+en plus **audité** (`policy.audit_forget`, ligne JSON structurée
+`haki.policy`) à chaque appel, quel que soit le mode.
+
+## Erreurs typées
+
+`fact_not_found` (404 — y compris un fait d'un autre projet : même erreur
+qu'un id inconnu, aucune fuite cross-projet) et `invalid_forget_scope`
+(422 — ni ou les deux de `fact_id`/`subject_id`, ou un `mode` inconnu).
+
+<Card title="Référence API — Forget" icon="eraser" href="/fr/api-reference/forget">
+  `POST /v1/forget` : schéma exact de requête et réponse.
+</Card>

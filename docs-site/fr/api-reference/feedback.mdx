@@ -1,0 +1,73 @@
+---
+title: "POST /v1/feedback"
+description: "Noter une trace ou un fait — un rating incorrect dispute le fait"
+---
+
+Une observation de qualité sur une trace de contexte ou sur un fait. Chaque
+observation est stockée (table `feedback`, migration 0006).
+
+<ParamField body="project_id" type="string" required>1 à 128 caractères.</ParamField>
+<ParamField body="trace_id" type="uuid">
+  **Exactement un** de `trace_id` / `fact_id` requis (validé par un
+  `model_validator` Pydantic).
+</ParamField>
+<ParamField body="fact_id" type="uuid" />
+<ParamField body="rating" type="string" required>
+  `"useful"` · `"irrelevant"` · `"incorrect"`.
+</ParamField>
+<ParamField body="comment" type="string">Max 2000 caractères.</ParamField>
+
+<Warning>
+  Un `rating="incorrect"` sur un `fact_id` fait transitionner le fait vers
+  `disputed` (si la transition est légale depuis son statut courant — voir
+  le [graphe de transitions](/fr/concepts/facts-lifecycle)). Un fait
+  `disputed` n'est plus jamais servi comme actif par le Context Assembler.
+</Warning>
+
+## Réponse — `201 Created`
+
+<ResponseField name="status" type="string" default="recorded" />
+<ResponseField name="feedback_id" type="uuid" required />
+<ResponseField name="fact_status" type="string | null">
+  Le statut résultant du fait, si la cible était un `fact_id` ; `null`
+  sinon.
+</ResponseField>
+
+<RequestExample>
+
+```bash curl
+curl -X POST http://localhost:8100/v1/feedback \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer hk_..." \
+  -d '{
+    "project_id": "prj_support",
+    "fact_id": "f8a1c9de-...",
+    "rating": "incorrect",
+    "comment": "La facture doit en fait partir en anglais."
+  }'
+```
+
+```python Python (SDK)
+client.feedback(
+    project_id="prj_support",
+    fact_id="f8a1c9de-...",
+    rating="incorrect",
+    comment="La facture doit en fait partir en anglais.",
+)
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 201
+{"status": "recorded", "feedback_id": "a3e4...", "fact_status": "disputed"}
+```
+
+</ResponseExample>
+
+## Erreurs possibles
+
+`fact_not_found` (404 — `fact_id` inconnu, ou d'un autre projet : même
+erreur, aucune fuite), `invalid_payload` (422 — ni ou les deux de
+`trace_id`/`fact_id`, ou `rating` hors énumération).

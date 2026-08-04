@@ -1,0 +1,86 @@
+---
+title: "Faits et cycle de vie"
+description: "Statuts, transitions autorisées et champs d'un fait (Fact, app/models/fact.py)"
+---
+
+Un **fait** (`Fact`, table `facts`) est ce que Haki considère vrai à un
+instant donné : « les factures sont en français ». Contrairement à un
+événement, un fait est **versionné** et **muté** au fil du temps — via des
+transitions de statut explicites, jamais par écrasement silencieux.
+
+## Les six statuts
+
+<ResponseField name="candidate" type="FactStatus">
+  Créé par le Consolidator, pas encore actif. État initial de tout
+  nouveau fait (`create_fact`, `status=candidate`, `version=1`).
+</ResponseField>
+<ResponseField name="active" type="FactStatus">
+  Servi par `/v1/context`. Un seul fait actif par
+  `(subject, predicate)` en régime normal.
+</ResponseField>
+<ResponseField name="superseded" type="FactStatus">
+  Remplacé par un fait plus récent (`supersedes_id` pointe le nouveau).
+  Reste dans l'historique, **n'est plus jamais servi comme actuel**.
+</ResponseField>
+<ResponseField name="disputed" type="FactStatus">
+  Contesté — soit par un `POST /v1/feedback` `rating=incorrect`, soit
+  perdant d'un conflit non résolu qui redevient conflictuel. Non servi par
+  le Context Assembler (filtre de statut).
+</ResponseField>
+<ResponseField name="disabled" type="FactStatus">
+  Oublié de façon **réversible** (`POST /v1/forget`, `mode=disable`).
+</ResponseField>
+<ResponseField name="deleted" type="FactStatus">
+  Effacement réel, **terminal** — aucune transition sortante n'est
+  autorisée. Pose aussi `recorded_to` (fin bitemporelle système).
+</ResponseField>
+
+## Graphe des transitions autorisées
+
+Appliqué par `transition_fact_status` (`app/ledger/core.py`) ; toute
+tentative hors de ce graphe lève `illegal_status_transition` (422).
+
+```text
+candidate  → active, superseded, disputed, disabled, deleted
+active     → superseded, disputed, disabled, deleted
+superseded → disputed, deleted
+disputed   → active, superseded, disabled, deleted
+disabled   → active, deleted
+deleted    → (terminal, aucune sortie)
+```
+
+<Note>
+  `candidate → superseded` existe spécifiquement pour la **résolution de
+  conflits** (sprint 6) : le fait perdant d'un `ConflictSet` est
+  typiquement encore `candidate`, et le résoudre le fait passer
+  directement à `superseded` — voir [Conflits](/fr/concepts/conflicts).
+</Note>
+
+Chaque transition incrémente `version` de 1.
+
+## Champs complets d'un fait
+
+Vue de lecture complète (`FactOut`, utilisée par `GET /v1/facts`) :
+
+| Champ | Type | Sens |
+|---|---|---|
+| `predicate` | string | Le nom du fait, ex. `invoice_language` — choisi par l'extracteur LLM, pas une énumération fermée |
+| `value` | object | La valeur, ex. `{"language": "fr"}` |
+| `qualifiers` | object | Métadonnées additionnelles extraites, libres |
+| `status` | enum | Un des six statuts ci-dessus |
+| `confidence` | float \| null | Confiance de l'extraction, si fournie par le provider |
+| `valid_from` / `valid_to` | datetime \| null | Bitemporalité métier |
+| `recorded_from` / `recorded_to` | datetime | Bitemporalité système |
+| `supersedes_id` | uuid \| null | Le fait que celui-ci remplace |
+| `source_event_ids` | uuid[] | Provenance exacte — l'événement (ou les événements) qui ont produit ce fait |
+| `version` | int | Incrémenté à chaque transition |
+
+Le **prédicat n'est pas une clé stable garantie** : deux formulations
+différentes du même concept (`bike_count` vs `bikes_owned`) peuvent
+coexister si l'extracteur les nomme différemment d'un appel à l'autre.
+C'est précisément le problème que règle la correspondance sémantique du
+Consolidator — voir [Consolidator](/fr/concepts/consolidator).
+
+<Card title="Référence API — Faits et traces" icon="list" href="/fr/api-reference/memory-read">
+  `GET /v1/facts`, filtrage par statut, limite 200.
+</Card>

@@ -1,7 +1,7 @@
 [project]
 name = "haki-api"
 version = "0.1.0"
-description = "Haki — couche de memoire long-terme pour agents IA (Ledger, Consolidator, Context, forget, serveur MCP Cursor)"
+description = "Haki -- long-term memory layer for AI agents (Ledger, Consolidator, Context, forget, Cursor MCP server)"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
@@ -21,7 +21,9 @@ dependencies = [
     "redis>=5.0",
     # The gateway renders the <haki_memory> block with the SDK's
     # build_prompt_context: one implementation, no divergent copy.
-    "haki",
+    # Distribution name is "gethaki" (haki was already taken on PyPI) --
+    # the importable module stays "haki" (sdk/python/src/haki/).
+    "gethaki",
 ]
 
 [dependency-groups]
@@ -32,7 +34,7 @@ dev = [
 ]
 
 [tool.uv.sources]
-haki = { path = "sdk/python", editable = true }
+gethaki = { path = "sdk/python", editable = true }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

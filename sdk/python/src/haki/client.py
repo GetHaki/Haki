@@ -208,6 +208,23 @@ class HakiClient:
     def revoke_key(self, key_id: str) -> dict[str, Any]:
         return self._request("DELETE", f"/v1/keys/{key_id}")
 
+    # -- CLI device-code auth (`haki login`) --------------------------------
+    # No Authorization header is sent for these two: /device/start and
+    # /device/poll are intentionally public (a terminal has no hk_ key yet).
+
+    def cli_device_start(self) -> dict[str, Any]:
+        """POST /v1/cli/device/start. Returns {device_code, user_code,
+        verification_uri, expires_in, interval}."""
+        return self._request("POST", "/v1/cli/device/start")
+
+    def cli_device_poll(self, device_code: str) -> dict[str, Any]:
+        """POST /v1/cli/device/poll. Returns {status: pending|approved|expired,
+        api_key?, org_id?, project_id?} — api_key is only ever present once,
+        on the first 'approved' response (the server consumes the code)."""
+        return self._request(
+            "POST", "/v1/cli/device/poll", json={"device_code": device_code}
+        )
+
 
 class AsyncHakiClient:
     """Async variant of HakiClient (same methods, awaited)."""
@@ -361,3 +378,13 @@ class AsyncHakiClient:
 
     async def revoke_key(self, key_id: str) -> dict[str, Any]:
         return await self._request("DELETE", f"/v1/keys/{key_id}")
+
+    # -- CLI device-code auth (`haki login`) --------------------------------
+
+    async def cli_device_start(self) -> dict[str, Any]:
+        return await self._request("POST", "/v1/cli/device/start")
+
+    async def cli_device_poll(self, device_code: str) -> dict[str, Any]:
+        return await self._request(
+            "POST", "/v1/cli/device/poll", json={"device_code": device_code}
+        )

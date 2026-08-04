@@ -1,5 +1,10 @@
 [project]
-name = "haki"
+# Distribution/PyPI name only -- "haki" was already taken on PyPI by an
+# unrelated project (checked 2026-08-02). The importable package stays
+# `haki` (src/haki/, unchanged) and the installed command stays `haki`
+# (see [project.scripts] below) -- only what you `pip install`/`uv add`
+# changes.
+name = "gethaki"
 version = "0.1.0"
 description = "Haki Python SDK — memoire long-terme pour agents IA (client, helpers runtime, CLI)"
 requires-python = ">=3.12"

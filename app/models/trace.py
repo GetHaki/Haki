@@ -28,3 +28,12 @@ class ContextTrace(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+    # Instrumentation (sprint 16 console redesign): wall-clock total plus a
+    # per-stage breakdown of the REAL pipeline stages in app/context.py
+    # (embed, retrieval, multi_hop_expansion, episodes) — never invented
+    # stage names lifted from an unconnected mockup. NULL on traces created
+    # before this column existed, never a false zero.
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    stage_timings: Mapped[dict | None] = mapped_column(JSONB)
+    fact_count: Mapped[int | None] = mapped_column(Integer)

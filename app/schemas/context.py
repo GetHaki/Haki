@@ -74,3 +74,6 @@ class TraceResponse(BaseModel):
     packet: ContextPacket
     decisions: list[TraceDecision]
     token_count: int
+    duration_ms: int | None = None
+    stage_timings: dict[str, int] | None = None
+    fact_count: int | None = None

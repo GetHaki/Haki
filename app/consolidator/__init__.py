@@ -595,8 +595,6 @@ async def run_pending_consolidations(
     Returns the number of jobs completed successfully. Failed jobs keep their
     payload (plus an "error" key) and are retried on the next run.
     """
-    extractor = extractor or get_extractor()
-    embedder = embedder or get_embedder()
     jobs = (
         (
             await session.execute(
@@ -611,7 +609,68 @@ async def run_pending_consolidations(
         .scalars()
         .all()
     )
+    return await _run_jobs(session, jobs, extractor, embedder)
 
+
+async def run_pending_consolidations_for_subject(
+    session: AsyncSession,
+    *,
+    project_id: str,
+    subject_id: str,
+    extractor: Extractor | None = None,
+    embedder: Embedder | None = None,
+) -> int:
+    """Console Playground "Write": process only the pending jobs touching
+    THIS project/subject, leaving every other tenant's pending work alone
+    — unlike POST /v1/consolidate (dev/ops, unscoped, no rate limit by
+    design), this is reachable with a normal customer hk_ key, so it must
+    never let one caller's Playground clicks process (or repeatedly re-walk)
+    the entire global queue."""
+    subject_event_ids = {
+        row[0]
+        for row in (
+            await session.execute(
+                select(Event.id).where(
+                    Event.project_id == project_id, Event.subject_id == subject_id
+                )
+            )
+        ).all()
+    }
+    if not subject_event_ids:
+        return 0
+
+    candidate_jobs = (
+        (
+            await session.execute(
+                select(Job)
+                .where(
+                    Job.kind == "consolidate",
+                    Job.status.in_([JobStatus.pending, JobStatus.failed]),
+                )
+                .order_by(Job.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    jobs = [
+        job
+        for job in candidate_jobs
+        if subject_event_ids.intersection(
+            uuid.UUID(e) for e in job.payload.get("event_ids", [])
+        )
+    ]
+    return await _run_jobs(session, jobs, extractor, embedder)
+
+
+async def _run_jobs(
+    session: AsyncSession,
+    jobs: list[Job],
+    extractor: Extractor | None,
+    embedder: Embedder | None,
+) -> int:
+    extractor = extractor or get_extractor()
+    embedder = embedder or get_embedder()
     done = 0
     for job in jobs:
         try:

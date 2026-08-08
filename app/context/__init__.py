@@ -37,6 +37,7 @@ reason_code over_budget. Every decision is written to context_traces.
 
 import json
 import re
+import time
 import uuid
 from typing import Any
 
@@ -246,7 +247,12 @@ async def build_context(
             field="budget_tokens",
         )
     embedder = embedder or get_embedder()
+    request_start = time.perf_counter()
+    stage_timings: dict[str, int] = {}
+
+    embed_start = time.perf_counter()
     query_embedding = (await embedder.embed([query]))[0]
+    stage_timings["embed"] = round((time.perf_counter() - embed_start) * 1000)
 
     now = func.now()
     similarity = func.coalesce(1 - Fact.embedding.cosine_distance(query_embedding), 0.0)
@@ -311,7 +317,9 @@ async def build_context(
         .order_by(score.desc())
         .limit(CANDIDATE_LIMIT)
     )
+    retrieval_start = time.perf_counter()
     rows = (await session.execute(stmt)).all()
+    stage_timings["retrieval"] = round((time.perf_counter() - retrieval_start) * 1000)
 
     blocked_ids = await _open_conflict_fact_ids(
         session, project_id=project_id, subject_id=subject_id
@@ -382,6 +390,7 @@ async def build_context(
     # Multi-hop expansion: only worth trying if the main pass packed
     # something to seed entities from, and left room in the budget.
     if packet_facts and token_count < budget_tokens:
+        multi_hop_start = time.perf_counter()
         query_words = {t.lower() for t in _ENTITY_TOKEN_RE.findall(query)}
         seed_texts = [_render(f["predicate"], f["value"]) for f in packet_facts]
         included_fact_ids = {uuid.UUID(f["id"]) for f in packet_facts}
@@ -393,6 +402,9 @@ async def build_context(
             query_words=query_words,
             exclude_ids=included_fact_ids | blocked_ids,
             now=now,
+        )
+        stage_timings["multi_hop_expansion"] = round(
+            (time.perf_counter() - multi_hop_start) * 1000
         )
         for row in extra_rows:
             if token_count >= budget_tokens:
@@ -414,6 +426,7 @@ async def build_context(
     # packed under the SAME budget — facts first, episodes with what
     # remains. This is what answers "what happened / when" questions: the
     # extractor keeps durable facts only, episodes keep the dated events.
+    episodes_start = time.perf_counter()
     episode_rows = (
         (
             await session.execute(
@@ -429,6 +442,7 @@ async def build_context(
         )
         .all()
     )
+    stage_timings["episodes"] = round((time.perf_counter() - episodes_start) * 1000)
     packet_episodes: list[dict[str, Any]] = []
     for row in episode_rows:
         excerpt = episode_excerpt(row.kind, row.payload)
@@ -493,6 +507,9 @@ async def build_context(
         packet=packet,
         decisions=decisions,
         token_count=token_count,
+        duration_ms=round((time.perf_counter() - request_start) * 1000),
+        stage_timings=stage_timings,
+        fact_count=len(packet_facts),
     )
     session.add(trace)
     await session.flush()

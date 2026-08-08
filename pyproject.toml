@@ -19,6 +19,9 @@ dependencies = [
     # state, native TTL, no Postgres table. redis.asyncio, not the
     # deprecated aioredis.
     "redis>=5.0",
+    # Rate limiting for customer-facing endpoints reachable with a normal
+    # hk_ key (e.g. POST /v1/consolidate/subject).
+    "slowapi>=0.1.9",
     # The gateway renders the <haki_memory> block with the SDK's
     # build_prompt_context: one implementation, no divergent copy.
     # Distribution name is "gethaki" (haki was already taken on PyPI) --

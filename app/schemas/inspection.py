@@ -46,6 +46,8 @@ class TraceSummaryOut(BaseModel):
     purpose: str | None
     token_count: int
     created_at: datetime
+    duration_ms: int | None = None
+    fact_count: int | None = None
 
 
 class TraceListResponse(BaseModel):

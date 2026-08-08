@@ -68,4 +68,7 @@ async def inspect(
         packet=trace.packet,
         decisions=trace.decisions,
         token_count=trace.token_count,
+        duration_ms=trace.duration_ms,
+        stage_timings=trace.stage_timings,
+        fact_count=trace.fact_count,
     )

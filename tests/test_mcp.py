@@ -36,6 +36,7 @@ MCP_PROJECT = "prj_mcp_test"
 SUBJECT = "usr_mcp"
 CONVENTION = "convention.tests"
 CONVENTION_VALUE = {"rule": "tests avant toute modification"}
+ADMIN_KEY = "admin-secret-for-mcp-tests"
 
 
 def _free_port() -> int:
@@ -54,6 +55,7 @@ def _server_env(api_key: str | None = None) -> dict[str, str]:
         "HAKI_MCP_ORG_ID": "org_mcp_test",
         "HAKI_MCP_SUBJECT_ID": SUBJECT,
         "HAKI_MCP_AUTOCONSOLIDATE": "true",
+        "HAKI_ADMIN_KEY": ADMIN_KEY,
     }
     if api_key:
         env["HAKI_API_KEY"] = api_key
@@ -400,6 +402,140 @@ async def test_mcp_correct_requires_exactly_one_target(mcp_server):
             result = await session.call_tool("haki_correct", {"rating": "useful"})
     assert result.is_error
     assert "trace_id or fact_id" in result.content[0].text
+
+
+async def _create_key(base_url: str, *, org_id: str, project_id: str) -> str:
+    """Mints a key for an arbitrary org/project via the admin key (the test
+    servers all set HAKI_ADMIN_KEY — see _server_env) rather than relying
+    on the anonymous "first key is free" bootstrap, which only ever
+    applies once per server and would fail on the second call in a test
+    file that mints several distinct tenants."""
+    async with httpx.AsyncClient(base_url=base_url, timeout=10) as http:
+        response = await http.post(
+            "/v1/keys",
+            json={"org_id": org_id, "project_id": project_id},
+            headers={"Authorization": f"Bearer {ADMIN_KEY}"},
+        )
+        assert response.status_code == 201, response.text
+        return response.json()["key"]
+
+
+async def test_mcp_scopes_by_real_customer_api_key(mcp_server):
+    """The multi-tenancy gap: a shared /mcp endpoint used to serve EVERY
+    caller from the single HAKI_MCP_* server config, so two different
+    signed-up customers on the same running server could never be told
+    apart. A real hk_ key (Authorization header) + a client-set
+    X-Haki-Subject-Id header must now resolve to THAT key's own
+    org/project — different from, and isolated from, the server's legacy
+    default scope (MCP_PROJECT/SUBJECT used by every other test in this
+    file, which exercises the no-Authorization-header self-hosted
+    fallback path instead)."""
+    tenant_project = "prj_mcp_tenant_a"
+    tenant_subject = "usr_tenant_a"
+    key = await _create_key(mcp_server, org_id="org_mcp_tenant_a", project_id=tenant_project)
+
+    async with create_mcp_http_client(
+        headers={"Authorization": f"Bearer {key}", "X-Haki-Subject-Id": tenant_subject}
+    ) as http_client:
+        async with streamable_http_client(f"{mcp_server}/mcp", http_client=http_client) as (
+            read,
+            write,
+        ):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                capture = await session.call_tool(
+                    "haki_capture", {"content": "Decision propre a ce tenant."}
+                )
+    capture_data = _tool_data(capture)
+    assert capture_data["project_id"] == tenant_project
+    assert capture_data["project_id"] != MCP_PROJECT  # never the legacy default
+
+    # Visible on the tenant's own project/subject via the HTTP API — proof
+    # the write actually landed in the resolved scope, not the default one.
+    async with httpx.AsyncClient(base_url=mcp_server, timeout=10) as http:
+        response = await http.get(
+            "/v1/timeline",
+            params={"project_id": tenant_project, "subject_id": tenant_subject},
+        )
+    assert response.status_code == 200
+    assert len(response.json()["events"]) == 1
+
+
+async def test_mcp_two_tenants_on_the_same_server_never_cross(mcp_server):
+    """The core multi-tenancy claim: two different customers' keys, same
+    running /mcp process, never see each other's memory."""
+    project_a = await _create_key(mcp_server, org_id="org_mcp_x", project_id="prj_mcp_x")
+    project_b = await _create_key(mcp_server, org_id="org_mcp_y", project_id="prj_mcp_y")
+
+    async def _capture_as(key: str) -> dict:
+        async with create_mcp_http_client(
+            headers={"Authorization": f"Bearer {key}", "X-Haki-Subject-Id": "usr_shared"}
+        ) as http_client:
+            async with streamable_http_client(f"{mcp_server}/mcp", http_client=http_client) as (
+                read,
+                write,
+            ):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool(
+                        "haki_context", {"query": "quoi que ce soit"}
+                    )
+        return _tool_data(result)
+
+    result_a = await _capture_as(project_a)
+    result_b = await _capture_as(project_b)
+    assert result_a["project_id"] == "prj_mcp_x"
+    assert result_b["project_id"] == "prj_mcp_y"
+
+
+async def test_mcp_rejects_invalid_api_key(mcp_server):
+    async with create_mcp_http_client(
+        headers={"Authorization": "Bearer hk_not_a_real_key", "X-Haki-Subject-Id": "usr_x"}
+    ) as http_client:
+        async with streamable_http_client(f"{mcp_server}/mcp", http_client=http_client) as (
+            read,
+            write,
+        ):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool("haki_context", {"query": "x"})
+    assert result.is_error
+    assert "invalid or revoked" in result.content[0].text
+
+
+async def test_mcp_requires_subject_header_with_a_real_key(mcp_server):
+    key = await _create_key(mcp_server, org_id="org_mcp_noheader", project_id="prj_mcp_noheader")
+    async with create_mcp_http_client(headers={"Authorization": f"Bearer {key}"}) as http_client:
+        async with streamable_http_client(f"{mcp_server}/mcp", http_client=http_client) as (
+            read,
+            write,
+        ):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool("haki_context", {"query": "x"})
+    assert result.is_error
+    assert "X-Haki-Subject-Id" in result.content[0].text
+
+
+async def test_mcp_real_key_bypasses_the_legacy_shared_secret(mcp_server_with_key):
+    """Found live: when HAKI_API_KEY (the legacy single shared secret) is
+    configured — exactly the production setup — a real customer's hk_ key
+    used to be rejected outright by the middleware before even reaching
+    the tool layer, because it never equals that one shared value. A real
+    hk_ key must work on its own, without also needing the shared secret."""
+    key = await _create_key(
+        mcp_server_with_key, org_id="org_mcp_withkey", project_id="prj_mcp_withkey"
+    )
+    async with create_mcp_http_client(
+        headers={"Authorization": f"Bearer {key}", "X-Haki-Subject-Id": "usr_withkey"}
+    ) as http_client:
+        async with streamable_http_client(
+            f"{mcp_server_with_key}/mcp", http_client=http_client
+        ) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool("haki_context", {"query": "x"})
+    assert not result.is_error, result.content
 
 
 async def test_mcp_dev_auth(mcp_server_with_key):

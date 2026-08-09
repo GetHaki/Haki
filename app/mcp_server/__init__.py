@@ -15,16 +15,30 @@ build_context failure inside haki_context is caught, logged loudly
 turned into a status="failed" result instead of either a raw MCP protocol
 error or, worse, a result that looks like "the subject has no memory".
 
-Memory is PROJECT- AND SUBJECT-SCOPED by config: project_id and subject_id
-both come from the server config (HAKI_MCP_PROJECT_ID, HAKI_MCP_SUBJECT_ID),
-never from the model (PRD — "Le client ne doit pas laisser le modele
-choisir ces valeurs"). Neither tool accepts a subject_id argument — a team
-sharing one Cursor deployment needs one server config per person, the same
-way each install already gets its own project.
+Memory is always PROJECT- AND SUBJECT-SCOPED, never chosen by the model
+(PRD — "Le client ne doit pas laisser le modele choisir ces valeurs").
+Neither tool accepts a subject_id argument — a team sharing one Cursor
+deployment needs one config per person, the same way each install already
+gets its own project. Two scoping sources, resolved per-request by
+_resolve_scope below (the original single-server-config design only works
+for a self-hosted `docker compose up` install — one process for one
+person; a server shared by several tenants from ONE process can't hold
+"this caller's project" in a global env var):
 
-Dev auth: when HAKI_API_KEY is set, the /mcp endpoint requires
-`Authorization: Bearer <key>` (enforced in app.main). Unset = open mode,
-documented for local development only. Full OAuth: later sprint.
+- A real `hk_` API key (Authorization: Bearer hk_..., the same key used
+  against /v1/*) resolves org_id/project_id exactly like
+  ApiKeyAuthMiddleware does for /v1/* (app/auth.py); subject_id then
+  comes from a client-set X-Haki-Subject-Id header (configured once in
+  the MCP client's own config, not per-call).
+- No Authorization header at all falls back to the legacy single-server
+  config (HAKI_MCP_PROJECT_ID/ORG_ID/SUBJECT_ID) — unchanged behavior for
+  existing self-hosted installs.
+
+Auth: a request bearing a real `hk_` key is validated per-tool-call
+against the api_keys table (revoked/unknown -> ToolError, never silently
+falls through to the legacy path). A request with no Authorization header
+at all still respects the legacy single-shared-secret gate (HAKI_API_KEY,
+enforced in app.main) for self-hosted dev use. Full OAuth: later sprint.
 
 Honest limit (PRD / Haki_Memory_Runtime.md): MCP alone does NOT intercept
 100 % of Cursor conversations — the server only sees the tool calls Cursor
@@ -40,8 +54,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from mcp.server import MCPServer
+from mcp.server.mcpserver import Context
+from mcp.server.mcpserver.exceptions import ToolError
 
 from app import ledger, metrics
+from app.auth import resolve_api_key
 from app.config import settings
 from app.context import build_context, failed_packet, get_trace
 from app.db import async_session
@@ -85,20 +102,79 @@ def _format_packet(subject_id: str, packet: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+class _Scope:
+    __slots__ = ("org_id", "project_id", "subject_id")
+
+    def __init__(self, org_id: str, project_id: str, subject_id: str) -> None:
+        self.org_id = org_id
+        self.project_id = project_id
+        self.subject_id = subject_id
+
+
+async def _resolve_scope(ctx: Context) -> _Scope:
+    """Real multi-tenant scoping for a shared /mcp endpoint.
+
+    Every tool below used to read project_id/org_id/subject_id straight
+    off HAKI_MCP_* server config — fine for a `docker compose up` install
+    where the whole server exists for exactly one person, broken for a
+    server shared by several tenants from ONE process (a single global
+    env var cannot hold "this caller's project"). A caller's own `hk_`
+    key — the same one already used for the REST API — now resolves
+    org_id/project_id here exactly like ApiKeyAuthMiddleware does for
+    /v1/* (app/auth.py). subject_id has no equivalent server-side source
+    (MCP tools take no subject_id argument by design — PRD: "le modele ne
+    choisit pas ce scope"), so it travels as a client-set HTTP header,
+    X-Haki-Subject-Id, configured once in the MCP client's own config
+    (mcp.json), not chosen per-call by the model.
+
+    No Authorization header at all -> unchanged self-hosted behavior
+    (HAKI_MCP_PROJECT_ID/ORG_ID/SUBJECT_ID), so `docker compose up` and
+    existing self-hosted installs keep working exactly as before.
+    """
+    headers = ctx.headers or {}
+    auth_header = headers.get("authorization") or headers.get("Authorization")
+    token = None
+    if auth_header and auth_header.lower().startswith("bearer "):
+        token = auth_header[7:].strip()
+
+    if token is None:
+        return _Scope(settings.mcp_org_id, settings.mcp_project_id, settings.mcp_subject_id)
+
+    if not token.startswith("hk_"):
+        raise ToolError(
+            "invalid Authorization header: expected 'Bearer hk_...' (a Haki API key), "
+            "not the legacy single shared secret"
+        )
+    key = await resolve_api_key(token)
+    if key is None:
+        raise ToolError("invalid or revoked API key")
+
+    subject_id = headers.get("x-haki-subject-id") or headers.get("X-Haki-Subject-Id")
+    if not subject_id:
+        raise ToolError(
+            "missing X-Haki-Subject-Id header: set it once in your MCP client config "
+            "(mcp.json) to the subject this server instance should remember — a team "
+            "sharing one Cursor deployment needs one subject per person, the same way "
+            "each install already gets its own project"
+        )
+    return _Scope(key.org_id, key.project_id, subject_id)
+
+
 @mcp.tool()
-async def haki_context(query: str, budget_tokens: int = 900) -> dict[str, Any]:
+async def haki_context(ctx: Context, query: str, budget_tokens: int = 900) -> dict[str, Any]:
     """Rappelle la memoire du projet (decisions, conventions, preferences)
     pertinente pour une tache. A appeler AVANT de planifier ou modifier du
     code. Retourne un bloc pret a injecter, avec dates et sources, le
     trace_id (inspectable via haki_inspect), et un `status` explicite
     ("ok"/"degraded"/"failed") — ne jamais traiter une reponse degradee ou
     en echec comme "aucun fait connu"."""
+    scope = await _resolve_scope(ctx)
     try:
         async with async_session() as session:
             packet, token_count, trace_id = await build_context(
                 session,
-                project_id=settings.mcp_project_id,
-                subject_id=settings.mcp_subject_id,
+                project_id=scope.project_id,
+                subject_id=scope.subject_id,
                 query=query,
                 purpose="mcp",
                 budget_tokens=budget_tokens,
@@ -113,8 +189,8 @@ async def haki_context(query: str, budget_tokens: int = 900) -> dict[str, Any]:
         # otherwise be unable to tell "no memory" from "memory unreachable".
         logger.exception(
             "mcp haki_context: build_context failed (project=%s subject=%s)",
-            settings.mcp_project_id,
-            settings.mcp_subject_id,
+            scope.project_id,
+            scope.subject_id,
         )
         metrics.increment("mcp.context.failed")
         packet = failed_packet(["build_context_failed: see server logs"])
@@ -123,30 +199,31 @@ async def haki_context(query: str, budget_tokens: int = 900) -> dict[str, Any]:
     else:
         metrics.increment(f"mcp.context.{packet['status']}")
     return {
-        "context": _format_packet(settings.mcp_subject_id, packet),
+        "context": _format_packet(scope.subject_id, packet),
         "facts": packet["facts"],
         "warnings": packet["warnings"],
         "status": packet["status"],
         "token_count": token_count,
         "trace_id": str(trace_id) if trace_id else None,
-        "project_id": settings.mcp_project_id,
+        "project_id": scope.project_id,
     }
 
 
 @mcp.tool()
-async def haki_capture(content: str, kind: str = "agent.observation") -> dict[str, Any]:
+async def haki_capture(ctx: Context, content: str, kind: str = "agent.observation") -> dict[str, Any]:
     """Memorise un fait durable du projet : decision technique, convention,
     erreur resolue. A appeler en FIN de tache. Ne jamais memoriser de
     secrets, tokens ou donnees ephemeres. La consolidation est synchrone en
     dev (HAKI_MCP_AUTOCONSOLIDATE), donc le fait est rappelable
     immediatement."""
-    subject_id = settings.mcp_subject_id
+    scope = await _resolve_scope(ctx)
+    subject_id = scope.subject_id
     # Content-based idempotency key (no timestamp): an agent calling the
     # tool twice with the same memory does not create a duplicate event.
     digest = hashlib.sha256(f"{kind}\n{content}".encode("utf-8")).hexdigest()
     event = EventIn(
-        org_id=settings.mcp_org_id,
-        project_id=settings.mcp_project_id,
+        org_id=scope.org_id,
+        project_id=scope.project_id,
         subject_type="user",
         subject_id=subject_id,
         actor_type="agent",
@@ -164,7 +241,7 @@ async def haki_capture(content: str, kind: str = "agent.observation") -> dict[st
         if not deduplicated:
             job = await ledger.create_consolidation_job(
                 session,
-                project_id=settings.mcp_project_id,
+                project_id=scope.project_id,
                 event_ids=[stored.id],
             )
         await session.commit()
@@ -178,21 +255,22 @@ async def haki_capture(content: str, kind: str = "agent.observation") -> dict[st
         "event_id": str(stored.id),
         "deduplicated": deduplicated,
         "consolidated": processed,
-        "project_id": settings.mcp_project_id,
+        "project_id": scope.project_id,
     }
 
 
 @mcp.tool()
-async def haki_inspect(trace_id: str) -> dict[str, Any]:
+async def haki_inspect(ctx: Context, trace_id: str) -> dict[str, Any]:
     """Inspecte la trace d'un appel haki_context : quels faits ont ete
     inclus, exclus ou bloques, et pourquoi (reason_code). Preuve de
     provenance de la memoire servie."""
+    scope = await _resolve_scope(ctx)
     async with async_session() as session:
         trace = await get_trace(
             session,
             trace_id=uuid.UUID(trace_id),
-            project_id=settings.mcp_project_id,
-            subject_id=settings.mcp_subject_id,
+            project_id=scope.project_id,
+            subject_id=scope.subject_id,
         )
     return {
         "trace_id": str(trace.id),
@@ -208,16 +286,17 @@ async def haki_inspect(trace_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-async def haki_forget(mode: str = "disable") -> dict[str, Any]:
+async def haki_forget(ctx: Context, mode: str = "disable") -> dict[str, Any]:
     """Oublie la memoire du sujet configure pour ce serveur, dans ce projet.
     mode='disable' (reversible, les faits passent a disabled) ou 'delete'
     (effacement reel : faits, embeddings, evenements, traces). Retourne le
     recu d'effacement (forget_id) et les compteurs de ce qui a ete fait."""
+    scope = await _resolve_scope(ctx)
     async with async_session() as session:
         receipt, counters = await ledger.forget(
             session,
-            project_id=settings.mcp_project_id,
-            subject_id=settings.mcp_subject_id,
+            project_id=scope.project_id,
+            subject_id=scope.subject_id,
             mode=mode,
         )
         await session.commit()
@@ -226,13 +305,14 @@ async def haki_forget(mode: str = "disable") -> dict[str, Any]:
         "mode": mode,
         "scope": receipt.scope,
         "forget_id": str(receipt.id),
-        "project_id": settings.mcp_project_id,
+        "project_id": scope.project_id,
         **counters,
     }
 
 
 @mcp.tool()
 async def haki_correct(
+    ctx: Context,
     rating: str,
     fact_id: str | None = None,
     trace_id: str | None = None,
@@ -245,12 +325,13 @@ async def haki_correct(
     fact_id (un fait precis, generalement vu via haki_context/haki_inspect)
     OU trace_id (un appel haki_context entier). Meme mecanisme que
     POST /v1/feedback (app.ledger.submit_feedback) : effet identique quel
-    que soit le chemin d'appel. Scope au projet configure pour ce serveur
-    (HAKI_MCP_PROJECT_ID)."""
+    que soit le chemin d'appel. Scope resolu par cle API (voir
+    _resolve_scope) ou, en self-hosted sans cle, par HAKI_MCP_PROJECT_ID."""
+    scope = await _resolve_scope(ctx)
     async with async_session() as session:
         row, fact_status = await ledger.submit_feedback(
             session,
-            project_id=settings.mcp_project_id,
+            project_id=scope.project_id,
             rating=rating,
             trace_id=uuid.UUID(trace_id) if trace_id else None,
             fact_id=uuid.UUID(fact_id) if fact_id else None,
@@ -261,5 +342,5 @@ async def haki_correct(
         "status": "recorded",
         "feedback_id": str(row.id),
         "fact_status": fact_status,
-        "project_id": settings.mcp_project_id,
+        "project_id": scope.project_id,
     }

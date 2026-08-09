@@ -59,14 +59,26 @@ app.add_middleware(ApiKeyAuthMiddleware)
 
 @app.middleware("http")
 async def mcp_dev_auth(request: Request, call_next) -> Response:
-    """Dev auth for the MCP endpoint (sprint 4).
+    """Legacy single-secret gate for the MCP endpoint (sprint 4).
 
-    When HAKI_API_KEY is set, /mcp requires `Authorization: Bearer <key>`.
-    Unset = open mode (local development only, documented in the README).
-    Full OAuth lands in a later sprint.
+    A real customer `hk_` key is let through here unconditionally: it is
+    validated per-tool-call against the api_keys table by
+    app.mcp_server._resolve_scope (invalid/revoked -> a clear ToolError,
+    not a silent fallback) — checking it AGAIN here against the single
+    shared HAKI_API_KEY secret would reject every real multi-tenant
+    deployment, since a customer's key is never equal to that one shared
+    value.
+
+    When HAKI_API_KEY is set, any OTHER bearer token on /mcp (not an hk_
+    key — i.e. no Authorization header, or one that isn't the legacy
+    self-hosted single-server config) must match it exactly. Unset = open
+    mode for that path (local development only, documented in the
+    README). Full OAuth lands in a later sprint.
     """
     if settings.api_key and request.url.path.startswith("/mcp"):
-        if request.headers.get("authorization") != f"Bearer {settings.api_key}":
+        auth_header = request.headers.get("authorization") or ""
+        token = auth_header[7:] if auth_header.lower().startswith("bearer ") else ""
+        if not token.startswith("hk_") and auth_header != f"Bearer {settings.api_key}":
             return JSONResponse(
                 status_code=401,
                 content=error_body(

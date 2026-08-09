@@ -285,6 +285,10 @@ cost. See [`eval/`](eval/) and [`eval/results/`](eval/results/).
 | `GET /v1/timeline` | Raw events for a subject |
 | `GET /v1/facts` | A subject's facts, all statuses |
 | `GET /v1/traces` | Recent traces for a project |
+| `GET /v1/graph` | Memory graph (facts + relations derived from stored FKs) |
+| `GET /v1/projects` | Projects with subject/fact counts |
+| `GET /v1/subjects` | Subjects for a project, with fact counts |
+| `GET /v1/stats/overview` | Latency and hit-rate stats for a project |
 | `GET /v1/conflicts` | Contradictions pending resolution |
 | `POST /v1/conflicts/{id}/resolve` | Resolve a conflict |
 | `POST /v1/feedback` | Rate a memory (`useful`/`irrelevant`/`incorrect`) |

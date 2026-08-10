@@ -1,7 +1,17 @@
 {
   "name": "gethaki",
-  "version": "0.1.0",
-  "description": "Haki TypeScript SDK — long-term memory for AI agents (client, runtime helpers, CLI)",
+  "version": "0.1.1",
+  "description": "TypeScript SDK for Haki — long-term memory for AI agents, with proof",
+  "keywords": ["ai", "agents", "memory", "llm", "rag", "context"],
+  "homepage": "https://gethaki.space",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GetHaki/Haki.git",
+    "directory": "sdk/typescript"
+  },
+  "bugs": "https://github.com/GetHaki/Haki/issues",
+  "license": "Apache-2.0",
+  "author": "Dicken AI",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

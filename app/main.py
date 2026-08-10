@@ -48,7 +48,19 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         yield
 
 
-app = FastAPI(title="Haki", version="0.1.0", lifespan=lifespan)
+# Swagger/ReDoc UIs are disabled whenever HAKI_ADMIN_KEY is set — the same
+# signal docs/DEPLOY.md already treats as "this is a real deployment, not a
+# local docker-compose". Self-hosters running without an admin key (local
+# dev, first-time trial) keep interactive docs; api.gethaki.space, which
+# always sets the admin key, does not expose them publicly.
+_docs_enabled = settings.admin_key is None
+app = FastAPI(
+    title="Haki",
+    version="0.1.0",
+    lifespan=lifespan,
+    docs_url="/docs" if _docs_enabled else None,
+    redoc_url="/redoc" if _docs_enabled else None,
+)
 register_error_handlers(app)
 app.include_router(api_router)
 

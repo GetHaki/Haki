@@ -44,6 +44,11 @@ export interface PacketFact {
   confidence: number | null;
   valid_from: string | null;
   source_event_ids: string[];
+  /** Typology + volatility (M2); absent when talking to a pre-M2 server. */
+  fact_kind?: string | null;
+  volatility?: string | null;
+  last_confirmed?: string | null;
+  freshness?: "current" | "unconfirmed" | null;
 }
 
 /** Source event excerpt served in the packet (episodic memory). */

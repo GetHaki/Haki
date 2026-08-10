@@ -19,7 +19,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.models import Event
+from app.models import FACT_KINDS, VOLATILITY_CLASSES, Event
 
 # Embedding dimension of the `facts.embedding` column (vector(384), migration
 # 0003). Every embedder selected by config MUST produce vectors of this size.
@@ -80,6 +80,15 @@ class ExtractedFact(BaseModel):
     # "reject"; meaningless/ignored otherwise. One of REJECT_REASONS.
     reject_reason: str | None = Field(
         default=None, pattern="^(" + "|".join(REJECT_REASONS) + ")$"
+    )
+    # Typology + volatility (M2): proposed by the extractor, validated here,
+    # overridable downstream. None = server defaults ("attribute"/"stable") --
+    # a provider that never heard of these fields keeps working unchanged.
+    fact_kind: str | None = Field(
+        default=None, pattern="^(" + "|".join(FACT_KINDS) + ")$"
+    )
+    volatility: str | None = Field(
+        default=None, pattern="^(" + "|".join(VOLATILITY_CLASSES) + ")$"
     )
 
     @model_validator(mode="after")

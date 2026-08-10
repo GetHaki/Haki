@@ -30,6 +30,14 @@ class PacketFact(BaseModel):
     confidence: float | None
     valid_from: str | None
     source_event_ids: list[str]
+    # Typology + volatility (M2). All optional with None defaults: traces
+    # persisted BEFORE migration 0013 re-validate through this model on
+    # GET /v1/inspect/{trace_id} — an old packet without these keys must
+    # keep loading (backward-compat guarantee, tested).
+    fact_kind: str | None = None
+    volatility: str | None = None
+    last_confirmed: str | None = None
+    freshness: str | None = None  # "current" | "unconfirmed"
 
 
 class PacketEpisode(BaseModel):

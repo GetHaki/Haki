@@ -74,6 +74,34 @@ Vue de lecture complète (`FactOut`, utilisée par `GET /v1/facts`) :
 | `supersedes_id` | uuid \| null | Le fait que celui-ci remplace |
 | `source_event_ids` | uuid[] | Provenance exacte — l'événement (ou les événements) qui ont produit ce fait |
 | `version` | int | Incrémenté à chaque transition |
+| `fact_kind` | enum | `attribute` \| `preference` \| `instruction` — voir ci-dessous |
+| `volatility` | enum | `stable` \| `slow` \| `volatile` \| `ephemeral` — voir ci-dessous |
+| `last_reinforced_at` | datetime \| null | Dernière fois qu'un NOUVEL événement a réaffirmé exactement cette valeur (horloge de fraîcheur) |
+
+## Typologie et volatilité
+
+La plupart des faits périment en silence — le sujet déménage, change
+d'emploi, termine un projet — et rien ne vient jamais contredire l'ancienne
+valeur. `fact_kind` classe CE QU'EST le fait (`attribute` : un état du
+monde ; `preference` : comment le sujet veut que les choses se passent ;
+`instruction` : une règle opératoire durable énoncée par le sujet, à la
+troisième personne — jamais une directive adressée à l'agent lui-même,
+rejetée à la porte d'écriture). `volatility` classe À QUELLE VITESSE il
+périme sans événement correctif :
+
+| Classe | Horizon (défaut) | Au-delà de l'horizon |
+|---|---|---|
+| `stable` | aucun | servi pour toujours, comportement pré-M2 inchangé |
+| `slow` | 365 jours (`HAKI_VOLATILITY_HORIZON_SLOW_DAYS`) | toujours servi, marqué `freshness: "unconfirmed"` |
+| `volatile` | 60 jours (`HAKI_VOLATILITY_HORIZON_VOLATILE_DAYS`) | exclu des faits courants (`reason_code: volatility_expired`) |
+| `ephemeral` | 7 jours (`HAKI_VOLATILITY_HORIZON_EPHEMERAL_DAYS`) | exclu des faits courants, comme `volatile` |
+
+L'horloge est `coalesce(last_reinforced_at, valid_from, recorded_from)` :
+un nouvel événement réaffirmant exactement la même valeur la rafraîchit
+(renforcement à l'écriture, voir [Consolidator](/fr/concepts/consolidator))
+sans créer de nouvelle version du fait. Un fait périmé n'est jamais
+supprimé ni supersédé — seule sa présentation dans `/v1/context` change ;
+il reste visible via `GET /v1/facts`.
 
 Le **prédicat n'est pas une clé stable garantie** : deux formulations
 différentes du même concept (`bike_count` vs `bikes_owned`) peuvent

@@ -55,6 +55,8 @@ def mock_fact(
     qualifiers: dict[str, Any] | None = None,
     evidence_span: str | None = None,
     reject_reason: str | None = None,
+    fact_kind: str | None = None,
+    volatility: str | None = None,
 ) -> dict[str, Any]:
     """Helper to build a raw mock_facts entry (kept unvalidated on purpose).
 
@@ -76,4 +78,8 @@ def mock_fact(
         fact["evidence_span"] = evidence_span
     if reject_reason is not None:
         fact["reject_reason"] = reject_reason
+    if fact_kind is not None:
+        fact["fact_kind"] = fact_kind
+    if volatility is not None:
+        fact["volatility"] = volatility
     return fact

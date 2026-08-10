@@ -122,5 +122,15 @@ class Settings(BaseSettings):
     # recallable immediately (dev default; a worker can take over in prod).
     mcp_autoconsolidate: bool = True  # HAKI_MCP_AUTOCONSOLIDATE
 
+    # Volatility horizons (M2 -- typologie + classes de volatilite): how long a
+    # fact of each class is served as current without re-confirmation. The
+    # clock runs on coalesce(last_reinforced_at, valid_from, recorded_from); a
+    # duplicate re-assertion refreshes last_reinforced_at (see
+    # app/consolidator). "stable" has no horizon by design. Config, not
+    # hardcoded -- tune per deployment without a release.
+    volatility_horizon_slow_days: int = 365  # HAKI_VOLATILITY_HORIZON_SLOW_DAYS
+    volatility_horizon_volatile_days: int = 60  # HAKI_VOLATILITY_HORIZON_VOLATILE_DAYS
+    volatility_horizon_ephemeral_days: int = 7  # HAKI_VOLATILITY_HORIZON_EPHEMERAL_DAYS
+
 
 settings = Settings()

@@ -92,7 +92,7 @@ async def resolve_conflict(
     # Serialize with the consolidator's write phase (and with a concurrent
     # resolve of the same subject): activation must never race a
     # consolidation creating an active fact for the same predicate — the
-    # partial unique index (migration 0015) would turn that race into a
+    # partial unique index (migration 0012) would turn that race into a
     # 500 instead of a clean sequential outcome.
     await ledger.acquire_subject_write_lock(
         session, project_id=conflict.project_id, subject_id=conflict.subject_id

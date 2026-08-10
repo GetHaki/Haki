@@ -3,7 +3,7 @@ from app.models.base import Base
 from app.models.conflict import ConflictSet
 from app.models.credit_transaction import CreditTransaction
 from app.models.event import Event
-from app.models.fact import Fact, FactStatus
+from app.models.fact import FACT_KINDS, VOLATILITY_CLASSES, Fact, FactStatus
 from app.models.feedback import Feedback
 from app.models.job import Job, JobStatus
 from app.models.organization import Organization
@@ -17,6 +17,7 @@ __all__ = [
     "ContextTrace",
     "CreditTransaction",
     "Event",
+    "FACT_KINDS",
     "Fact",
     "FactStatus",
     "Feedback",
@@ -24,4 +25,5 @@ __all__ = [
     "Job",
     "JobStatus",
     "Organization",
+    "VOLATILITY_CLASSES",
 ]

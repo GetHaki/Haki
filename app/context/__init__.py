@@ -6,6 +6,10 @@ token budget, with a persisted decision trace.
 Hard filters BEFORE scoring: status = active, exact (project_id, subject_id)
 scope, valid_to IS NULL OR valid_to > now(). Facts listed in an OPEN conflict
 set are never served: they are blocked with reason_code conflict_open.
+Post-retrieval, a volatility filter (M2) excludes a volatile/ephemeral fact
+past its freshness horizon from "current" (reason_code volatility_expired);
+a slow fact past its horizon is still served, flagged "unconfirmed" — see
+`_fact_freshness`.
 
 Score = 0.6 * cosine similarity (pgvector embedding)
       + 0.25 * full-text rank (ts_rank_cd over the GENERATED search_vector
@@ -39,6 +43,7 @@ import json
 import re
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import Float, select
@@ -46,6 +51,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import func
 
 from app import metrics
+from app.config import settings
 from app.errors import ApiError
 from app.models import ConflictSet, ContextTrace, Event, Fact, FactStatus
 from app.providers import Embedder, get_embedder
@@ -162,6 +168,10 @@ async def _expand_via_entities(
                 Fact.confidence,
                 Fact.valid_from,
                 Fact.source_event_ids,
+                Fact.recorded_from,
+                Fact.last_reinforced_at,
+                Fact.fact_kind,
+                Fact.volatility,
             )
             .where(
                 Fact.project_id == project_id,
@@ -181,7 +191,40 @@ async def _expand_via_entities(
     return found
 
 
-def _packet_fact(row: Any) -> dict[str, Any]:
+# Volatility (M2): freshness horizon per class, read from config at call
+# time (env-overridable, never hardcoded). "stable" has no horizon — the
+# pre-M2 behavior every existing fact keeps.
+def volatility_horizon(volatility: str) -> timedelta | None:
+    days = {
+        "slow": settings.volatility_horizon_slow_days,
+        "volatile": settings.volatility_horizon_volatile_days,
+        "ephemeral": settings.volatility_horizon_ephemeral_days,
+    }.get(volatility)
+    return timedelta(days=days) if days is not None else None
+
+
+def _fact_freshness(row: Any, now: datetime) -> str:
+    """"current" | "unconfirmed" | "expired" for one retrieved fact row.
+
+    Clock: coalesce(last_reinforced_at, valid_from, recorded_from) — a
+    write-time reinforcement (migration 0012) already refreshes
+    last_reinforced_at on every re-assertion of the same value, so it
+    doubles as the freshness clock without a separate column. Past its
+    horizon, a slow fact stays served but flagged ("unconfirmed" — the
+    packet says so honestly); a volatile/ephemeral fact is NEVER served
+    as current ("expired": excluded, traced as volatility_expired).
+    """
+    horizon = volatility_horizon(getattr(row, "volatility", "stable") or "stable")
+    if horizon is None:
+        return "current"
+    reference = row.last_reinforced_at or row.valid_from or row.recorded_from
+    if reference is None or now - reference <= horizon:
+        return "current"
+    return "unconfirmed" if row.volatility == "slow" else "expired"
+
+
+def _packet_fact(row: Any, freshness: str = "current") -> dict[str, Any]:
+    reference = row.last_reinforced_at or row.valid_from or row.recorded_from
     return {
         "id": str(row.id),
         "predicate": row.predicate,
@@ -189,6 +232,12 @@ def _packet_fact(row: Any) -> dict[str, Any]:
         "confidence": row.confidence,
         "valid_from": row.valid_from.isoformat() if row.valid_from else None,
         "source_event_ids": [str(e) for e in row.source_event_ids],
+        "fact_kind": row.fact_kind,
+        "volatility": row.volatility,
+        # Honest freshness contract (M2): when the fact was last confirmed
+        # by an event, and whether it is inside its volatility horizon.
+        "last_confirmed": reference.isoformat() if reference else None,
+        "freshness": freshness,
     }
 
 
@@ -311,6 +360,10 @@ async def build_context(
             Fact.confidence,
             Fact.valid_from,
             Fact.source_event_ids,
+            Fact.recorded_from,
+            Fact.last_reinforced_at,
+            Fact.fact_kind,
+            Fact.volatility,
             score.label("score"),
         )
         .where(Fact.id.in_(select(candidates.c.id)))
@@ -325,8 +378,10 @@ async def build_context(
         session, project_id=project_id, subject_id=subject_id
     )
 
+    now_dt = datetime.now(timezone.utc)
     decisions: list[dict[str, Any]] = []
     eligible: list[Any] = []
+    freshness_by_id: dict[uuid.UUID, str] = {}
     for row in rows:
         if row.id in blocked_ids:
             decisions.append(
@@ -336,8 +391,19 @@ async def build_context(
                     "reason_code": "conflict_open",
                 }
             )
-        else:
-            eligible.append(row)
+            continue
+        freshness = _fact_freshness(row, now_dt)
+        if freshness == "expired":
+            decisions.append(
+                {
+                    "fact_id": str(row.id),
+                    "action": "excluded",
+                    "reason_code": "volatility_expired",
+                }
+            )
+            continue
+        freshness_by_id[row.id] = freshness
+        eligible.append(row)
 
     # Candidate facts waiting in an open conflict set are blocked too (they
     # are not active, so they never entered the scored pool).
@@ -369,7 +435,7 @@ async def build_context(
     for row in eligible:
         cost = estimate_tokens(_render(row.predicate, row.value))
         if token_count + cost <= budget_tokens:
-            packet_facts.append(_packet_fact(row))
+            packet_facts.append(_packet_fact(row, freshness_by_id.get(row.id, "current")))
             token_count += cost
             decisions.append(
                 {
@@ -409,9 +475,19 @@ async def build_context(
         for row in extra_rows:
             if token_count >= budget_tokens:
                 break
+            freshness = _fact_freshness(row, now_dt)
+            if freshness == "expired":
+                decisions.append(
+                    {
+                        "fact_id": str(row.id),
+                        "action": "excluded",
+                        "reason_code": "volatility_expired",
+                    }
+                )
+                continue
             cost = estimate_tokens(_render(row.predicate, row.value))
             if token_count + cost <= budget_tokens:
-                packet_facts.append(_packet_fact(row))
+                packet_facts.append(_packet_fact(row, freshness))
                 token_count += cost
                 decisions.append(
                     {
@@ -480,6 +556,12 @@ async def build_context(
     if n_blocked:
         warnings.append(
             f"open_conflict: {n_blocked} fact(s) hidden pending conflict resolution"
+        )
+    n_expired = sum(1 for d in decisions if d["reason_code"] == "volatility_expired")
+    if n_expired:
+        warnings.append(
+            f"volatility_expired: {n_expired} fact(s) past their volatility "
+            "horizon hidden from current facts"
         )
     warnings.extend(extra_warnings or [])
 

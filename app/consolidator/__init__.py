@@ -50,7 +50,7 @@ Guarantees:
   active fact reinforces it (counter + date) instead of creating a row.
   Concurrency: the whole write phase is serialized per (project_id,
   subject_id) with a transaction-scoped advisory lock, and a partial
-  unique index (migration 0015) makes two ACTIVE facts with the same
+  unique index (migration 0012) makes two ACTIVE facts with the same
   exact predicate impossible at the DB level even if some future write
   path forgets the lock — legitimate re-assertions are absorbed as
   duplicates/reinforcements BEFORE insertion, so the index only ever
@@ -447,6 +447,15 @@ async def _apply_candidate(
         # always win — that is the actual update.
         value = {**existing.value, **candidate.value}
 
+    # Typology/volatility (M2): the candidate's own classes win; on a
+    # supersede of an existing fact, omitted classes are inherited rather
+    # than silently reset to the defaults (a status-only update must not
+    # "promote" a volatile fact to stable just because the extractor did not
+    # restate its class — same reasoning as the value carry-forward above).
+    inherit = candidate.action == "supersede" and existing is not None
+    fact_kind = candidate.fact_kind or (existing.fact_kind if inherit else "attribute")
+    volatility = candidate.volatility or (existing.volatility if inherit else "stable")
+
     fact = await create_fact(
         session,
         org_id=event.org_id,
@@ -460,6 +469,8 @@ async def _apply_candidate(
         confidence=candidate.confidence,
         valid_from=event.occurred_at,
         source_event_ids=[event.id],
+        fact_kind=fact_kind,
+        volatility=volatility,
     )
     fact.embedding = embedding
     fact.search_text = _search_text(candidate.predicate, value)

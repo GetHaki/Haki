@@ -28,6 +28,9 @@ class FactOut(BaseModel):
     supersedes_id: uuid.UUID | None
     source_event_ids: list[uuid.UUID]
     version: int
+    fact_kind: str
+    volatility: str
+    last_reinforced_at: datetime | None
 
 
 class FactListResponse(BaseModel):

@@ -64,9 +64,16 @@ def build_prompt_context(packet: dict[str, Any]) -> str:
         value = fact.get("value")
         valid_from = fact.get("valid_from") or "unknown date"
         sources = ",".join(fact.get("source_event_ids") or []) or "no-source"
+        marker = ""
+        if fact.get("freshness") == "unconfirmed":
+            last = fact.get("last_confirmed") or "an unknown date"
+            marker = (
+                f" — UNCONFIRMED since {last}: past its freshness horizon, "
+                "re-confirm with the subject before relying on it"
+            )
         lines.append(
             f"- {fact.get('predicate')}: {value} "
-            f"(valid from {valid_from}; sources: {sources})"
+            f"(valid from {valid_from}; sources: {sources}){marker}"
         )
     if episodes:
         lines.append("Dated events from the source history (episodic memory):")

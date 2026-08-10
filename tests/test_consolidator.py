@@ -15,14 +15,18 @@ from app.providers.base import EMBEDDING_DIM
 from app.providers.fake import FakeProvider, mock_fact
 
 
-def make_memory_event(mock_facts: list[dict], subject_id: str = "usr_42") -> dict:
+def make_memory_event(
+    mock_facts: list[dict],
+    subject_id: str = "usr_42",
+    occurred_at: str = "2026-07-28T10:00:00Z",
+) -> dict:
     return {
         "org_id": "org_acme",
         "project_id": "prj_support",
         "subject_type": "user",
         "subject_id": subject_id,
         "kind": "conversation.message",
-        "occurred_at": "2026-07-28T10:00:00Z",
+        "occurred_at": occurred_at,
         "payload": {"role": "user", "content": "...", "mock_facts": mock_facts},
     }
 

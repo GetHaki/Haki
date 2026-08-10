@@ -162,6 +162,8 @@ async def create_fact(
     valid_from: datetime | None = None,
     source_event_ids: list[uuid.UUID] | None = None,
     supersedes_id: uuid.UUID | None = None,
+    fact_kind: str = "attribute",
+    volatility: str = "stable",
 ) -> Fact:
     fact = Fact(
         org_id=org_id,
@@ -178,6 +180,8 @@ async def create_fact(
         source_event_ids=source_event_ids or [],
         supersedes_id=supersedes_id,
         version=1,
+        fact_kind=fact_kind,
+        volatility=volatility,
     )
     session.add(fact)
     await session.flush()

@@ -20,6 +20,21 @@ class FactStatus(str, enum.Enum):
     deleted = "deleted"
 
 
+# Fact typology (M2). "event" lives in episodic memory (events.embedding),
+# "task"/transient states are rejected at the write gate (transient_state)
+# and never become facts -- so the typology on this table is deliberately
+# small: durable attribute vs durable preference vs durable operating
+# instruction given by the subject (NOT a directive to the agent, which is
+# rejected as imperative_directive before ever reaching the ledger).
+FACT_KINDS: tuple[str, ...] = ("attribute", "preference", "instruction")
+
+# Volatility classes (M2): how fast a fact goes stale WITHOUT any
+# contradicting event. Default horizons live in app.config (settings.
+# volatility_horizon_*_days), never hardcoded. "stable" has no horizon --
+# the pre-M2 behavior every existing fact keeps.
+VOLATILITY_CLASSES: tuple[str, ...] = ("stable", "slow", "volatile", "ephemeral")
+
+
 class Fact(Base):
     """Versioned, bitemporal memory fact (contract B.2)."""
 
@@ -57,7 +72,7 @@ class Fact(Base):
     )
     version: Mapped[int] = mapped_column(Integer, default=1)
 
-    # Write-time reinforcement (migration 0015): a NEW source event that
+    # Write-time reinforcement (migration 0012): a NEW source event that
     # re-asserts the exact same canonical value updates these on the
     # existing active fact instead of creating a row. See app/consolidator
     # (_reinforce_or_count_duplicate) for the rule and why value equality
@@ -69,6 +84,14 @@ class Fact(Base):
     last_reinforced_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
     )
+
+    # Typology + volatility (M2, migration 0013). The freshness clock reuses
+    # last_reinforced_at above (falls back to valid_from, then recorded_from)
+    # -- a write-time reinforcement (migration 0012) already refreshes it on
+    # every re-assertion of the same value, so no separate "confirmed_at"
+    # column is needed.
+    fact_kind: Mapped[str] = mapped_column(String(32), default="attribute")
+    volatility: Mapped[str] = mapped_column(String(16), default="stable")
 
     # Retrieval (sprint 2): dense embedding + pre-rendered full-text column.
     # vector(384) since migration 0003 (default embedder: local fastembed,

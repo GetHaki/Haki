@@ -93,9 +93,13 @@ def _format_packet(subject_id: str, packet: dict[str, Any]) -> str:
         value = json.dumps(fact["value"], ensure_ascii=False, sort_keys=True)
         when = fact.get("valid_from") or "date inconnue"
         sources = ", ".join(fact.get("source_event_ids") or []) or "aucune"
+        suffix = ""
+        if fact.get("freshness") == "unconfirmed":
+            last = fact.get("last_confirmed") or "date inconnue"
+            suffix = f" [A RECONFIRMER — derniere confirmation {last}]"
         lines.append(
             f"- {fact['predicate']} = {value} (valide depuis {when}; "
-            f"source: {sources})"
+            f"source: {sources}){suffix}"
         )
     for warning in packet.get("warnings", []):
         lines.append(f"Attention: {warning}")

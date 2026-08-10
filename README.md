@@ -228,7 +228,7 @@ flowchart LR
     A[Incoming message] --> B[CAPTURE<br/>raw proof,<br/>append-only]
     B --> C[CONSOLIDATION<br/>extraction, dedup,<br/>supersession, conflicts]
     C --> D[(MEMORY<br/>active facts,<br/>dated, sourced)]
-    D --> E[CONTEXT<br/>relevant packet,<br/>within budget,<br/>42ms]
+    D --> E[CONTEXT<br/>relevant packet,<br/>within budget,<br/>249ms p95]
     E --> F[Agent and LLM]
     F --> B
     E -.-> G[INSPECT<br/>decision trace]
@@ -243,7 +243,8 @@ flowchart LR
    contradictions (conflict, hidden until resolved).
 3. **CONTEXT** — before each response, the agent requests relevant memory:
    active, valid, in-scope facts only, ranked by relevance, within a strict
-   token budget — around 42ms.
+   token budget — p95 measured at 249ms across 10,000 facts (see
+   scripts/benchmark_context.py).
 4. **INSPECT** — at any time, the trace explains why a memory was included,
    excluded, or blocked.
 5. **FORGET** — a correction or erasure propagates to everything derived
@@ -254,12 +255,14 @@ flowchart LR
 ## Measured performance
 
 Reproducible benchmark: `uv run python scripts/benchmark_context.py`.
+Re-measured 10 Aug 2026 — see the script's git history for the earlier,
+now-stale figures.
 
 | Facts in memory | p50 | p95 | PRD target |
 |---|---:|---:|---|
-| 100 | 60.5 ms | 80.6 ms | < 250 ms |
-| 1,000 | 63.7 ms | 68.0 ms | < 250 ms |
-| 10,000 | 27.8 ms | 42.5 ms | < 250 ms |
+| 100 | 124.7 ms | 151.8 ms | < 250 ms |
+| 1,000 | 126.3 ms | 144.9 ms | < 250 ms |
+| 10,000 | 203.0 ms | 248.5 ms | < 250 ms |
 
 Embeddings run locally (ONNX on CPU, 384-dimension multilingual model) — no
 network call in the critical path. LLM extraction cost is fully

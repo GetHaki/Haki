@@ -99,15 +99,17 @@ flowchart LR
 ## Performance (measured, not promised)
 
 Reproducible benchmark: `uv run python scripts/benchmark_context.py`
-(100 requests per size, local embeddings, Windows dev machine).
+(100 requests per size, local embeddings, Windows dev machine). Re-measured
+10 Aug 2026 — the table below replaces an earlier run whose numbers had
+drifted (see the script's own git history if you need the old figures).
 
 | Facts in memory | p50 | p95 | PRD target |
 |---|---:|---:|---|
-| 100 | 60.5 ms | 80.6 ms | < 250 ms |
-| 1,000 | 63.7 ms | 68.0 ms | < 250 ms |
-| 10,000 | 27.8 ms | **42.5 ms** | < 250 ms |
+| 100 | 124.7 ms | 151.8 ms | < 250 ms |
+| 1,000 | 126.3 ms | 144.9 ms | < 250 ms |
+| 10,000 | 203.0 ms | **248.5 ms** | < 250 ms |
 
-This 42 ms figure (p95, 10,000 facts) is the only performance measurement
+This 249 ms figure (p95, 10,000 facts) is the only performance measurement
 cited in this documentation outside of its exact context — do not
 generalize it to a different token budget, a different data volume, or a
 different machine. It holds because embeddings are computed **locally**

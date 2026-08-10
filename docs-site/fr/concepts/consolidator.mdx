@@ -69,10 +69,14 @@ candidat :
 ## Les quatre issues d'un candidat
 
 <Steps>
-  <Step title="Duplicate">
+  <Step title="Duplicate ou renforcement">
     Même `(subject, predicate, valeur canonique)` déjà présent parmi les
-    faits non supprimés → aucune nouvelle ligne. C'est aussi ce qui rend
-    le rejeu d'un job **idempotent**.
+    faits non supprimés → aucune nouvelle ligne. Un événement **rejoué**
+    (déjà dans `source_event_ids`) reste un simple doublon — c'est ce qui
+    rend le rejeu d'un job **idempotent**. Un **nouvel** événement qui
+    réaffirme la même valeur sur le fait actif le **renforce** à la
+    place : `reinforcement_count` et `last_reinforced_at` sont mis à jour,
+    le nouvel id d'événement est ajouté à `source_event_ids`.
   </Step>
   <Step title="Supersede">
     `action="supersede"` avec un fait existant trouvé : l'ancien fait
@@ -109,6 +113,28 @@ personne au lieu de réutiliser le sujet de l'événement) créait
 silencieusement un fait sous un sujet orphelin, injoignable par tout appel
 `/v1/context` — un vrai bug de perte de données trouvé en auditant les
 résultats d'évaluation sprint 10 à l'échelle.
+
+## Un seul fait actif par sujet+prédicat, garanti
+
+Toute la phase d'écriture (contrôle de doublon, résolution sémantique,
+renforcement, création) pour un `(project_id, subject_id)` donné est
+sérialisée par un verrou advisory Postgres à portée transaction
+(`pg_advisory_xact_lock`) avant que la moindre de ces décisions ne soit
+prise — deux consolidations concurrentes du même sujet ne peuvent jamais
+observer toutes les deux « aucun doublon » et insérer toutes les deux. Un
+index unique partiel sur `facts (project_id, subject_id, predicate) WHERE
+status = 'active'` renforce cette garantie au niveau base de données :
+même un futur chemin d'écriture qui oublierait le verrou ne peut pas créer
+deux faits actifs avec le même prédicat exact pour un sujet — il échoue
+bruyamment à la place.
+
+Le renforcement ne fusionne jamais un candidat dont la valeur a réellement
+**changé** : mesuré contre l'embedder local réel, une vraie mise à jour de
+valeur (ex. `bike_count` 3 → 4, distance cosinus 0.03) se trouve **plus
+proche** que plusieurs reformulations légitimes de même valeur (jusqu'à
+0.19) — aucun seuil de distance ne peut séparer les deux. Le renforcement
+exige donc l'égalité canonique exacte de valeur ; tout le reste ouvre
+toujours un conflit, comme avant.
 
 ## Résilience
 

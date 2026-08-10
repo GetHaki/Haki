@@ -4,7 +4,8 @@ Takes pending `consolidate` jobs, extracts memory candidates through the
 configured LLM provider, validates them, and applies the fact lifecycle:
 
 - same value as an existing fact for the same subject+predicate -> duplicate
-  (no new row; this is also what makes reprocessing a job idempotent);
+  (replayed event, no new row) or reinforcement (a NEW event re-asserting
+  the same value strengthens the existing active fact instead);
 - action "supersede" -> the current active fact becomes `superseded` (Ledger
   transition), the new fact becomes `active` with `supersedes_id`;
 - action "create" with a different value than an active fact of the same
@@ -44,10 +45,16 @@ Guarantees:
   NEVER deletes or alters the source events; the job stays replayable —
   failed jobs are picked up again on the next worker run;
 - idempotence: dedup is content-based (same subject_id + predicate +
-  canonical value among non-deleted facts => duplicate), so processing the
-  same job twice never creates duplicate facts. Chosen over a unique
-  constraint because several events may legitimately re-assert the same
-  fact and we want them counted as duplicates, not rejected by SQL.
+  canonical value among non-deleted facts), so processing the same job
+  twice never creates duplicate facts and a NEW event re-asserting an
+  active fact reinforces it (counter + date) instead of creating a row.
+  Concurrency: the whole write phase is serialized per (project_id,
+  subject_id) with a transaction-scoped advisory lock, and a partial
+  unique index (migration 0015) makes two ACTIVE facts with the same
+  exact predicate impossible at the DB level even if some future write
+  path forgets the lock — legitimate re-assertions are absorbed as
+  duplicates/reinforcements BEFORE insertion, so the index only ever
+  fires on a genuine race.
 """
 
 import json
@@ -63,7 +70,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import metrics
-from app.ledger.core import create_fact, transition_fact_status
+from app.ledger.core import acquire_subject_write_lock, create_fact, transition_fact_status
 from app.context import episode_text
 from app.models import ConflictSet, ContextTrace, Event, Fact, FactStatus, Job, JobStatus
 from app.providers import (
@@ -179,15 +186,19 @@ async def _active_fact(
     return (await session.execute(stmt)).scalars().first()
 
 
-async def _is_duplicate(
+async def _find_duplicate(
     session: AsyncSession,
     *,
     project_id: str,
     subject_id: str,
     predicate: str,
     value: dict[str, Any],
-) -> bool:
-    """Content-based dedup: an identical value already memorized (not deleted)."""
+) -> Fact | None:
+    """Content-based dedup: the already-memorized (non-deleted) fact with
+    this exact predicate and identical canonical value, or None. Prefers an
+    ACTIVE match so the caller can reinforce it; a non-active match (e.g. a
+    superseded value being re-asserted) is still returned and counted as a
+    plain duplicate, exactly as before."""
     stmt = select(Fact).where(
         Fact.project_id == project_id,
         Fact.subject_id == subject_id,
@@ -195,10 +206,15 @@ async def _is_duplicate(
         Fact.status != FactStatus.deleted,
     )
     canonical = _canonical(value)
-    for fact in (await session.execute(stmt)).scalars().all():
-        if _canonical(fact.value) == canonical:
-            return True
-    return False
+    matches = [
+        fact
+        for fact in (await session.execute(stmt)).scalars().all()
+        if _canonical(fact.value) == canonical
+    ]
+    if not matches:
+        return None
+    active = [fact for fact in matches if fact.status is FactStatus.active]
+    return (active or matches)[0]
 
 
 async def _resolve_existing_fact(
@@ -333,6 +349,39 @@ async def _open_conflict_set(
     return None
 
 
+def _reinforce_or_count_duplicate(
+    fact: Fact, *, event: Event, result: dict[str, int]
+) -> None:
+    """M1d — write-time reinforcement: a NEW source event re-asserting the
+    exact same canonical value strengthens the existing ACTIVE fact
+    (counter + business-time date + provenance) instead of creating a row.
+
+    Two deliberate guards keep this conservative:
+    - replay idempotence: an event already recorded in source_event_ids
+      (job reprocessing) counts as a plain duplicate, never a second
+      reinforcement;
+    - only an ACTIVE fact is reinforced — re-asserting a superseded/
+      candidate value stays a plain duplicate, as before.
+
+    Value equality is REQUIRED by every caller: measured with the real
+    local embedder (see scripts/check_semantic_threshold.py), rephrased-
+    same-value pairs (0.002-0.187) and genuine value updates (0.030-0.158)
+    fully overlap in cosine distance, so no threshold can authorize a
+    merge — a false merge silently destroys an update, which is strictly
+    worse than a duplicate.
+    """
+    if fact.status is not FactStatus.active or event.id in fact.source_event_ids:
+        result["duplicates"] += 1
+        return
+    fact.reinforcement_count += 1
+    if fact.last_reinforced_at is None or event.occurred_at > fact.last_reinforced_at:
+        # Business time, monotonic: out-of-order replays never move it back.
+        fact.last_reinforced_at = event.occurred_at
+    # ARRAY column without a Mutable wrapper: reassign, never append in place.
+    fact.source_event_ids = [*fact.source_event_ids, event.id]
+    result["reinforced"] += 1
+
+
 async def _apply_candidate(
     session: AsyncSession,
     candidate: ExtractedFact,
@@ -351,14 +400,16 @@ async def _apply_candidate(
     # silently created a fact under an orphan subject_id that no /v1/context
     # call could ever reach again - a real, confirmed data-loss bug found
     # while auditing the sprint-10 eval results at scale.
-    if await _is_duplicate(
+    duplicate = await _find_duplicate(
         session,
         project_id=event.project_id,
         subject_id=event.subject_id,
         predicate=candidate.predicate,
         value=candidate.value,
-    ):
-        result["duplicates"] += 1
+    )
+    if duplicate is not None:
+        _reinforce_or_count_duplicate(duplicate, event=event, result=result)
+        await session.flush()
         return
 
     target_predicate = candidate.supersedes_predicate or candidate.predicate
@@ -369,6 +420,19 @@ async def _apply_candidate(
         predicate=target_predicate,
         embedding=embedding,
     )
+
+    if (
+        candidate.action == "create"
+        and existing is not None
+        and _canonical(existing.value) == _canonical(candidate.value)
+    ):
+        # Same value under a semantically-equivalent predicate string
+        # (exact-predicate matches were already caught by _find_duplicate):
+        # reinforcement, and — unlike before — NO row is created first, so
+        # no orphan `candidate` row is left behind.
+        _reinforce_or_count_duplicate(existing, event=event, result=result)
+        await session.flush()
+        return
 
     value = candidate.value
     if candidate.action == "supersede" and existing is not None:
@@ -440,12 +504,9 @@ async def _apply_candidate(
         result["conflicts"] += 1
         return
 
-    if existing is not None:
-        # Same predicate, same value (e.g. not caught above because the
-        # existing fact is active): duplicate.
-        result["duplicates"] += 1
-        return
-
+    # existing is None here: the semantic-same-value short-circuit above
+    # already returned for any "create" whose value matches an existing
+    # fact, and the contradiction branch above handles a differing value.
     await transition_fact_status(session, fact.id, FactStatus.active)
     result["created"] += 1
 
@@ -484,6 +545,7 @@ async def _process_job(
         "superseded": 0,
         "conflicts": 0,
         "duplicates": 0,
+        "reinforced": 0,
         "rejected": 0,
         "rejected_with_reason": {reason: 0 for reason in REJECT_REASONS},
     }
@@ -563,6 +625,25 @@ async def _process_job(
         )
         for event, embedding in zip(unembedded, event_embeddings):
             event.embedding = embedding
+
+    # Serialize the whole write phase per scope BEFORE any read-check-act
+    # decision (duplicate check, semantic resolution, anti-echo, creation):
+    # this is what makes two concurrent consolidations of the same subject
+    # unable to both observe "no duplicate" and both insert. Acquired only
+    # NOW — after the extractor/embedder calls — so the lock is never held
+    # across a slow provider round-trip. Sorted: a job spanning several
+    # subjects always locks them in the same order (deadlock avoidance).
+    # No session.expire_all() needed after acquiring: fact VALUES are
+    # immutable post-insert (only status/valid_to/version/embedding ever
+    # change) and every status filter is evaluated in SQL against a fresh
+    # READ COMMITTED snapshot, so a stale identity-map object can never
+    # make a dedup decision wrong.
+    for project_id, subject_id in sorted(
+        {(event.project_id, event.subject_id) for event, _ in to_apply}
+    ):
+        await acquire_subject_write_lock(
+            session, project_id=project_id, subject_id=subject_id
+        )
 
     for (event, candidate), embedding in zip(to_apply, embeddings):
         # Anti-echo write gate (M1), post-validation: a candidate that only

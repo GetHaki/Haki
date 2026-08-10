@@ -69,10 +69,14 @@ the candidate against:
 ## The four outcomes of a candidate
 
 <Steps>
-  <Step title="Duplicate">
+  <Step title="Duplicate or reinforcement">
     The same `(subject, predicate, canonical value)` already exists among
-    non-deleted facts → no new row. This is also what makes replaying a
-    job **idempotent**.
+    non-deleted facts → no new row. A **replayed** event (already in
+    `source_event_ids`) is a plain duplicate — this is what makes
+    reprocessing a job **idempotent**. A **new** event re-asserting the
+    same value on the active fact instead **reinforces** it:
+    `reinforcement_count` and `last_reinforced_at` are updated, the new
+    event id is added to `source_event_ids`.
   </Step>
   <Step title="Supersede">
     `action="supersede"` with an existing fact found: the old fact moves
@@ -108,6 +112,26 @@ person instead of reusing the event's subject) silently created a fact
 under an orphan subject that no `/v1/context` call could ever reach again
 — a real, confirmed data-loss bug found while auditing sprint-10
 evaluation results at scale.
+
+## One active fact per subject+predicate, guaranteed
+
+The whole write phase (duplicate check, semantic resolution, reinforcement,
+creation) for one `(project_id, subject_id)` is serialized by a
+transaction-scoped Postgres advisory lock (`pg_advisory_xact_lock`) before
+any of these decisions are made — two consolidations of the same subject
+running concurrently can never both observe "no duplicate" and both
+insert. A partial unique index on `facts (project_id, subject_id,
+predicate) WHERE status = 'active'` backs this up at the database level:
+even a future write path that forgets the lock cannot create two active
+facts with the same exact predicate for one subject — it fails loudly
+instead.
+
+Reinforcement never merges a candidate whose value actually **changed**:
+measured against the real local embedder, a genuine value update (e.g.
+`bike_count` 3 → 4, cosine distance 0.03) sits **closer** than several
+legitimate same-value rephrasings (up to 0.19) — no distance threshold
+can separate the two. Reinforcement therefore requires exact canonical
+value equality; anything else still opens a conflict, as before.
 
 ## Resilience
 

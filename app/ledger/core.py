@@ -9,7 +9,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -221,6 +221,35 @@ class IllegalTransitionError(ApiError):
             message=f"Fact status cannot transition from {current.value} to {target.value}",
             field="status",
         )
+
+
+async def acquire_subject_write_lock(
+    session: AsyncSession, *, project_id: str, subject_id: str
+) -> None:
+    """Serializes fact-write adjudication for one (project_id, subject_id).
+
+    `pg_advisory_xact_lock`, deliberately the TRANSACTION-scoped variant:
+    - released automatically at COMMIT/ROLLBACK of the top-level
+      transaction — a savepoint rollback (the consolidator's per-job
+      `begin_nested`) does NOT release it, which is exactly right: the
+      failed job's writes are gone but the batch keeps its serialization;
+    - safe under Supavisor transaction-mode pooling in production (a
+      SESSION-scoped `pg_advisory_lock` would leak across pooled
+      connections and must never be used here);
+    - waits for the competing transaction's COMMIT, and the engine runs
+      READ COMMITTED (app/db.py), so every SELECT issued after this call
+      sees the competitor's committed facts — this is what turns the
+      duplicate check from snapshot-then-insert (TOCTOU, the exact race
+      class of mem0 #6515) into check-under-lock.
+
+    The key hashes project_id + subject_id (0x1f separator, a character
+    that cannot appear in ids in practice); a hash collision only
+    over-serializes two unrelated subjects, never corrupts data.
+    """
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"{project_id}\x1f{subject_id}"},
+    )
 
 
 async def transition_fact_status(

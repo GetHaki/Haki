@@ -77,6 +77,7 @@ async def test_capture_then_worker_creates_active_fact_with_provenance(client):
         "superseded": 0,
         "conflicts": 0,
         "duplicates": 0,
+        "reinforced": 0,
         "rejected": 0,
         "rejected_with_reason": {
             "echo_of_context": 0,
@@ -300,6 +301,7 @@ async def test_reprocessing_same_job_creates_no_duplicates(client):
 
     facts = await facts_for("usr_42")
     assert len(facts) == 1
+    assert facts[0].reinforcement_count == 0
     async with async_session() as session:
         job = await session.get(Job, uuid.UUID(body["consolidation_job_id"]))
     assert job.payload["result"]["duplicates"] == 1
@@ -430,28 +432,35 @@ async def test_echo_of_served_context_is_rejected_not_stored(client):
     assert result["rejected_with_reason"]["echo_of_context"] == 1
 
 
-async def test_unserved_repeat_is_a_plain_duplicate_not_an_echo(client):
+async def test_unserved_repeat_reinforces_the_existing_fact_not_an_echo(client):
     """Control for the anti-echo test above: the exact same repeated fact,
-    when it was never served through /v1/context first, is the pre-existing
-    plain "duplicate" path -- the anti-echo rule only fires against context
+    when it was never served through /v1/context first, is the write-time
+    reinforcement path (M1d) -- the anti-echo rule only fires against context
     that was actually served to the subject."""
-    await capture(
+    first = await capture(
         client, [make_memory_event([mock_fact("language", {"lang": "fr"})])]
     )
     await run_worker()
+    first_event_id = uuid.UUID(first["events"][0]["id"])
 
     body = await capture(
         client, [make_memory_event([mock_fact("language", {"lang": "fr"})])]
     )
+    second_event_id = uuid.UUID(body["events"][0]["id"])
     assert await run_worker() == 1
 
     facts = await facts_for("usr_42", "language")
     assert len(facts) == 1
+    fact = facts[0]
+    assert fact.reinforcement_count == 1
+    assert fact.last_reinforced_at is not None
+    assert set(fact.source_event_ids) == {first_event_id, second_event_id}
 
     async with async_session() as session:
         job = await session.get(Job, uuid.UUID(body["consolidation_job_id"]))
     result = job.payload["result"]
-    assert result["duplicates"] == 1
+    assert result["reinforced"] == 1
+    assert result["duplicates"] == 0
     assert result["rejected"] == 0
     assert result["rejected_with_reason"]["echo_of_context"] == 0
 
@@ -527,6 +536,39 @@ async def test_imperative_directive_deterministic_filter_overrides_provider_crea
     assert result["created"] == 0
     assert result["rejected"] == 1
     assert result["rejected_with_reason"]["imperative_directive"] == 1
+
+
+async def test_reinforcement_never_merges_a_different_value(client):
+    """Conservative guarantee (chantier toctou-dedup, measured against the
+    real local embedder in scripts/check_semantic_threshold.py): bike_count
+    3 -> 4 sits at cosine distance 0.0301, CLOSER than several legitimate
+    same-value reformulations (up to 0.187). No distance threshold could
+    authorize a merge here without also merging a real value change --
+    reinforcement therefore requires exact canonical value equality, never a
+    distance threshold. A differing value on the same predicate must still
+    open a conflict, exactly as before this chantier."""
+    await capture(
+        client, [make_memory_event([mock_fact("bike_count", {"count": 3})])]
+    )
+    await run_worker()
+    [old_fact] = await facts_for("usr_42", "bike_count")
+
+    body = await capture(
+        client, [make_memory_event([mock_fact("bike_count", {"count": 4})])]
+    )
+    await run_worker()
+
+    facts = await facts_for("usr_42", "bike_count")
+    assert len(facts) == 2
+    old = next(f for f in facts if f.id == old_fact.id)
+    assert old.status is FactStatus.active
+    assert old.reinforcement_count == 0
+
+    async with async_session() as session:
+        job = await session.get(Job, uuid.UUID(body["consolidation_job_id"]))
+    result = job.payload["result"]
+    assert result["reinforced"] == 0
+    assert result["conflicts"] == 1
 
 
 async def test_legitimate_user_preference_is_not_rejected_as_imperative_directive(

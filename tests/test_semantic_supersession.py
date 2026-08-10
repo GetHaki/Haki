@@ -20,9 +20,11 @@ embedding quality.
 
 from sqlalchemy import select
 
+import uuid
+
 from app.consolidator import _search_text
 from app.db import async_session
-from app.models import ConflictSet, Fact, FactStatus
+from app.models import ConflictSet, Fact, FactStatus, Job
 from app.providers.fake import FakeProvider, mock_fact
 from tests.test_consolidator import capture, facts_for, make_memory_event, run_worker
 
@@ -123,6 +125,36 @@ async def test_semantic_match_opens_conflict_instead_of_silent_duplicate(client)
     body = response.json()
     assert body["packet"]["facts"] == []
     assert any("open_conflict" in w for w in body["packet"]["warnings"])
+
+
+async def test_semantic_predicate_variant_same_value_reinforces_without_new_row(client):
+    """Chantier toctou-dedup: a candidate whose predicate is a semantic
+    variant of an existing fact's predicate, but carries the SAME value, must
+    reinforce that fact -- not create a second row that used to sit as an
+    orphan `candidate` (the bug this chantier's restructuring of
+    `_apply_candidate` fixes)."""
+    await capture(
+        client, [make_memory_event([mock_fact("favorite_color", {"color": "blue"})])]
+    )
+    await run_worker()
+    [old_fact] = await facts_for("usr_42", "favorite_color")
+    await _collide_embedding(old_fact, "preferred_color", {"color": "blue"})
+
+    body = await capture(
+        client, [make_memory_event([mock_fact("preferred_color", {"color": "blue"})])]
+    )
+    await run_worker()
+
+    all_facts = await facts_for("usr_42")
+    assert len(all_facts) == 1
+    fact = all_facts[0]
+    assert fact.id == old_fact.id
+    assert fact.status is FactStatus.active
+    assert fact.reinforcement_count == 1
+
+    async with async_session() as session:
+        job = await session.get(Job, uuid.UUID(body["consolidation_job_id"]))
+    assert job.payload["result"]["reinforced"] == 1
 
 
 async def test_unrelated_facts_are_not_falsely_merged(client):

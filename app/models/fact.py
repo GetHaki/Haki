@@ -57,6 +57,19 @@ class Fact(Base):
     )
     version: Mapped[int] = mapped_column(Integer, default=1)
 
+    # Write-time reinforcement (migration 0015): a NEW source event that
+    # re-asserts the exact same canonical value updates these on the
+    # existing active fact instead of creating a row. See app/consolidator
+    # (_reinforce_or_count_duplicate) for the rule and why value equality
+    # is required (no embedding-distance threshold can separate a
+    # rephrasing from a genuine value update — measured, not assumed).
+    reinforcement_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
+    last_reinforced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
     # Retrieval (sprint 2): dense embedding + pre-rendered full-text column.
     # vector(384) since migration 0003 (default embedder: local fastembed,
     # paraphrase-multilingual-MiniLM-L12-v2).

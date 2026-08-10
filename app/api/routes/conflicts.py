@@ -89,6 +89,23 @@ async def resolve_conflict(
             field="keep_fact_id",
         )
 
+    # Serialize with the consolidator's write phase (and with a concurrent
+    # resolve of the same subject): activation must never race a
+    # consolidation creating an active fact for the same predicate — the
+    # partial unique index (migration 0015) would turn that race into a
+    # 500 instead of a clean sequential outcome.
+    await ledger.acquire_subject_write_lock(
+        session, project_id=conflict.project_id, subject_id=conflict.subject_id
+    )
+    await session.refresh(conflict)
+    if conflict.status != "open":
+        raise ApiError(
+            type="conflict_already_resolved",
+            message=f"Conflict set {conflict_id} is already {conflict.status}",
+            field="conflict_id",
+            status_code=409,
+        )
+
     superseded: list[uuid.UUID] = []
     for fact_id in conflict.fact_ids:
         if fact_id == request.keep_fact_id:

@@ -1,5 +1,5 @@
 {
-  "name": "haki",
+  "name": "gethaki",
   "version": "0.1.0",
   "description": "Haki TypeScript SDK — long-term memory for AI agents (client, runtime helpers, CLI)",
   "type": "module",

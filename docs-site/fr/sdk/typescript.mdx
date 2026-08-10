@@ -19,7 +19,7 @@ npm test
 ## `HakiClient`
 
 ```typescript
-import { HakiClient } from "haki";
+import { HakiClient } from "gethaki";
 
 const client = new HakiClient({
   baseUrl: "http://localhost:8100",
@@ -50,7 +50,7 @@ méthodes du client sont en camelCase (`projectId`, `subjectId`…).
 ## Erreurs typées
 
 ```typescript
-import { HakiApiError, HakiConnectionError, HakiError } from "haki";
+import { HakiApiError, HakiConnectionError, HakiError } from "gethaki";
 ```
 
 Mêmes sémantiques que côté Python : `HakiConnectionError` (réseau),
@@ -59,7 +59,7 @@ Mêmes sémantiques que côté Python : `HakiConnectionError` (réseau),
 ## Les deux hooks agent (`haki/runtime`)
 
 ```typescript
-import { HakiClient, buildPromptContext, captureTurn } from "haki";
+import { HakiClient, buildPromptContext, captureTurn } from "gethaki";
 
 const client = new HakiClient({ baseUrl: "http://localhost:8100", apiKey: "hk_..." });
 

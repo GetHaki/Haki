@@ -8,8 +8,8 @@
  *
  * Usage (< 15 lines user-side):
  *
- *   import { HakiClient } from "haki";
- *   import { buildPromptContext, captureTurn } from "haki/runtime";
+ *   import { HakiClient } from "gethaki";
+ *   import { buildPromptContext, captureTurn } from "gethaki/runtime";
  *
  *   const client = new HakiClient({ baseUrl: "http://localhost:8100", apiKey });
  *   const { packet } = await client.context({ subjectId: "usr_42", query: userMsg, projectId: "prj" });

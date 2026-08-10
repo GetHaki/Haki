@@ -160,7 +160,7 @@ cd sdk/typescript && npm install && npm run build && npm test
 ```
 
 ```typescript
-import { HakiClient, buildPromptContext, captureTurn } from "haki";
+import { HakiClient, buildPromptContext, captureTurn } from "gethaki";
 
 const client = new HakiClient({ baseUrl: "http://localhost:8100", apiKey: "hk_..." });
 const { packet } = await client.context({ subjectId: "usr_42", query: userMsg, projectId: "prj" });

@@ -5,11 +5,18 @@ description: "HakiClient, AsyncHakiClient, the before/after LLM hooks, the haki 
 
 ## Installation
 
-Inside the Haki repository, the SDK is a **local editable** dependency
-(`pyproject.toml`, `[tool.uv.sources]`): `uv sync` at the repo root
-installs it automatically, alongside the API itself.
+```bash
+pip install gethaki
+```
 
-Used outside the repository (your own project):
+The distribution name is `gethaki` (`haki` was already taken on PyPI by
+an unrelated project) — the importable package stays `haki`:
+`from haki import HakiClient`.
+
+Inside the Haki repository itself, the SDK is instead a **local editable**
+dependency (`pyproject.toml`, `[tool.uv.sources]`): `uv sync` at the repo
+root installs it automatically, alongside the API. Useful when working on
+the SDK's source directly:
 
 ```bash
 pip install -e path/to/haki/sdk/python

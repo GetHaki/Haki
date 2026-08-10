@@ -112,7 +112,8 @@ async def clean_tables():
         await session.execute(
             text(
                 "TRUNCATE events, facts, jobs, conflict_sets, context_traces, "
-                "forget_receipts, feedback, api_keys, organizations CASCADE"
+                "forget_receipts, feedback, api_keys, organizations, "
+                "subject_aliases, subject_merge_receipts CASCADE"
             )
         )
         await session.commit()

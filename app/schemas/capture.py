@@ -2,7 +2,9 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from app.schemas.subjects import SubjectAliasIn
 
 
 class EventIn(BaseModel):
@@ -13,6 +15,10 @@ class EventIn(BaseModel):
     project_id: str = Field(min_length=1, max_length=128)
     subject_type: str = Field(default="user", max_length=64)
     subject_id: str | None = Field(default=None, max_length=128)
+    # Identity resolution (M4): the client backend may address the subject
+    # by a channel alias instead of a subject_id; the capture route resolves
+    # it BEFORE the policy scope check. Mutually exclusive with subject_id.
+    subject_alias: SubjectAliasIn | None = None
 
     actor_type: str | None = Field(default=None, max_length=64)
     actor_id: str | None = Field(default=None, max_length=128)
@@ -27,6 +33,12 @@ class EventIn(BaseModel):
     classification: list[str] = Field(default_factory=list)
     retention_policy: str | None = Field(default=None, max_length=128)
     idempotency_key: str | None = Field(default=None, max_length=256)
+
+    @model_validator(mode="after")
+    def subject_or_alias(self) -> "EventIn":
+        if self.subject_id is not None and self.subject_alias is not None:
+            raise ValueError("subject_id and subject_alias are mutually exclusive")
+        return self
 
 
 class CaptureRequest(BaseModel):

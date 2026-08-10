@@ -3,7 +3,7 @@ import uuid
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import policy
+from app import ledger, policy
 from app.context import build_context, get_trace
 from app.db import get_session
 from app.errors import ApiError
@@ -16,16 +16,37 @@ router = APIRouter()
 async def context(
     request: ContextRequest, session: AsyncSession = Depends(get_session)
 ) -> ContextResponse:
+    # Identity resolution (M4), read path: NEVER writes. An unknown alias is
+    # a loud typed 404 — returning an empty "ok" packet here would be
+    # exactly the silent cold-start bug this layer exists to kill.
+    subject_id = request.subject_id
+    if request.subject_alias is not None:
+        alias_row, _ = await ledger.resolve_alias(
+            session,
+            project_id=request.project_id,
+            alias_kind=request.subject_alias.kind,
+            alias_value=request.subject_alias.value,
+            register=False,
+        )
+        if alias_row is None:
+            raise ApiError(
+                type="alias_not_found",
+                message="no subject is registered for this alias in this project",
+                field="subject_alias",
+                status_code=404,
+            )
+        subject_id = alias_row.canonical_subject_id
+
     # Policy Engine (rule 3): purpose recommended — warning, not an error.
     purpose_warning = policy.context_purpose_warning(
         purpose=request.purpose,
         project_id=request.project_id,
-        subject_id=request.subject_id,
+        subject_id=subject_id,
     )
     packet, token_count, trace_id = await build_context(
         session,
         project_id=request.project_id,
-        subject_id=request.subject_id,
+        subject_id=subject_id,
         query=request.query,
         purpose=request.purpose,
         budget_tokens=request.budget_tokens,

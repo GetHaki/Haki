@@ -20,6 +20,23 @@ router = APIRouter()
 async def capture(
     request: CaptureRequest, session: AsyncSession = Depends(get_session)
 ) -> CaptureResponse:
+    # Identity resolution (M4): a client backend may address the subject by
+    # a channel alias; resolve (self-registering unknown aliases — first
+    # contact from a channel must never fail) BEFORE the policy scope check
+    # so rule 1 sees the canonical id. Everything downstream (idempotency
+    # key, event hash, consolidation scope) then uses the STABLE canonical
+    # subject — the whole point of the identity layer.
+    for event in request.events:
+        if event.subject_alias is not None:
+            alias_row, _ = await ledger.resolve_alias(
+                session,
+                project_id=event.project_id,
+                alias_kind=event.subject_alias.kind,
+                alias_value=event.subject_alias.value,
+                register=True,
+            )
+            event.subject_id = alias_row.canonical_subject_id
+
     # Policy Engine (rule 1): subject scope present, BEFORE any write.
     policy.check_capture_scope(request.events)
     results = await ledger.write_events(

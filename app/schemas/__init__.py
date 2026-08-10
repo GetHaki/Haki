@@ -33,6 +33,13 @@ from app.schemas.keys import (
     KeyOut,
     KeyRevokedResponse,
 )
+from app.schemas.subjects import (
+    MergeSubjectsRequest,
+    MergeSubjectsResponse,
+    ResolveSubjectRequest,
+    ResolveSubjectResponse,
+    SubjectAliasIn,
+)
 from app.schemas.timeline import EventOut, TimelineResponse
 
 __all__ = [
@@ -57,9 +64,14 @@ __all__ = [
     "KeyListResponse",
     "KeyOut",
     "KeyRevokedResponse",
+    "MergeSubjectsRequest",
+    "MergeSubjectsResponse",
     "PacketFact",
     "ResolveConflictRequest",
     "ResolveConflictResponse",
+    "ResolveSubjectRequest",
+    "ResolveSubjectResponse",
+    "SubjectAliasIn",
     "TimelineResponse",
     "TraceDecision",
     "TraceListResponse",

@@ -8,6 +8,7 @@ from app.models.feedback import Feedback
 from app.models.job import Job, JobStatus
 from app.models.organization import Organization
 from app.models.receipt import ForgetReceipt
+from app.models.subject_alias import SubjectAlias, SubjectMergeReceipt
 from app.models.trace import ContextTrace
 
 __all__ = [
@@ -25,5 +26,7 @@ __all__ = [
     "Job",
     "JobStatus",
     "Organization",
+    "SubjectAlias",
+    "SubjectMergeReceipt",
     "VOLATILITY_CLASSES",
 ]

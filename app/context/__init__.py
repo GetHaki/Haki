@@ -59,7 +59,7 @@ from sqlalchemy.sql import func
 from app import metrics
 from app.config import settings
 from app.errors import ApiError
-from app.models import ConflictSet, ContextTrace, Event, Fact, FactStatus
+from app.models import ConflictSet, ContextTrace, Event, Fact, FactStatus, SubjectAlias
 from app.providers import Embedder, get_embedder
 
 # Scoring weights (documented; not part of the public contract).
@@ -615,7 +615,39 @@ async def build_context(
                 }
             )
 
+    # Fragmentation detector (M4): a subject with ZERO memory that is
+    # registered as an alias of another subject is NOT a cold start — the
+    # memories exist, they live under the canonical id. Loud warning =>
+    # status "degraded" (existing noisy-failure contract), never a silent
+    # empty packet. One indexed lookup (ix_subject_aliases_lookup), and only
+    # on empty results — the hot path pays nothing.
+    fragmentation_alias = None
+    if not packet_facts and not packet_episodes:
+        fragmentation_alias = (
+            (
+                await session.execute(
+                    select(SubjectAlias)
+                    .where(
+                        SubjectAlias.project_id == project_id,
+                        SubjectAlias.alias_value == subject_id,
+                        SubjectAlias.canonical_subject_id != subject_id,
+                    )
+                    .limit(1)
+                )
+            )
+            .scalars()
+            .first()
+        )
+
     warnings: list[str] = []
+    if fragmentation_alias is not None:
+        warnings.append(
+            "identity_fragmentation: subject "
+            f"'{subject_id}' is registered as a '{fragmentation_alias.alias_kind}' "
+            f"alias of '{fragmentation_alias.canonical_subject_id}' — its memories "
+            "live under the canonical subject; query the canonical id or pass "
+            "subject_alias so the server resolves it"
+        )
     n_blocked = sum(1 for d in decisions if d["reason_code"] == "conflict_open")
     if n_blocked:
         warnings.append(

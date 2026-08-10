@@ -1,7 +1,9 @@
 import uuid
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from app.schemas.subjects import SubjectAliasIn
 
 # Explicit noisy-failure contract (extends the gateway's X-Haki-Memory
 # header — app/gateway/__init__.py — to every surface that returns a
@@ -17,10 +19,18 @@ ContextStatus = Literal["ok", "degraded", "failed"]
 
 class ContextRequest(BaseModel):
     project_id: str = Field(min_length=1, max_length=128)
-    subject_id: str = Field(min_length=1, max_length=128)
+    # Exactly one of subject_id / subject_alias (M4 identity resolution).
+    subject_id: str | None = Field(default=None, min_length=1, max_length=128)
+    subject_alias: SubjectAliasIn | None = None
     query: str = Field(min_length=1)
     purpose: str | None = Field(default=None, max_length=128)
     budget_tokens: int = Field(default=900)
+
+    @model_validator(mode="after")
+    def exactly_one_subject(self) -> "ContextRequest":
+        if (self.subject_id is None) == (self.subject_alias is None):
+            raise ValueError("exactly one of subject_id or subject_alias is required")
+        return self
 
 
 class PacketFact(BaseModel):

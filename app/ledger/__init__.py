@@ -11,6 +11,7 @@ from app.ledger.core import (
 from app.ledger.feedback import submit_feedback
 from app.ledger.forget import forget
 from app.ledger.jobs import create_consolidation_job
+from app.ledger.subjects import merge_subjects, resolve_alias
 
 __all__ = [
     "IllegalTransitionError",
@@ -20,6 +21,8 @@ __all__ = [
     "forget",
     "get_fact",
     "list_timeline",
+    "merge_subjects",
+    "resolve_alias",
     "run_pending_consolidations",
     "submit_feedback",
     "transition_fact_status",

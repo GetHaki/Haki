@@ -82,6 +82,40 @@ budget ; le reste est exclu avec `reason_code = over_budget`. Chaque
 décision (`included` / `excluded` / `blocked`) est écrite dans
 `context_traces`.
 
+## Porte de rappel (M3) — le budget est un plafond, pas une cible
+
+Par défaut, le budget de tokens est la seule limite : les faits sont
+empaquetés de façon gloutonne jusqu'à le remplir, quelle que soit leur
+pertinence réelle. Quand `HAKI_RECALL_MAX_DISTANCE` est fixé au-dessus de
+`0` (désactivée par défaut — comportement précédent exact), un candidat
+dont la distance cosinus à la requête dépasse ce seuil est exclu
+(`reason_code = below_relevance_floor`) **avant** l'empaquetage, faits et
+épisodes confondus, quel que soit le budget restant.
+
+<Warning>
+  Le plancher porte uniquement sur l'**axe sémantique** (distance
+  cosinus), jamais sur le score hybride : la similarité est le seul terme
+  borné et calibrable par embedder. Le bon seuil dépend de
+  `HAKI_EMBED_PROVIDER` — calibrer avec `scripts/check_recall_floor.py`
+  avant d'activer dans un environnement ; ne jamais coder en dur une
+  valeur mesurée pour un autre embedder.
+</Warning>
+
+Un appel entièrement vidé par la porte (des candidats existaient, aucun
+n'a franchi) renvoie `empty_reason: "no_relevant_memory"` avec `status`
+toujours `"ok"` — pas un échec, un honnête « rien d'assez pertinent ».
+Ce n'est délibérément **pas** un warning : un warning forcerait
+`status = "degraded"`, et les SDK rendent déjà un paquet vide comme une
+chaîne vide (aucun bloc `<haki_memory>`) — injecter un bloc « aucune
+mémoire pertinente » serait lui-même un distracteur. Les lignes du
+multi-hop ne sont jamais soumises à la porte : leur raison d'être est
+justement de rapatrier des preuves sémantiquement éloignées de la requête
+d'origine.
+
+`GET /v1/stats/overview` expose `injection_rate` (nom canonique de ce que
+`hit_rate` a toujours mesuré : la part des appels contexte ayant servi au
+moins un fait) — la métrique à surveiller pendant la calibration.
+
 ## Expansion multi-hop (sprint 10)
 
 Après l'empaquetage principal, s'il reste du budget, une **seconde**
@@ -130,12 +164,19 @@ gardent les événements datés.
       "excerpt": "conversation.message {\"content\": \"Je pr\\u00e9f\\u00e8re...\"}"
     }
   ],
-  "warnings": []
+  "warnings": [],
+  "status": "ok",
+  "empty_reason": null
 }
 ```
 
 Un `warning` `open_conflict: N fact(s) hidden pending conflict resolution`
-apparaît dès qu'au moins un fait est bloqué par un conflit ouvert.
+apparaît dès qu'au moins un fait est bloqué par un conflit ouvert ; un
+warning `volatility_expired: N fact(s)...` apparaît de la même façon
+quand le filtre de volatilité cache des faits périmés (voir
+[Faits et cycle de vie](/fr/concepts/facts-lifecycle)). `empty_reason`
+vaut `"no_relevant_memory"` uniquement quand la porte de rappel
+(ci-dessus) a vidé un résultat autrement non vide.
 
 <Card title="Référence API — Context" icon="brain-circuit" href="/fr/api-reference/context">
   `POST /v1/context` et `GET /v1/inspect/{trace_id}` : schémas exacts.

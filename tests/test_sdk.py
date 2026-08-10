@@ -94,6 +94,20 @@ def test_build_prompt_context_contains_value_dates_and_sources():
     assert build_prompt_context({"facts": [], "warnings": []}) == ""
 
 
+def test_build_prompt_context_renders_nothing_for_no_relevant_memory_packet():
+    """M3 recall gate: a packet the gate emptied (status ok, empty_reason
+    set) renders as "" -- injecting a "no relevant memory" block would
+    itself be a distractor. The signal is for the caller, not the prompt."""
+    packet = {
+        "facts": [],
+        "episodes": [],
+        "warnings": [],
+        "status": "ok",
+        "empty_reason": "no_relevant_memory",
+    }
+    assert build_prompt_context(packet) == ""
+
+
 def test_capture_turn_builds_a_well_formed_event():
     class StubClient:
         def __init__(self):

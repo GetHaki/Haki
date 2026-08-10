@@ -75,7 +75,7 @@ async def overview_stats(
     recall_count = await session.scalar(
         select(func.count()).select_from(ContextTrace).where(*trace_scope)
     )
-    p50 = p99 = hit_rate = None
+    p50 = p99 = injection_rate = None
     if recall_count:
         p50, p99 = (
             await session.execute(
@@ -90,7 +90,7 @@ async def overview_stats(
             .select_from(ContextTrace)
             .where(*trace_scope, ContextTrace.fact_count > 0)
         )
-        hit_rate = hits / recall_count
+        injection_rate = hits / recall_count
 
     context_tokens_served = await session.scalar(
         select(func.coalesce(func.sum(ContextTrace.token_count), 0)).where(*trace_scope)
@@ -101,7 +101,8 @@ async def overview_stats(
         events_this_week=events_this_week,
         recall_p50_ms=p50,
         recall_p99_ms=p99,
-        hit_rate=hit_rate,
+        hit_rate=injection_rate,
+        injection_rate=injection_rate,
         context_tokens_served=context_tokens_served or 0,
         recall_count=recall_count or 0,
     )

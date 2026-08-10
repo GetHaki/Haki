@@ -80,6 +80,36 @@ are packed **by decreasing score** until the budget is exhausted; the
 rest is excluded with `reason_code = over_budget`. Every decision
 (`included` / `excluded` / `blocked`) is written to `context_traces`.
 
+## Recall gate (M3) — the budget is a ceiling, not a target
+
+By default the token budget is the only limit: facts are packed greedily
+until it fills up, whatever their actual relevance. When
+`HAKI_RECALL_MAX_DISTANCE` is set above `0` (disabled by default — exact
+previous behavior), a candidate whose cosine distance to the query
+exceeds it is excluded (`reason_code = below_relevance_floor`) **before**
+packing, facts and episodes alike, however much budget remains.
+
+<Warning>
+  The floor is on the **semantic axis only** (cosine distance), never on
+  the hybrid score: similarity is the only bounded, embedder-calibratable
+  term. The right threshold depends on `HAKI_EMBED_PROVIDER` — calibrate
+  with `scripts/check_recall_floor.py` before enabling in an environment;
+  never hardcode a value measured for a different embedder.
+</Warning>
+
+A call fully emptied by the gate (candidates existed, none passed) returns
+`empty_reason: "no_relevant_memory"` with `status` still `"ok"` — not a
+failure, an honest "nothing relevant enough". This is deliberately **not**
+a warning: a warning would force `status = "degraded"`, and the SDKs
+already render an empty packet as an empty string (no `<haki_memory>`
+block) — injecting a "no relevant memory" block would itself be a
+distractor. Multi-hop rows are never gated: they exist precisely to
+surface evidence that is semantically far from the original query.
+
+`GET /v1/stats/overview` exposes `injection_rate` (canonical name for what
+`hit_rate` has always measured: the share of context calls that served at
+least one fact) — the metric to watch while calibrating the gate.
+
 ## Multi-hop expansion (sprint 10)
 
 After the main pack, if budget remains, a **second** full-text pass (no
@@ -126,12 +156,19 @@ durable facts, episodes keep the dated events.
       "excerpt": "conversation.message {\"content\": \"I prefer...\"}"
     }
   ],
-  "warnings": []
+  "warnings": [],
+  "status": "ok",
+  "empty_reason": null
 }
 ```
 
 A `open_conflict: N fact(s) hidden pending conflict resolution` warning
-appears as soon as at least one fact is blocked by an open conflict.
+appears as soon as at least one fact is blocked by an open conflict; a
+`volatility_expired: N fact(s)...` warning appears the same way when the
+volatility filter hides stale facts (see
+[Facts and lifecycle](/en/concepts/facts-lifecycle)). `empty_reason` is
+`"no_relevant_memory"` only when the recall gate (above) emptied an
+otherwise non-empty result.
 
 <Card title="API reference — Context" icon="brain-circuit" href="/en/api-reference/context">
   `POST /v1/context` and `GET /v1/inspect/{trace_id}`: exact schemas.

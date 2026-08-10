@@ -37,6 +37,12 @@ if recency would have lifted it — and facts beyond the cap are not traced.
 Budget: tokens estimated as max(1, len(text) // 4); facts are packed by
 decreasing score until the budget is full, the rest is excluded with
 reason_code over_budget. Every decision is written to context_traces.
+
+Recall gate (M3): when settings.recall_max_distance > 0, candidates whose
+cosine distance to the query exceeds it are excluded (reason_code
+below_relevance_floor) before packing — facts and episodes alike. A call
+where the gate empties the packet returns empty_reason="no_relevant_memory"
+with status "ok": not a failure, an honest "nothing relevant enough".
 """
 
 import json
@@ -71,6 +77,24 @@ CANDIDATE_LIMIT = 256
 # top-K by full-text rank (GIN index); only this union gets the full hybrid
 # score. 64 keeps recall comfortable while bounding the phase-2 work.
 RETRIEVAL_TOP_K = 64
+
+# M3 recall gate — floor on the SEMANTIC axis only (cosine distance of the
+# candidate to the query), never on the hybrid score: similarity is the only
+# bounded, embedder-calibratable term and carries the dominant weight (0.6);
+# ts_rank_cd is unbounded and the "simple" ts config keeps stopwords, so any
+# shared function word yields a nonzero rank (a lexical escape hatch would
+# let noise through); recency says nothing about relevance. Distinct from
+# SEMANTIC_MATCH_MAX_DISTANCE (0.28, fact<->fact paraphrases): query<->fact
+# distances are structurally larger. Calibrated for the LOCAL embedder with
+# scripts/check_recall_floor.py — re-run it before changing this value.
+# Measured margin is narrower than the fact<->fact one: relevant queries
+# topped out at 0.7046 ("combien de velos possede-t-il ?" vs bike_count),
+# off-topic ones bottomed out at 0.7884 — 0.75 sits at the midpoint, but the
+# gap (0.084) leaves far less slack than SEMANTIC_MATCH_MAX_DISTANCE's; a
+# lexically-terse query on a short predicate is the tightest case measured.
+# settings.recall_max_distance (HAKI_RECALL_MAX_DISTANCE) holds the ACTIVE
+# threshold; 0.0 = gate disabled (default).
+RECOMMENDED_RECALL_MAX_DISTANCE = 0.75
 
 
 def estimate_tokens(text: str) -> int:
@@ -269,7 +293,13 @@ def failed_packet(reasons: list[str]) -> dict[str, Any]:
     context_traces row: the caller decides what (if anything) to do with
     it.
     """
-    return {"facts": [], "episodes": [], "warnings": list(reasons), "status": "failed"}
+    return {
+        "facts": [],
+        "episodes": [],
+        "warnings": list(reasons),
+        "status": "failed",
+        "empty_reason": None,
+    }
 
 
 async def build_context(
@@ -364,6 +394,7 @@ async def build_context(
             Fact.last_reinforced_at,
             Fact.fact_kind,
             Fact.volatility,
+            Fact.embedding.cosine_distance(query_embedding).label("distance"),
             score.label("score"),
         )
         .where(Fact.id.in_(select(candidates.c.id)))
@@ -429,10 +460,23 @@ async def build_context(
                 }
             )
 
-    # Greedy packing under the token budget, best score first.
+    # Greedy packing under the token budget, best score first — behind the
+    # relevance floor (M3): the budget is a ceiling, not a target.
+    recall_max_distance = settings.recall_max_distance
     packet_facts: list[dict[str, Any]] = []
     token_count = 0
     for row in eligible:
+        if recall_max_distance > 0 and (
+            row.distance is None or row.distance > recall_max_distance
+        ):
+            decisions.append(
+                {
+                    "fact_id": str(row.id),
+                    "action": "excluded",
+                    "reason_code": "below_relevance_floor",
+                }
+            )
+            continue
         cost = estimate_tokens(_render(row.predicate, row.value))
         if token_count + cost <= budget_tokens:
             packet_facts.append(_packet_fact(row, freshness_by_id.get(row.id, "current")))
@@ -455,6 +499,9 @@ async def build_context(
 
     # Multi-hop expansion: only worth trying if the main pass packed
     # something to seed entities from, and left room in the budget.
+    # Multi-hop rows are deliberately NOT gated by the recall floor: they
+    # are seeded only by gate-passing facts, and their whole point is
+    # lexical evidence that is semantically far from the ORIGINAL query.
     if packet_facts and token_count < budget_tokens:
         multi_hop_start = time.perf_counter()
         query_words = {t.lower() for t in _ENTITY_TOKEN_RE.findall(query)}
@@ -506,7 +553,13 @@ async def build_context(
     episode_rows = (
         (
             await session.execute(
-                select(Event.id, Event.kind, Event.occurred_at, Event.payload)
+                select(
+                    Event.id,
+                    Event.kind,
+                    Event.occurred_at,
+                    Event.payload,
+                    Event.embedding.cosine_distance(query_embedding).label("distance"),
+                )
                 .where(
                     Event.project_id == project_id,
                     Event.subject_id == subject_id,
@@ -521,6 +574,17 @@ async def build_context(
     stage_timings["episodes"] = round((time.perf_counter() - episodes_start) * 1000)
     packet_episodes: list[dict[str, Any]] = []
     for row in episode_rows:
+        if recall_max_distance > 0 and (
+            row.distance is None or row.distance > recall_max_distance
+        ):
+            decisions.append(
+                {
+                    "episode_id": str(row.id),
+                    "action": "excluded",
+                    "reason_code": "below_relevance_floor",
+                }
+            )
+            continue
         excerpt = episode_excerpt(row.kind, row.payload)
         cost = estimate_tokens(
             f"{row.occurred_at:%Y-%m-%d %H:%M} {row.kind} {excerpt}"
@@ -574,11 +638,27 @@ async def build_context(
     status = "degraded" if warnings else "ok"
     metrics.increment(f"context.{status}")
 
+    # M3: honest empty packet — the gate emptied the packet although
+    # candidates existed. NOT a failure and NOT "this subject has no
+    # memory": status stays "ok", warnings stay untouched (a warning would
+    # force "degraded" — see above), the dedicated field carries the signal
+    # and the below_relevance_floor decisions in the trace explain it.
+    empty_reason = None
+    if (
+        recall_max_distance > 0
+        and not packet_facts
+        and not packet_episodes
+        and any(d["reason_code"] == "below_relevance_floor" for d in decisions)
+    ):
+        empty_reason = "no_relevant_memory"
+        metrics.increment("context.empty_no_relevant_memory")
+
     packet = {
         "facts": packet_facts,
         "episodes": packet_episodes,
         "warnings": warnings,
         "status": status,
+        "empty_reason": empty_reason,
     }
 
     trace = ContextTrace(

@@ -2,8 +2,10 @@
 writes on every ContextTrace — every number here traces back to real rows,
 never a placeholder."""
 
+from app.consolidator import _search_text
 from app.providers.fake import mock_fact
 from tests.test_consolidator import capture, make_memory_event, run_worker
+from tests.test_context import recall_floor  # noqa: F401 - reused fixture
 
 PROJECT = "prj_support"
 SUBJECT = "usr_42"
@@ -52,6 +54,8 @@ async def test_stats_overview_reflects_real_facts_recalls_and_hit_rate(client):
     assert body["active_facts"] == 1
     assert body["recall_count"] == 2
     assert body["hit_rate"] == 0.5
+    assert body["injection_rate"] == 0.5
+    assert body["injection_rate"] == body["hit_rate"]
     assert body["recall_p50_ms"] is not None
     assert body["context_tokens_served"] > 0
     # make_memory_event uses a fixed historical occurred_at, so it may or
@@ -69,6 +73,7 @@ async def test_stats_overview_with_no_history_returns_none_not_zero(client):
     assert body["active_facts"] == 0
     assert body["recall_count"] == 0
     assert body["hit_rate"] is None
+    assert body["injection_rate"] is None
     assert body["recall_p50_ms"] is None
 
 
@@ -76,3 +81,35 @@ async def test_stats_overview_requires_project_id(client):
     response = await client.get("/v1/stats/overview")
     assert response.status_code == 422
     assert response.json()["error"]["type"] == "missing_scope"
+
+
+async def test_stats_injection_rate_counts_gated_recalls_as_misses(
+    recall_floor, client
+):
+    """A recall the gate emptied (fact_count=0) counts the same as a real
+    miss for injection_rate -- the metric must reflect what was actually
+    served, not what could have been served without the gate."""
+    await capture(client, [make_memory_event([mock_fact("language", {"lang": "fr"})])])
+    assert await run_worker() == 1
+
+    await client.post(
+        "/v1/context",
+        json={
+            "project_id": PROJECT,
+            "subject_id": SUBJECT,
+            "query": _search_text("language", {"lang": "fr"}),
+        },
+    )
+    await client.post(
+        "/v1/context",
+        json={
+            "project_id": PROJECT,
+            "subject_id": SUBJECT,
+            "query": "recette de lasagnes maison",
+        },
+    )
+
+    response = await client.get("/v1/stats/overview", params={"project_id": PROJECT})
+    body = response.json()
+    assert body["recall_count"] == 2
+    assert body["injection_rate"] == 0.5

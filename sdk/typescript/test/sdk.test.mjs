@@ -130,6 +130,18 @@ test("buildPromptContext: value, date, source and hardened instruction", () => {
   // Empty packet -> empty block, safe to prepend.
   assert.equal(buildPromptContext({ facts: [], warnings: [] }), "");
   assert.equal(buildPromptContext(null), "");
+  // M3 recall gate: a gate-emptied packet (status ok, empty_reason set)
+  // also renders as "" -- no "no relevant memory" distractor block.
+  assert.equal(
+    buildPromptContext({
+      facts: [],
+      episodes: [],
+      warnings: [],
+      status: "ok",
+      empty_reason: "no_relevant_memory",
+    }),
+    "",
+  );
 });
 
 test("no API key -> HakiApiError 401 unauthorized", async () => {

@@ -88,7 +88,14 @@ def _format_packet(subject_id: str, packet: dict[str, Any]) -> str:
         )
     facts = packet.get("facts", [])
     if not facts:
-        lines.append("Aucun fait memorise pour ce sujet dans ce projet.")
+        if packet.get("empty_reason") == "no_relevant_memory":
+            lines.append(
+                "Aucune memoire suffisamment pertinente pour cette requete "
+                "(des faits existent pour ce sujet, aucun ne franchit le "
+                "plancher de pertinence)."
+            )
+        else:
+            lines.append("Aucun fait memorise pour ce sujet dans ce projet.")
     for fact in facts:
         value = json.dumps(fact["value"], ensure_ascii=False, sort_keys=True)
         when = fact.get("valid_from") or "date inconnue"
@@ -207,6 +214,7 @@ async def haki_context(ctx: Context, query: str, budget_tokens: int = 900) -> di
         "facts": packet["facts"],
         "warnings": packet["warnings"],
         "status": packet["status"],
+        "empty_reason": packet.get("empty_reason"),
         "token_count": token_count,
         "trace_id": str(trace_id) if trace_id else None,
         "project_id": scope.project_id,

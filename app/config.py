@@ -132,5 +132,16 @@ class Settings(BaseSettings):
     volatility_horizon_volatile_days: int = 60  # HAKI_VOLATILITY_HORIZON_VOLATILE_DAYS
     volatility_horizon_ephemeral_days: int = 7  # HAKI_VOLATILITY_HORIZON_EPHEMERAL_DAYS
 
+    # M3 recall gate: relevance floor on recall -- the token budget is a
+    # ceiling, not a target. A fact/episode whose cosine distance to the
+    # query exceeds this value is never served, even with budget to spare;
+    # a fully-gated call returns an honest empty packet
+    # (empty_reason="no_relevant_memory", status stays "ok" -- see
+    # app/context). 0.0 (default) = gate disabled, exact previous behavior.
+    # The right value depends on the EMBED provider -- calibrate with
+    # scripts/check_recall_floor.py (local embedder recommendation:
+    # RECOMMENDED_RECALL_MAX_DISTANCE in app/context).
+    recall_max_distance: float = 0.0  # HAKI_RECALL_MAX_DISTANCE
+
 
 settings = Settings()

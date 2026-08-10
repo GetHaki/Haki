@@ -47,7 +47,15 @@ POST /v1/context
       </Expandable>
     </ResponseField>
     <ResponseField name="warnings" type="string[]" required>
-      Ex. `missing_purpose: ...`, `open_conflict: N fact(s) hidden pending conflict resolution`.
+      Ex. `missing_purpose: ...`, `open_conflict: N fact(s) hidden pending conflict resolution`, `volatility_expired: N fact(s)...`.
+    </ResponseField>
+    <ResponseField name="status" type="&quot;ok&quot; | &quot;degraded&quot; | &quot;failed&quot;" default="ok" />
+    <ResponseField name="empty_reason" type="&quot;no_relevant_memory&quot; | null" default="null">
+      Posé par la porte de rappel (M3, désactivée par défaut — voir
+      [Context Assembler](/fr/concepts/context-assembler#porte-de-rappel-m3-le-budget-est-un-plafond-pas-une-cible))
+      quand des candidats existaient mais qu'aucun n'a franchi le
+      plancher de pertinence. Délibérément **pas** un warning : `status`
+      reste `"ok"`.
     </ResponseField>
   </Expandable>
 </ResponseField>
@@ -104,7 +112,9 @@ const { packet, trace_id } = await client.context({
       "source_event_ids": ["7c21e4c2-..."]
     }],
     "episodes": [],
-    "warnings": []
+    "warnings": [],
+    "status": "ok",
+    "empty_reason": null
   },
   "token_count": 18,
   "trace_id": "0587fc4f-74a1-46af-a592-5789d1269072"
@@ -138,7 +148,7 @@ ne fuit jamais hors de `(project_id, subject_id)`.
       `included` · `excluded` · `blocked`
     </ResponseField>
     <ResponseField name="reason_code" type="string" required>
-      `top_score` · `over_budget` · `conflict_open` · `multi_hop_expansion`
+      `top_score` · `over_budget` · `conflict_open` · `multi_hop_expansion` · `volatility_expired` · `below_relevance_floor`
     </ResponseField>
   </Expandable>
 </ResponseField>

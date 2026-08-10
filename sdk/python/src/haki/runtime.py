@@ -37,6 +37,11 @@ def build_prompt_context(packet: dict[str, Any]) -> str:
     surfaced as app.context.failed_packet has zero facts by construction,
     but the caller still needs to know memory could not be read, not read
     the empty block as "this subject has no memory").
+
+    A packet emptied by the recall gate (empty_reason="no_relevant_memory",
+    status "ok") renders as "" on purpose: injecting a "no relevant memory"
+    block would itself be a distractor. The signal is for the CALLER
+    (packet field), not for the prompt.
     """
     facts = (packet or {}).get("facts") or []
     episodes = (packet or {}).get("episodes") or []

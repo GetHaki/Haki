@@ -32,6 +32,11 @@ import type { CaptureResponse, ContextPacket, HakiClient } from "./client.js";
  * fact/episode happened to be packed (e.g. a total build_context failure
  * has zero facts by construction, but the caller still needs to know
  * memory could not be read, not read the empty block as "no memory").
+ *
+ * A packet emptied by the recall gate (emptyReason "no_relevant_memory",
+ * status "ok") renders as "" on purpose: injecting a "no relevant memory"
+ * block would itself be a distractor. The signal is for the CALLER
+ * (packet field), not for the prompt.
  */
 export function buildPromptContext(packet: ContextPacket | null | undefined): string {
   const facts = packet?.facts ?? [];

@@ -152,6 +152,7 @@ async def test_packet_without_events_keeps_episodes_empty(client):
             "missing_purpose: 'purpose' is recommended on context calls (warning only in V1)"
         ],
         "status": "degraded",
+        "empty_reason": None,
     }
 
 

@@ -71,6 +71,10 @@ export interface ContextPacket {
   /** Doubles as the typed list of reasons for `status`. */
   warnings: string[];
   status: ContextStatus;
+  /** M3 recall gate: "no_relevant_memory" when the relevance floor emptied
+   * the packet although the subject has memories. Absent/null otherwise —
+   * deliberately not a warning (status stays "ok"). */
+  empty_reason?: "no_relevant_memory" | null;
 }
 
 export interface ContextResponse {

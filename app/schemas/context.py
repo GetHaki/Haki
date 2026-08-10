@@ -58,6 +58,12 @@ class ContextPacket(BaseModel):
     # packet is not plainly "ok" (see build_context).
     warnings: list[str]
     status: ContextStatus = "ok"
+    # M3 recall gate: "no_relevant_memory" when the relevance floor emptied
+    # the packet although the subject HAS memories — deliberately NOT a
+    # warning (a warning forces status="degraded"; this is an honest "ok").
+    # None when disabled, when something was packed, or when the subject
+    # truly has nothing.
+    empty_reason: Literal["no_relevant_memory"] | None = None
 
 
 class ContextResponse(BaseModel):

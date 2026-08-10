@@ -1,3 +1,7 @@
+"""injection_rate is the canonical name for what hit_rate has always
+measured (share of context calls that injected at least one fact);
+hit_rate stays as an alias for the console."""
+
 from pydantic import BaseModel
 
 
@@ -11,6 +15,7 @@ class OverviewStatsResponse(BaseModel):
     events_this_week: list[DailyCount]
     recall_p50_ms: float | None
     recall_p99_ms: float | None
-    hit_rate: float | None  # 0..1, None if there were zero recalls to measure
+    hit_rate: float | None  # deprecated alias of injection_rate (console still reads it)
     context_tokens_served: int
     recall_count: int
+    injection_rate: float | None  # share of recalls that served >= 1 fact, 0..1; None if no recalls

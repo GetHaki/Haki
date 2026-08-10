@@ -47,7 +47,14 @@ POST /v1/context
       </Expandable>
     </ResponseField>
     <ResponseField name="warnings" type="string[]" required>
-      E.g. `missing_purpose: ...`, `open_conflict: N fact(s) hidden pending conflict resolution`.
+      E.g. `missing_purpose: ...`, `open_conflict: N fact(s) hidden pending conflict resolution`, `volatility_expired: N fact(s)...`.
+    </ResponseField>
+    <ResponseField name="status" type="&quot;ok&quot; | &quot;degraded&quot; | &quot;failed&quot;" default="ok" />
+    <ResponseField name="empty_reason" type="&quot;no_relevant_memory&quot; | null" default="null">
+      Set by the recall gate (M3, off by default — see
+      [Context Assembler](/en/concepts/context-assembler#recall-gate-m3-the-budget-is-a-ceiling-not-a-target))
+      when candidates existed but none passed the relevance floor.
+      Deliberately **not** a warning: `status` stays `"ok"`.
     </ResponseField>
   </Expandable>
 </ResponseField>
@@ -104,7 +111,9 @@ const { packet, trace_id } = await client.context({
       "source_event_ids": ["7c21e4c2-..."]
     }],
     "episodes": [],
-    "warnings": []
+    "warnings": [],
+    "status": "ok",
+    "empty_reason": null
   },
   "token_count": 18,
   "trace_id": "0587fc4f-74a1-46af-a592-5789d1269072"
@@ -138,7 +147,7 @@ it never leaks outside `(project_id, subject_id)`.
       `included` · `excluded` · `blocked`
     </ResponseField>
     <ResponseField name="reason_code" type="string" required>
-      `top_score` · `over_budget` · `conflict_open` · `multi_hop_expansion`
+      `top_score` · `over_budget` · `conflict_open` · `multi_hop_expansion` · `volatility_expired` · `below_relevance_floor`
     </ResponseField>
   </Expandable>
 </ResponseField>

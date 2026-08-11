@@ -66,7 +66,8 @@ async def capture(
                 type="insufficient_credits",
                 message=(
                     f"organization {org.id} has {org.credit_balance} credit(s) "
-                    "remaining, which is not enough to accept this capture"
+                    "remaining, which is not enough to accept this capture — "
+                    "add credits or subscribe at https://gethaki.space/app/billing"
                 ),
                 field="events",
                 status_code=402,

@@ -68,7 +68,12 @@ export function buildPromptContext(packet: ContextPacket | null | undefined): st
     const value = JSON.stringify(fact.value);
     const validFrom = fact.valid_from ?? "unknown date";
     const sources = (fact.source_event_ids ?? []).join(",") || "no-source";
-    lines.push(`- ${fact.predicate}: ${value} (valid from ${validFrom}; sources: ${sources})`);
+    const attribution = fact.attributed_to
+      ? ` [reported by a third party (${fact.attributed_to}) — not a statement by the subject]`
+      : "";
+    lines.push(
+      `- ${fact.predicate}: ${value} (valid from ${validFrom}; sources: ${sources})${attribution}`,
+    );
   }
   if (episodes.length > 0) {
     lines.push("Dated events from the source history (episodic memory):");

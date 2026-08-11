@@ -16,6 +16,7 @@ class EventOut(BaseModel):
     agent_id: str | None
     thread_id: str | None
     run_id: str | None
+    origin_trust: str
     kind: str
     occurred_at: datetime
     recorded_at: datetime

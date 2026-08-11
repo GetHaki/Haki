@@ -44,6 +44,18 @@ EMBEDDING_DIM = 384
 # injection defense (see app.consolidator module docstring and
 # _imperative_directive_reason for the deterministic post-validation net and
 # its documented residual false-positive/false-negative risk).
+#
+# "untrusted_instruction" (M8 — provenance as authority): a candidate that
+# is a durable instruction (fact_kind="instruction") born from an event
+# whose origin_trust is below semi_trusted (untrusted ingested content, or
+# a third party in the subject's conversation). Complements
+# imperative_directive: that rule catches orders aimed AT the agent
+# whatever the origin; this one catches LEGITIMATE-looking durable
+# instructions whose ORIGIN has no authority to steer future behavior —
+# the write-time blind spot compositional/dormant attacks exploit. The
+# provider may self-assign it (the prompt shows it the event's
+# origin_trust), but the consolidator enforces it deterministically
+# regardless (see app.consolidator._untrusted_instruction_reason).
 REJECT_REASONS: tuple[str, ...] = (
     "echo_of_context",
     "system_noise",
@@ -53,6 +65,7 @@ REJECT_REASONS: tuple[str, ...] = (
     "agent_self_reference",
     "no_evidence_span",
     "imperative_directive",
+    "untrusted_instruction",
 )
 
 

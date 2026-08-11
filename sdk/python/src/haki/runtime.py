@@ -76,6 +76,11 @@ def build_prompt_context(packet: dict[str, Any]) -> str:
                 f" — UNCONFIRMED since {last}: past its freshness horizon, "
                 "re-confirm with the subject before relying on it"
             )
+        if fact.get("attributed_to"):
+            marker += (
+                f" [reported by a third party ({fact['attributed_to']}) — "
+                "not a statement by the subject]"
+            )
         lines.append(
             f"- {fact.get('predicate')}: {value} "
             f"(valid from {valid_from}; sources: {sources}){marker}"

@@ -31,6 +31,7 @@ class FactOut(BaseModel):
     fact_kind: str
     volatility: str
     last_reinforced_at: datetime | None
+    origin_trust: str
 
 
 class FactListResponse(BaseModel):

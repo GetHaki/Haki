@@ -112,6 +112,20 @@ export class HakiCapture implements INodeType {
 				default: 'org_default',
 				description: 'Organisation Haki (contrat B.1).',
 			},
+			{
+				displayName: 'Origin Trust',
+				name: 'origin_trust',
+				type: 'options',
+				options: [
+					{ name: 'Trusted (message direct du sujet)', value: 'trusted' },
+					{ name: 'Semi-trusted (sortie agent/outil)', value: 'semi_trusted' },
+					{ name: 'Third-party (tiers dans la conversation)', value: 'third_party' },
+					{ name: 'Untrusted (contenu ingéré)', value: 'untrusted' },
+				],
+				default: 'trusted',
+				description:
+					"Niveau de confiance d'origine du tour capturé. En groupe (l'expéditeur n'est pas le sujet suivi), choisir third-party — le fait sera attribué au tiers, jamais au sujet.",
+			},
 		],
 	};
 
@@ -135,6 +149,7 @@ export class HakiCapture implements INodeType {
 			const runId = (this.getNodeParameter('run_id', i) as string) || '';
 			const waitConsolidation = this.getNodeParameter('wait_consolidation', i) as boolean;
 			const orgId = (this.getNodeParameter('org_id', i) as string) || 'org_default';
+			const originTrust = this.getNodeParameter('origin_trust', i) as string;
 
 			const key = idempotencyKey(runId, threadId, userMessage, assistantMessage);
 			const event = {
@@ -143,6 +158,7 @@ export class HakiCapture implements INodeType {
 				subject_type: 'user',
 				subject_id: subjectId,
 				agent_id: 'n8n',
+				origin_trust: originTrust,
 				...(threadId ? { thread_id: threadId } : {}),
 				...(runId ? { run_id: runId } : {}),
 				kind: 'conversation.turn',

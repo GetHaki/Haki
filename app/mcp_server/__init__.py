@@ -20,16 +20,17 @@ Memory is always PROJECT- AND SUBJECT-SCOPED, never chosen by the model
 Neither tool accepts a subject_id argument — a team sharing one Cursor
 deployment needs one config per person, the same way each install already
 gets its own project. Two scoping sources, resolved per-request by
-_resolve_scope below (the original single-server-config design only works
-for a self-hosted `docker compose up` install — one process for one
-person; a server shared by several tenants from ONE process can't hold
-"this caller's project" in a global env var):
+_resolve_scope below (found live: the original single-server-config
+design only worked for a self-hosted `docker compose up` install — the
+shared Cloud server at api.gethaki.space serves every signed-up customer
+from ONE process, so a global env var could never hold "this caller's
+project"):
 
-- A real `hk_` API key (Authorization: Bearer hk_..., the same key used
-  against /v1/*) resolves org_id/project_id exactly like
-  ApiKeyAuthMiddleware does for /v1/* (app/auth.py); subject_id then
-  comes from a client-set X-Haki-Subject-Id header (configured once in
-  the MCP client's own config, not per-call).
+- A real customer `hk_` key (Authorization: Bearer hk_..., the same key
+  shown once on the console's Cles API page) resolves org_id/project_id
+  exactly like ApiKeyAuthMiddleware does for /v1/* (app/auth.py);
+  subject_id then comes from a client-set X-Haki-Subject-Id header
+  (configured once in the MCP client's own config, not per-call).
 - No Authorization header at all falls back to the legacy single-server
   config (HAKI_MCP_PROJECT_ID/ORG_ID/SUBJECT_ID) — unchanged behavior for
   existing self-hosted installs.
@@ -104,6 +105,11 @@ def _format_packet(subject_id: str, packet: dict[str, Any]) -> str:
         if fact.get("freshness") == "unconfirmed":
             last = fact.get("last_confirmed") or "date inconnue"
             suffix = f" [A RECONFIRMER — derniere confirmation {last}]"
+        if fact.get("attributed_to"):
+            suffix += (
+                f" [rapporte par un tiers ({fact['attributed_to']}) — "
+                "pas une affirmation du sujet]"
+            )
         lines.append(
             f"- {fact['predicate']} = {value} (valide depuis {when}; "
             f"source: {sources}){suffix}"
@@ -123,17 +129,19 @@ class _Scope:
 
 
 async def _resolve_scope(ctx: Context) -> _Scope:
-    """Real multi-tenant scoping for a shared /mcp endpoint.
+    """Real multi-tenant scoping for the shared Cloud /mcp endpoint.
 
-    Every tool below used to read project_id/org_id/subject_id straight
-    off HAKI_MCP_* server config — fine for a `docker compose up` install
-    where the whole server exists for exactly one person, broken for a
-    server shared by several tenants from ONE process (a single global
-    env var cannot hold "this caller's project"). A caller's own `hk_`
-    key — the same one already used for the REST API — now resolves
-    org_id/project_id here exactly like ApiKeyAuthMiddleware does for
-    /v1/* (app/auth.py). subject_id has no equivalent server-side source
-    (MCP tools take no subject_id argument by design — PRD: "le modele ne
+    Found live (production-readiness audit): every tool below used to read
+    project_id/org_id/subject_id straight off HAKI_MCP_* server config —
+    fine for a `docker compose up` install where the whole server exists
+    for exactly one person, completely broken for the shared Cloud server
+    (api.gethaki.space serves every signed-up customer from ONE process;
+    a single global env var cannot hold "this caller's project"). A
+    customer's own `hk_` key — the same one already used for the REST API
+    and shown once on the console's Keys page — now resolves org_id/
+    project_id here exactly like ApiKeyAuthMiddleware does for /v1/*
+    (app/auth.py). subject_id has no equivalent server-side source (MCP
+    tools take no subject_id argument by design — PRD: "le modele ne
     choisit pas ce scope"), so it travels as a client-set HTTP header,
     X-Haki-Subject-Id, configured once in the MCP client's own config
     (mcp.json), not chosen per-call by the model.
@@ -153,8 +161,8 @@ async def _resolve_scope(ctx: Context) -> _Scope:
 
     if not token.startswith("hk_"):
         raise ToolError(
-            "invalid Authorization header: expected 'Bearer hk_...' (a Haki API key), "
-            "not the legacy single shared secret"
+            "invalid Authorization header: expected 'Bearer hk_...' (a Haki API key "
+            "from the console's Clés API page), not the legacy single shared secret"
         )
     key = await resolve_api_key(token)
     if key is None:
@@ -240,6 +248,11 @@ async def haki_capture(ctx: Context, content: str, kind: str = "agent.observatio
         subject_id=subject_id,
         actor_type="agent",
         agent_id="cursor",
+        # M8: what this surface can honestly assert — the content is
+        # written by the MODEL (a Cursor tool call), not typed by the
+        # human. Hardcoded on purpose: no MCP tool ever takes a trust
+        # parameter (same principle as "the model never chooses scopes").
+        origin_trust="semi_trusted",
         kind=kind,
         occurred_at=datetime.now(timezone.utc),
         payload={"role": "assistant", "content": content},

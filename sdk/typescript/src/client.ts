@@ -20,6 +20,9 @@ export interface EventInput {
   agent_id?: string;
   thread_id?: string;
   run_id?: string;
+  /** Origin trust (M8): trusted | semi_trusted | third_party | untrusted.
+   * Omitted -> the server derives it from actor_type. */
+  origin_trust?: string;
   kind: string;
   occurred_at: string; // ISO 8601
   payload: Record<string, unknown>;
@@ -49,6 +52,10 @@ export interface PacketFact {
   volatility?: string | null;
   last_confirmed?: string | null;
   freshness?: "current" | "unconfirmed" | null;
+  /** What authority this fact was born with (M8). Absent on older servers. */
+  origin_trust?: "trusted" | "semi_trusted" | "third_party" | "untrusted";
+  /** Who actually said it, when a third party did. */
+  attributed_to?: string | null;
 }
 
 /** Source event excerpt served in the packet (episodic memory). */

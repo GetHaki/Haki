@@ -216,6 +216,8 @@ async def capture_turn(
         subject_id=subject_id,
         thread_id=thread_id,
         run_id=run_id,
+        # M8: direct end-user turn through the authenticated proxy.
+        origin_trust="trusted",
         kind="conversation.turn",
         occurred_at=datetime.now(timezone.utc),
         payload={

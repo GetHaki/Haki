@@ -4,6 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.models.event import ORIGIN_TRUST_LEVELS
 from app.schemas.subjects import SubjectAliasIn
 
 
@@ -25,6 +26,14 @@ class EventIn(BaseModel):
     agent_id: str | None = Field(default=None, max_length=128)
     thread_id: str | None = Field(default=None, max_length=128)
     run_id: str | None = Field(default=None, max_length=128)
+    # Origin trust (M8): what the caller can honestly assert about where
+    # this content came from. Omitted -> derived server-side from
+    # actor_type (agent/tool/system -> semi_trusted, else trusted). Only
+    # the authenticated backend ever sets this — no model-facing surface
+    # exposes it as a parameter.
+    origin_trust: str | None = Field(
+        default=None, pattern="^(" + "|".join(ORIGIN_TRUST_LEVELS) + ")$"
+    )
 
     kind: str = Field(min_length=1, max_length=128)
     occurred_at: datetime

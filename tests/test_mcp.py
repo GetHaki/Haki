@@ -197,6 +197,21 @@ async def test_mcp_full_scenario(mcp_server):
             assert uuid.UUID(capture_data["event_id"])
             assert capture_data["project_id"] == MCP_PROJECT
 
+            # M8: content captured via MCP is written by the MODEL, not the
+            # human — the event is stamped semi_trusted, hardcoded server-
+            # side (no MCP tool ever takes a trust parameter).
+            async with httpx.AsyncClient(base_url=mcp_server, timeout=10) as http:
+                timeline_response = await http.get(
+                    "/v1/timeline",
+                    params={"project_id": MCP_PROJECT, "subject_id": SUBJECT},
+                )
+            captured_event = next(
+                e
+                for e in timeline_response.json()["events"]
+                if e["id"] == capture_data["event_id"]
+            )
+            assert captured_event["origin_trust"] == "semi_trusted"
+
             # 2. haki_context recalls the seeded convention, formatted.
             context_result = await session.call_tool(
                 "haki_context",
@@ -421,15 +436,15 @@ async def _create_key(base_url: str, *, org_id: str, project_id: str) -> str:
 
 
 async def test_mcp_scopes_by_real_customer_api_key(mcp_server):
-    """The multi-tenancy gap: a shared /mcp endpoint used to serve EVERY
-    caller from the single HAKI_MCP_* server config, so two different
-    signed-up customers on the same running server could never be told
-    apart. A real hk_ key (Authorization header) + a client-set
-    X-Haki-Subject-Id header must now resolve to THAT key's own
-    org/project — different from, and isolated from, the server's legacy
-    default scope (MCP_PROJECT/SUBJECT used by every other test in this
-    file, which exercises the no-Authorization-header self-hosted
-    fallback path instead)."""
+    """The production-readiness gap found live: the shared Cloud /mcp
+    endpoint used to serve EVERY caller from the single HAKI_MCP_* server
+    config, so two different signed-up customers on the same running
+    server could never be told apart. A real hk_ key (Authorization
+    header) + a client-set X-Haki-Subject-Id header must now resolve to
+    THAT key's own org/project — different from, and isolated from, the
+    server's legacy default scope (MCP_PROJECT/SUBJECT used by every other
+    test in this file, which exercises the no-Authorization-header
+    self-hosted fallback path instead)."""
     tenant_project = "prj_mcp_tenant_a"
     tenant_subject = "usr_tenant_a"
     key = await _create_key(mcp_server, org_id="org_mcp_tenant_a", project_id=tenant_project)

@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import ApiError
 from app.models import Event, Fact, FactStatus
+from app.models.event import AGENT_ACTOR_TYPES
 from app.schemas import EventIn
 
 
@@ -34,6 +35,18 @@ def compute_event_hash(event: EventIn) -> str:
         separators=(",", ":"),
     )
     return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def default_origin_trust(actor_type: str | None) -> str:
+    """Server-side origin-trust derivation when the caller omitted it: an
+    event whose declared actor is the agent/tooling itself is the agent
+    talking (semi_trusted), anything else keeps the historical implicit
+    full-authority default (trusted). Deliberately derived from actor_type
+    only — kind/source are free-form strings, guessing from them would be
+    a silent classifier, not a declaration."""
+    if actor_type in AGENT_ACTOR_TYPES:
+        return "semi_trusted"
+    return "trusted"
 
 
 def _validate_scope(event: EventIn, index: int) -> None:
@@ -80,6 +93,7 @@ async def write_events(
                 "agent_id": event.agent_id,
                 "thread_id": event.thread_id,
                 "run_id": event.run_id,
+                "origin_trust": event.origin_trust or default_origin_trust(event.actor_type),
                 "kind": event.kind,
                 "occurred_at": event.occurred_at,
                 "payload": event.payload,
@@ -164,6 +178,7 @@ async def create_fact(
     supersedes_id: uuid.UUID | None = None,
     fact_kind: str = "attribute",
     volatility: str = "stable",
+    origin_trust: str = "trusted",
 ) -> Fact:
     fact = Fact(
         org_id=org_id,
@@ -182,6 +197,7 @@ async def create_fact(
         version=1,
         fact_kind=fact_kind,
         volatility=volatility,
+        origin_trust=origin_trust,
     )
     session.add(fact)
     await session.flush()

@@ -196,6 +196,8 @@ async def _expand_via_entities(
                 Fact.last_reinforced_at,
                 Fact.fact_kind,
                 Fact.volatility,
+                Fact.origin_trust,
+                Fact.qualifiers,
             )
             .where(
                 Fact.project_id == project_id,
@@ -231,7 +233,7 @@ def _fact_freshness(row: Any, now: datetime) -> str:
     """"current" | "unconfirmed" | "expired" for one retrieved fact row.
 
     Clock: coalesce(last_reinforced_at, valid_from, recorded_from) — a
-    write-time reinforcement (migration 0012) already refreshes
+    write-time reinforcement (migration 0015) already refreshes
     last_reinforced_at on every re-assertion of the same value, so it
     doubles as the freshness clock without a separate column. Past its
     horizon, a slow fact stays served but flagged ("unconfirmed" — the
@@ -262,6 +264,10 @@ def _packet_fact(row: Any, freshness: str = "current") -> dict[str, Any]:
         # by an event, and whether it is inside its volatility horizon.
         "last_confirmed": reference.isoformat() if reference else None,
         "freshness": freshness,
+        # Provenance contract (M8): what authority this fact was born with,
+        # and who actually said it when a third party did.
+        "origin_trust": row.origin_trust or "trusted",
+        "attributed_to": (row.qualifiers or {}).get("attributed_to"),
     }
 
 
@@ -394,6 +400,8 @@ async def build_context(
             Fact.last_reinforced_at,
             Fact.fact_kind,
             Fact.volatility,
+            Fact.origin_trust,
+            Fact.qualifiers,
             Fact.embedding.cosine_distance(query_embedding).label("distance"),
             score.label("score"),
         )
@@ -564,6 +572,13 @@ async def build_context(
                     Event.project_id == project_id,
                     Event.subject_id == subject_id,
                     Event.embedding.is_not(None),
+                    # Provenance guard (M8): untrusted-origin events are
+                    # never served as episodes — an episode is a VERBATIM
+                    # payload excerpt replayed into the agent's context,
+                    # i.e. a direct injection channel for ingested content.
+                    # Their extracted facts already go through the
+                    # quarantine path; the raw payload must not bypass it.
+                    Event.origin_trust != "untrusted",
                 )
                 .order_by(Event.embedding.cosine_distance(query_embedding))
                 .limit(EPISODE_TOP_K)

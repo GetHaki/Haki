@@ -82,6 +82,7 @@ async def test_capture_then_worker_creates_active_fact_with_provenance(client):
         "conflicts": 0,
         "duplicates": 0,
         "reinforced": 0,
+        "quarantined": 0,
         "rejected": 0,
         "rejected_with_reason": {
             "echo_of_context": 0,
@@ -92,6 +93,7 @@ async def test_capture_then_worker_creates_active_fact_with_provenance(client):
             "agent_self_reference": 0,
             "no_evidence_span": 0,
             "imperative_directive": 0,
+            "untrusted_instruction": 0,
         },
     }
 

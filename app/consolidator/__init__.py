@@ -50,7 +50,7 @@ Guarantees:
   active fact reinforces it (counter + date) instead of creating a row.
   Concurrency: the whole write phase is serialized per (project_id,
   subject_id) with a transaction-scoped advisory lock, and a partial
-  unique index (migration 0012) makes two ACTIVE facts with the same
+  unique index (migration 0015) makes two ACTIVE facts with the same
   exact predicate impossible at the DB level even if some future write
   path forgets the lock — legitimate re-assertions are absorbed as
   duplicates/reinforcements BEFORE insertion, so the index only ever
@@ -73,6 +73,7 @@ from app import metrics
 from app.ledger.core import acquire_subject_write_lock, create_fact, transition_fact_status
 from app.context import episode_text
 from app.models import ConflictSet, ContextTrace, Event, Fact, FactStatus, Job, JobStatus
+from app.models.event import ORIGIN_TRUST_RANK
 from app.providers import (
     REJECT_REASONS,
     Embedder,
@@ -172,6 +173,25 @@ def _imperative_directive_reason(candidate: ExtractedFact) -> str | None:
     if any(pattern.search(text) for pattern in _IMPERATIVE_DIRECTIVE_PATTERNS):
         return "imperative_directive"
     return None
+
+
+def _untrusted_instruction_reason(event: Event, candidate: ExtractedFact) -> str | None:
+    """Deterministic authority check (M8), independent of prompt
+    compliance: a durable instruction (fact_kind="instruction") may only
+    be born from the subject's own channel or the agent's own tooling
+    (origin rank >= semi_trusted). Ingested content and third parties have
+    no authority to steer future behavior — the write-time blind spot
+    compositional/dormant attacks exploit (a legitimate-looking
+    "preference" planted in a document, triggered turns later).
+    Complements _imperative_directive_reason: that one catches orders
+    aimed AT the agent whatever the origin; this one catches instructions
+    whose ORIGIN disqualifies them even when perfectly phrased."""
+    if candidate.fact_kind != "instruction":
+        return None
+    rank = ORIGIN_TRUST_RANK.get(event.origin_trust or "trusted", 0)
+    if rank >= ORIGIN_TRUST_RANK["semi_trusted"]:
+        return None
+    return "untrusted_instruction"
 
 
 async def _active_fact(
@@ -369,12 +389,24 @@ def _reinforce_or_count_duplicate(
     fully overlap in cosine distance, so no threshold can authorize a
     merge — a false merge silently destroys an update, which is strictly
     worse than a duplicate.
+
+    Anti-clock-poisoning guard (M8): the freshness clock (last_reinforced_
+    at) only advances when the reasserting event's origin rank is >= the
+    fact's own — otherwise a lower-trust source (an untrusted document, a
+    third party) could keep a volatile fact looking "fresh" forever just
+    by repeating it. The counter and source_event_ids still record the
+    reinforcement either way; only the CLOCK is gated.
     """
     if fact.status is not FactStatus.active or event.id in fact.source_event_ids:
         result["duplicates"] += 1
         return
     fact.reinforcement_count += 1
-    if fact.last_reinforced_at is None or event.occurred_at > fact.last_reinforced_at:
+    event_rank = ORIGIN_TRUST_RANK.get(event.origin_trust or "trusted", 0)
+    fact_rank = ORIGIN_TRUST_RANK.get(fact.origin_trust or "trusted", 3)
+    if (
+        event_rank >= fact_rank
+        and (fact.last_reinforced_at is None or event.occurred_at > fact.last_reinforced_at)
+    ):
         # Business time, monotonic: out-of-order replays never move it back.
         fact.last_reinforced_at = event.occurred_at
     # ARRAY column without a Mutable wrapper: reassign, never append in place.
@@ -434,6 +466,97 @@ async def _apply_candidate(
         await session.flush()
         return
 
+    # Typology/volatility (M2): the candidate's own classes win; on a
+    # supersede of an existing fact, omitted classes are inherited rather
+    # than silently reset to the defaults (a status-only update must not
+    # "promote" a volatile fact to stable just because the extractor did not
+    # restate its class — same reasoning as the value carry-forward below).
+    # Computed here (before the trust check) so a quarantined fact keeps
+    # its declared/inherited typology instead of silently defaulting.
+    inherit = candidate.action == "supersede" and existing is not None
+    fact_kind = candidate.fact_kind or (existing.fact_kind if inherit else "attribute")
+    volatility = candidate.volatility or (existing.volatility if inherit else "stable")
+
+    # Provenance authority (M8). Attribution first: a fact born from a
+    # third party is stamped with who actually said it — deterministic,
+    # not prompt-dependent (the prompt also asks for a named value, but
+    # the qualifier is what the packet exposes as attributed_to).
+    qualifiers = candidate.qualifiers
+    if event.origin_trust == "third_party":
+        qualifiers = {**qualifiers, "attributed_to": event.actor_id or "third_party"}
+
+    event_rank = ORIGIN_TRUST_RANK.get(event.origin_trust or "trusted", 0)
+    existing_rank = (
+        ORIGIN_TRUST_RANK.get(existing.origin_trust or "trusted", 3)
+        if existing is not None
+        else None
+    )
+    if (existing_rank is not None and event_rank < existing_rank) or (
+        event.origin_trust == "untrusted"
+    ):
+        # Origin holdback ("quarantine" without a new status): the
+        # candidate never auto-activates. Two triggers, same mechanics:
+        # (a) a strictly lower-ranked origin trying to displace/contradict
+        # a higher-ranked fact — the higher-ranked fact stays SERVED (a
+        # third party or a poisoned document must not be able to hide the
+        # subject's own memory behind an open conflict), the candidate is
+        # held alone; (b) any untrusted-origin candidate, even on a brand
+        # new predicate — ingested content never enters served memory
+        # without human resolution (write-time filtering is structurally
+        # blind to compositional/dormant payloads; provenance is the
+        # backstop). Held = status stays `candidate` + a single-member
+        # open ConflictSet: never served (context blocks open-conflict
+        # facts), visible on the console's Conflicts page, resolvable via
+        # POST /v1/conflicts/{id}/resolve (keep -> active) or discardable
+        # via POST /v1/feedback rating=incorrect (-> disputed).
+        held_fact = await create_fact(
+            session,
+            org_id=event.org_id,
+            project_id=event.project_id,
+            subject_id=event.subject_id,
+            predicate=candidate.predicate,
+            value=candidate.value,
+            subject_type=event.subject_type,
+            agent_id=event.agent_id,
+            qualifiers=qualifiers,
+            confidence=candidate.confidence,
+            valid_from=event.occurred_at,
+            source_event_ids=[event.id],
+            fact_kind=fact_kind,
+            volatility=volatility,
+            origin_trust=event.origin_trust or "trusted",
+        )
+        held_fact.embedding = embedding
+        held_fact.search_text = _search_text(candidate.predicate, candidate.value)
+        if existing_rank is not None and event_rank < existing_rank:
+            reason = (
+                f"lower_trust_origin: '{event.origin_trust}' candidate for "
+                f"predicate '{candidate.predicate}' held for review — it "
+                f"cannot displace the '{existing.origin_trust}' fact "
+                f"{existing.id}, which stays served"
+            )
+        else:
+            reason = (
+                f"untrusted_origin: candidate for predicate "
+                f"'{candidate.predicate}' from an untrusted event held for "
+                "human review before it can ever be served"
+            )
+        session.add(
+            ConflictSet(
+                project_id=event.project_id,
+                subject_id=event.subject_id,
+                fact_ids=[held_fact.id],
+                status="open",
+                reason=reason,
+            )
+        )
+        await session.flush()
+        result["quarantined"] += 1
+        logger.info(
+            "consolidator: quarantined candidate fact %s (%s)", held_fact.id, reason
+        )
+        return
+
     value = candidate.value
     if candidate.action == "supersede" and existing is not None:
         # Carry forward descriptive fields the extractor didn't re-state.
@@ -447,15 +570,6 @@ async def _apply_candidate(
         # always win — that is the actual update.
         value = {**existing.value, **candidate.value}
 
-    # Typology/volatility (M2): the candidate's own classes win; on a
-    # supersede of an existing fact, omitted classes are inherited rather
-    # than silently reset to the defaults (a status-only update must not
-    # "promote" a volatile fact to stable just because the extractor did not
-    # restate its class — same reasoning as the value carry-forward above).
-    inherit = candidate.action == "supersede" and existing is not None
-    fact_kind = candidate.fact_kind or (existing.fact_kind if inherit else "attribute")
-    volatility = candidate.volatility or (existing.volatility if inherit else "stable")
-
     fact = await create_fact(
         session,
         org_id=event.org_id,
@@ -465,12 +579,13 @@ async def _apply_candidate(
         value=value,
         subject_type=event.subject_type,
         agent_id=event.agent_id,
-        qualifiers=candidate.qualifiers,
+        qualifiers=qualifiers,
         confidence=candidate.confidence,
         valid_from=event.occurred_at,
         source_event_ids=[event.id],
         fact_kind=fact_kind,
         volatility=volatility,
+        origin_trust=event.origin_trust or "trusted",
     )
     fact.embedding = embedding
     fact.search_text = _search_text(candidate.predicate, value)
@@ -557,6 +672,7 @@ async def _process_job(
         "conflicts": 0,
         "duplicates": 0,
         "reinforced": 0,
+        "quarantined": 0,
         "rejected": 0,
         "rejected_with_reason": {reason: 0 for reason in REJECT_REASONS},
     }
@@ -620,6 +736,10 @@ async def _process_job(
             _record_rejection(
                 result, directive_reason, job_id=job.id, source="directive-filter"
             )
+            continue
+        trust_reason = _untrusted_instruction_reason(event, candidate)
+        if trust_reason is not None:
+            _record_rejection(result, trust_reason, job_id=job.id, source="trust-gate")
             continue
         to_apply.append((event, candidate))
 

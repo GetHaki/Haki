@@ -8,6 +8,39 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
 
+# Origin-trust levels (M8 — provenance as authority). Declared by the
+# AUTHENTICATED caller (the developer's backend) or derived server-side from
+# actor_type — never by the model: no LLM-facing surface accepts this field
+# as a parameter. Haki cannot DETECT where content came from; it enforces
+# the consequences of what the caller honestly declares:
+#   trusted      direct message from the tracked subject (default)
+#   semi_trusted output of the agent/tooling itself (MCP haki_capture,
+#                any event whose actor_type says "agent"/"tool"/"system")
+#   third_party  a third participant in the subject's conversation (group
+#                chat): facts are attributed to them, never to the subject
+#   untrusted    ingested external content (document, web page, forwarded
+#                text): never served, never auto-activated — see consolidator
+ORIGIN_TRUST_LEVELS: tuple[str, ...] = (
+    "trusted",
+    "semi_trusted",
+    "third_party",
+    "untrusted",
+)
+
+# Authority ordering used by the consolidator: a candidate born from a
+# strictly lower-ranked event never displaces a fact born from a higher-
+# ranked one. Equality is allowed on purpose (an MCP-captured fact must
+# keep superseding earlier MCP-captured facts).
+ORIGIN_TRUST_RANK: dict[str, int] = {
+    "untrusted": 0,
+    "third_party": 1,
+    "semi_trusted": 2,
+    "trusted": 3,
+}
+
+# actor_type values that make an event "the agent talking", not the human.
+AGENT_ACTOR_TYPES: frozenset[str] = frozenset({"agent", "tool", "system"})
+
 
 class Event(Base):
     """Source event (contract B.1). Append-only: business content is never
@@ -56,3 +89,11 @@ class Event(Base):
     # Episodic retrieval (sprint 10): derived embedding of kind + truncated
     # payload, set once by the consolidator. NULL until consolidated.
     embedding: Mapped[list[float] | None] = mapped_column(Vector(384))
+
+    # Origin trust (M8): declared by the authenticated caller or derived
+    # from actor_type at write time (ledger.write_events) — see
+    # ORIGIN_TRUST_LEVELS above. server_default keeps pre-existing rows on
+    # the implicit full-authority behavior they always had.
+    origin_trust: Mapped[str] = mapped_column(
+        String(16), default="trusted", server_default="trusted"
+    )

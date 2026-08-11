@@ -41,13 +41,18 @@ class PacketFact(BaseModel):
     valid_from: str | None
     source_event_ids: list[str]
     # Typology + volatility (M2). All optional with None defaults: traces
-    # persisted BEFORE migration 0013 re-validate through this model on
+    # persisted BEFORE migration 0016 re-validate through this model on
     # GET /v1/inspect/{trace_id} — an old packet without these keys must
     # keep loading (backward-compat guarantee, tested).
     fact_kind: str | None = None
     volatility: str | None = None
     last_confirmed: str | None = None
     freshness: str | None = None  # "current" | "unconfirmed"
+    # Provenance contract (M8): what authority this fact was born with, and
+    # — for third_party origins — who actually said it. Defaults keep old
+    # persisted traces (context_traces.packet) re-validating unchanged.
+    origin_trust: str = "trusted"
+    attributed_to: str | None = None
 
 
 class PacketEpisode(BaseModel):

@@ -145,6 +145,9 @@ async def test_gateway_injects_memory_and_captures(
     assert len(turns) == 1
     assert turns[0].payload["messages"][0]["content"] == "rédige ma facture"
     assert turns[0].payload["messages"][1]["content"] == ASSISTANT_TEXT
+    # M8: a turn through the authenticated gateway proxy is a direct
+    # end-user message — trusted, explicit (not derived).
+    assert turns[0].origin_trust == "trusted"
     async with async_session() as session:
         jobs = list((await session.execute(select(Job))).scalars().all())
     # One pending consolidate job for the captured turn (the seed's job was

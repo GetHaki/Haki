@@ -72,7 +72,7 @@ class Fact(Base):
     )
     version: Mapped[int] = mapped_column(Integer, default=1)
 
-    # Write-time reinforcement (migration 0012): a NEW source event that
+    # Write-time reinforcement (migration 0015): a NEW source event that
     # re-asserts the exact same canonical value updates these on the
     # existing active fact instead of creating a row. See app/consolidator
     # (_reinforce_or_count_duplicate) for the rule and why value equality
@@ -85,13 +85,20 @@ class Fact(Base):
         DateTime(timezone=True)
     )
 
-    # Typology + volatility (M2, migration 0013). The freshness clock reuses
+    # Typology + volatility (M2, migration 0016). The freshness clock reuses
     # last_reinforced_at above (falls back to valid_from, then recorded_from)
-    # -- a write-time reinforcement (migration 0012) already refreshes it on
+    # -- a write-time reinforcement (migration 0015) already refreshes it on
     # every re-assertion of the same value, so no separate "confirmed_at"
     # column is needed.
     fact_kind: Mapped[str] = mapped_column(String(32), default="attribute")
     volatility: Mapped[str] = mapped_column(String(16), default="stable")
+
+    # Origin trust inherited from the source event (M8) — what authority
+    # this fact was born with. Drives the consolidator's supersession
+    # authority rule and the packet's provenance display.
+    origin_trust: Mapped[str] = mapped_column(
+        String(16), default="trusted", server_default="trusted"
+    )
 
     # Retrieval (sprint 2): dense embedding + pre-rendered full-text column.
     # vector(384) since migration 0003 (default embedder: local fastembed,

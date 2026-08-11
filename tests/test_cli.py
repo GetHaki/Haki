@@ -183,7 +183,10 @@ def test_login_full_device_code_round_trip_against_real_server(monkeypatch, tmp_
         assert replay.status_code == 404  # consumed -> deleted from Redis
 
     assert result["code"] == 0
-    assert opened_urls == [captured["verification_uri"]]
+    # The browser gets the code-carrying link (RFC 8628 §3.3.1), which the
+    # real server built from the real user_code -- not a fixture's guess.
+    assert opened_urls == [captured["verification_uri_complete"]]
+    assert opened_urls[0] == f"{captured['verification_uri']}?code={user_code}"
     saved = json.loads((tmp_path / "config.json").read_text())
     assert saved == {
         "api_url": base_url,
@@ -225,21 +228,29 @@ class _FakeDeviceClient:
     poll-loop/timeout logic from the real server's fixed 600s/3s constants.
     """
 
-    def __init__(self, poll_statuses, expires_in=0.3, interval=0.05):
+    def __init__(
+        self, poll_statuses, expires_in=0.3, interval=0.05, with_complete_uri=True
+    ):
         self._poll_statuses = list(poll_statuses)
+        self.with_complete_uri = with_complete_uri
         self.expires_in = expires_in
         self.interval = interval
         self.poll_calls = 0
         self.closed = False
 
     def cli_device_start(self):
-        return {
+        payload = {
             "device_code": "fakecode",
             "user_code": "ABCD-EFGH",
             "verification_uri": "http://localhost:3000/cli-auth",
             "expires_in": self.expires_in,
             "interval": self.interval,
         }
+        if self.with_complete_uri:
+            payload["verification_uri_complete"] = (
+                "http://localhost:3000/cli-auth?code=ABCD-EFGH"
+            )
+        return payload
 
     def cli_device_poll(self, device_code):
         assert device_code == "fakecode"
@@ -536,3 +547,198 @@ def test_hooks_write_declined_writes_nothing(monkeypatch, tmp_path):
 
     assert code == 0
     assert not (project_dir / ".cursor").exists()
+
+
+# -- `haki verify` scenario, fake client, no network ----------------------
+
+
+class _FakeVerifyClient:
+    """Stand-in for HakiClient exposing exactly the calls `_cmd_verify`
+    makes. Records them so the tests can assert on the scenario's shape
+    (which endpoint, which scope, which thread) rather than on a server's
+    behavior -- the server side of the same scenario is covered by
+    tests/test_sdk.py against the real app."""
+
+    def __init__(self, *, served, superseded):
+        self.captures: list[dict] = []
+        self.scoped_consolidations: list[tuple[str, str]] = []
+        self.unscoped_consolidations = 0
+        self.context_calls: list[dict] = []
+        self._served = served
+        self._superseded = superseded
+        self.closed = False
+
+    def capture(self, events):
+        self.captures.extend(events)
+        return {"status": "accepted"}
+
+    def consolidate(self):
+        self.unscoped_consolidations += 1
+        return {"processed": 1}
+
+    def consolidate_subject(self, *, project_id, subject_id):
+        self.scoped_consolidations.append((project_id, subject_id))
+        return {"processed": 1}
+
+    def facts(self, *, project_id, subject_id, status=None):
+        if status == "superseded":
+            return {"facts": list(self._superseded)}
+        if status == "active":
+            return {"facts": list(self._served)}
+        return {"facts": [*self._superseded, *self._served]}
+
+    def context(self, subject_id, query, project_id, **kwargs):
+        self.context_calls.append({"subject_id": subject_id, **kwargs})
+        return {"packet": {"facts": list(self._served)}, "trace_id": "trc_fake"}
+
+    def close(self):
+        self.closed = True
+
+
+_CURRENT_FACT = {
+    "predicate": "invoice_language",
+    "value": {"language": "en"},
+    "valid_from": "2026-08-11T10:00:00Z",
+}
+_REPLACED_FACT = {"predicate": "invoice_language", "value": {"language": "fr"}}
+
+
+def _run_verify(monkeypatch, tmp_path, *, served, superseded):
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps({"api_url": "http://fake.local", "api_key": "hk_fake"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli, "CONFIG_PATH", config)
+    fake = _FakeVerifyClient(served=served, superseded=superseded)
+    monkeypatch.setattr(cli, "HakiClient", lambda *a, **kw: fake)
+    return cli.main(["verify"]), fake
+
+
+def test_verify_never_calls_the_unscoped_consolidate_endpoint(monkeypatch, tmp_path):
+    """Regression guard: POST /v1/consolidate drains EVERY project's pending
+    jobs on a session without RLS. A customer command must never trigger
+    (nor wait on) another tenant's consolidation -- it consolidates its own
+    subject, by scope, twice."""
+    code, fake = _run_verify(
+        monkeypatch, tmp_path, served=[_CURRENT_FACT], superseded=[_REPLACED_FACT]
+    )
+
+    assert code == 0
+    assert fake.unscoped_consolidations == 0
+    assert len(fake.scoped_consolidations) == 2
+    subject_ids = {subject for _, subject in fake.scoped_consolidations}
+    assert len(subject_ids) == 1  # both calls scoped to the same, single subject
+    assert all(project == cli._VERIFY_PROJECT for project, _ in fake.scoped_consolidations)
+    assert fake.closed
+
+
+def test_verify_captures_the_correction_in_the_same_thread(monkeypatch, tmp_path):
+    """The scenario only demonstrates a supersession if the second message
+    is a correction WITHIN the conversation -- a new thread would make it a
+    plausible independent statement instead."""
+    code, fake = _run_verify(
+        monkeypatch, tmp_path, served=[_CURRENT_FACT], superseded=[_REPLACED_FACT]
+    )
+
+    assert code == 0
+    assert len(fake.captures) == 2
+    assert fake.captures[0]["thread_id"] == fake.captures[1]["thread_id"]
+    contents = [event["payload"]["content"] for event in fake.captures]
+    assert contents == [cli._VERIFY_MESSAGE_1, cli._VERIFY_MESSAGE_2]
+    # ... and the context call reads from a DIFFERENT thread.
+    assert fake.captures[0]["thread_id"] not in fake.context_calls[0]["purpose"]
+
+
+def test_verify_reports_the_current_value_and_the_one_it_replaced(monkeypatch, tmp_path, capsys):
+    code, _ = _run_verify(
+        monkeypatch, tmp_path, served=[_CURRENT_FACT], superseded=[_REPLACED_FACT]
+    )
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert 'recalled  invoice_language = {"language": "en"}' in out
+    assert 'hidden    invoice_language = {"language": "fr"}' in out
+    assert "superseded" in out
+    assert "trace     trc_fake" in out
+    assert out.rstrip().splitlines()[-1].startswith("OK — your agent remembered")
+
+
+def test_verify_fails_when_the_stale_value_is_still_served(monkeypatch, tmp_path, capsys):
+    """The failure this command exists to catch: the correction was captured
+    and consolidated, but the packet still serves the superseded value."""
+    code, _ = _run_verify(
+        monkeypatch, tmp_path, served=[_REPLACED_FACT], superseded=[_REPLACED_FACT]
+    )
+    out = capsys.readouterr().out
+
+    assert code == 1
+    assert "FAIL: the update was not applied" in out
+    assert '{"language": "fr"}' in out
+
+
+def test_verify_fails_when_no_supersession_was_recorded(monkeypatch, tmp_path, capsys):
+    """Serving the right value is not enough: if the old value is not on
+    file as superseded, the update was stored as an unrelated new fact and
+    nothing links the two."""
+    code, _ = _run_verify(
+        monkeypatch, tmp_path, served=[_CURRENT_FACT], superseded=[]
+    )
+    out = capsys.readouterr().out
+
+    assert code == 1
+    assert "not on file as superseded" in out
+
+
+def test_verify_fails_when_nothing_is_recalled(monkeypatch, tmp_path, capsys):
+    """An open conflict blocks BOTH values (context reason_code
+    'conflict_open'), so an empty packet is a realistic failure, not a
+    theoretical one -- it must not read as a crash."""
+    code, _ = _run_verify(monkeypatch, tmp_path, served=[], superseded=[])
+    out = capsys.readouterr().out
+
+    assert code == 1
+    assert "FAIL: nothing recalled about the preference" in out
+    assert "trace     trc_fake" in out
+
+
+def test_verify_falls_back_to_ascii_when_stdout_cannot_encode_the_tick(monkeypatch):
+    """`haki verify` is routinely piped, and a redirected stream falls back
+    to the locale encoding -- cp1252/ascii cannot encode the tick."""
+    class _AsciiStdout:
+        encoding = "ascii"
+
+    monkeypatch.setattr(cli.sys, "stdout", _AsciiStdout())
+    assert cli._stdout_mark() == "OK"
+
+
+def test_login_opens_the_link_that_carries_the_code(monkeypatch, tmp_path):
+    """RFC 8628 §3.3.1. The browser gets verification_uri_complete so the
+    code is already in the box, while the printed instructions keep the
+    plain URI and the code — typing it on a phone stays a supported path."""
+    monkeypatch.setattr(cli, "CONFIG_PATH", tmp_path / "config.json")
+    opened: list[str] = []
+    monkeypatch.setattr(cli.webbrowser, "open", lambda url: opened.append(url))
+    fake = _FakeDeviceClient(poll_statuses=["approved"], expires_in=5, interval=0.02)
+    monkeypatch.setattr(cli, "HakiClient", lambda *a, **kw: fake)
+
+    assert cli.main(["login", "--api-url", "http://fake.local"]) == 0
+    assert opened == ["http://localhost:3000/cli-auth?code=ABCD-EFGH"]
+
+
+def test_login_falls_back_to_the_plain_uri_on_an_older_server(monkeypatch, tmp_path, capsys):
+    """The SDK ships and versions independently of the API it talks to: a
+    server predating verification_uri_complete must still log in, not crash
+    on a missing key."""
+    monkeypatch.setattr(cli, "CONFIG_PATH", tmp_path / "config.json")
+    opened: list[str] = []
+    monkeypatch.setattr(cli.webbrowser, "open", lambda url: opened.append(url))
+    fake = _FakeDeviceClient(
+        poll_statuses=["approved"], expires_in=5, interval=0.02, with_complete_uri=False
+    )
+    monkeypatch.setattr(cli, "HakiClient", lambda *a, **kw: fake)
+
+    assert cli.main(["login", "--api-url", "http://fake.local"]) == 0
+    assert opened == ["http://localhost:3000/cli-auth"]
+    # The code itself is always printed, whichever URI was opened.
+    assert "ABCD-EFGH" in capsys.readouterr().out

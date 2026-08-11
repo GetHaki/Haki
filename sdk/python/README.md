@@ -41,7 +41,9 @@ The `haki` command ships with this package:
 
 ```bash
 haki connect --api-url http://localhost:8100
-haki verify      # memorizes a fact, opens a new conversation, proves recall
+haki verify      # memorizes a preference, then a correction to it, then proves
+                 # a new conversation serves the current value and can show
+                 # the one it replaced
 haki status
 haki mcp          # package this SDK for Cursor's MCP integration
 ```

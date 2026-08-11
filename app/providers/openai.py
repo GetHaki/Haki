@@ -29,9 +29,21 @@ from app.providers.base import ExtractedFact, RawCandidate
 _SYSTEM_PROMPT = """You extract durable memory facts from agent events.
 Reply with a JSON object {"facts": [...]} where each fact has:
 - subject_id (string): entity the fact is about (reuse the event subject_id)
-- predicate (string): short snake_case name, e.g. "invoice_language"
+- predicate (string): short snake_case name for WHAT is being recorded,
+  e.g. "invoice_language". Name the measure only. Any condition that
+  narrows WHEN or WHERE it applies goes in `qualifiers`, NEVER in this
+  name: write "wake_up_time" + qualifiers {"day_type": "weekday"}, never
+  "wake_up_time_weekday". The predicate is a join key — two readings of
+  the same measure under different conditions must share it, so that a
+  later update can be matched against the right one.
 - value (object): the structured value, e.g. {"language": "fr"}
-- qualifiers (object, optional): conditions of validity
+- qualifiers (object, optional): the conditions under which this value
+  holds, as separate keys — {"day_type": "weekend"}, {"location":
+  "office"}, {"season": "winter"}. Two facts that differ here are
+  different facts and will both be kept; two facts that agree here and
+  contradict each other are an update or a conflict. Leave it out when the
+  value holds unconditionally — an empty qualifier set is itself a
+  meaningful, distinct key, so do not invent conditions to fill it.
 - confidence (number 0-1)
 - action ("create" | "supersede" | "reject"): "supersede" when this fact
   replaces an older value of the same predicate; "reject" when the

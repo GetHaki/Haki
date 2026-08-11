@@ -26,6 +26,13 @@ async def test_device_start_shape(client, monkeypatch):
     int(body["device_code"], 16)  # 64 hex chars, decodes cleanly
     assert USER_CODE_RE.match(body["user_code"])
     assert body["verification_uri"] == "https://console.example.com/cli-auth"
+    # RFC 8628 §3.3.1: the same page, code already in the query string, so
+    # an agent (or a CLI opening a browser) can relay ONE link instead of a
+    # link plus a code to transcribe. The plain uri and the code stay
+    # populated alongside it -- a human typing on a phone still needs them.
+    assert body["verification_uri_complete"] == (
+        f"https://console.example.com/cli-auth?code={body['user_code']}"
+    )
     assert body["expires_in"] == 600
     assert body["interval"] == 3
 
@@ -202,3 +209,99 @@ async def test_ttl_expiry_makes_a_pending_code_unknown(client):
         "/v1/cli/device/poll", json={"device_code": start["device_code"]}
     )
     assert response.status_code == 404
+
+
+# -- code normalization and the RFC 8628 §5.4 attempt cap -----------------
+
+
+async def _approve(client, user_code: str, *, approver: str | None = "usr_clerk_1"):
+    return await client.post(
+        "/v1/cli/device/approve",
+        json={
+            "user_code": user_code,
+            "api_key": "hk_deadbeefcafef00d",
+            "org_id": "org_acme",
+            "project_id": "prj_support",
+            "approver_ref": approver,
+        },
+        headers={"Authorization": "Bearer svc_test_secret"},
+    )
+
+
+async def test_approve_forgives_case_and_separators_in_the_typed_code(
+    client, monkeypatch
+):
+    """The code is compared as an exact Redis key, so "abcd efgh" and
+    "ABCDEFGH" would each read as a wrong code -- and burn an attempt --
+    for what is only a transcription habit. Normalizing server-side (not in
+    the console) means every approving surface forgives the same things."""
+    monkeypatch.setattr(settings, "console_service_key", "svc_test_secret")
+    start = await _start(client)
+    typed = start["user_code"].replace("-", " ").lower()
+
+    assert (await _approve(client, typed)).status_code == 200
+
+    poll = await client.post(
+        "/v1/cli/device/poll", json={"device_code": start["device_code"]}
+    )
+    assert poll.json()["status"] == "approved"
+
+
+async def test_approve_rejects_a_code_that_is_not_eight_characters(
+    client, monkeypatch
+):
+    """Normalization forgives cosmetics, never length: a truncated or
+    padded code stays the unknown code it is."""
+    monkeypatch.setattr(settings, "console_service_key", "svc_test_secret")
+    start = await _start(client)
+
+    assert (await _approve(client, start["user_code"][:-1])).status_code == 404
+
+
+async def test_wrong_codes_are_capped_per_approver(client, monkeypatch):
+    """RFC 8628 §5.4. Approving hands the APPROVER's key to whichever
+    terminal holds the code, so guessing a stranger's pending code plants
+    an attacker-owned key in their CLI -- every write that terminal makes
+    then lands in the attacker's project. Unbounded guessing against a
+    32**8 space is not acceptable."""
+    monkeypatch.setattr(settings, "console_service_key", "svc_test_secret")
+    approver = "usr_clerk_bruteforcer"
+    for attempt in range(10):
+        response = await _approve(client, "ZZZZ-ZZZZ", approver=approver)
+        assert response.status_code == 404, f"attempt {attempt} should be a plain miss"
+
+    blocked = await _approve(client, "ZZZZ-ZZZZ", approver=approver)
+    assert blocked.status_code == 429
+    assert blocked.json()["error"]["type"] == "rate_limited"
+
+    # And a REAL code from that approver is now refused too -- the cap is
+    # on the person, not on the code they happen to be trying.
+    start = await _start(client)
+    assert (await _approve(client, start["user_code"], approver=approver)).status_code == 429
+
+
+async def test_the_cap_is_per_approver_not_shared_by_everyone(client, monkeypatch):
+    """Every approval reaches the API from the console backend's single
+    address, so an IP-keyed counter would be one bucket shared by all
+    users: one person fat-fingering codes would lock out the whole
+    instance. Counting per approver is what keeps this safe to enable."""
+    monkeypatch.setattr(settings, "console_service_key", "svc_test_secret")
+    noisy, quiet = "usr_clerk_noisy", "usr_clerk_quiet"
+    for _ in range(11):
+        await _approve(client, "ZZZZ-ZZZZ", approver=noisy)
+    assert (await _approve(client, "ZZZZ-ZZZZ", approver=noisy)).status_code == 429
+
+    start = await _start(client)
+    assert (await _approve(client, start["user_code"], approver=quiet)).status_code == 200
+
+
+async def test_successful_approvals_never_count_against_the_cap(client, monkeypatch):
+    """Connecting several terminals in a row is normal use, not an attack:
+    only FAILED attempts may accumulate."""
+    monkeypatch.setattr(settings, "console_service_key", "svc_test_secret")
+    approver = "usr_clerk_many_terminals"
+    for _ in range(12):
+        start = await _start(client)
+        assert (
+            await _approve(client, start["user_code"], approver=approver)
+        ).status_code == 200

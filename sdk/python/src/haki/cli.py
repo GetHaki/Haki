@@ -176,11 +176,19 @@ def _cmd_login(args: argparse.Namespace) -> int:
         expires_in = float(start["expires_in"])
         interval = max(float(start["interval"]), 0.5)
 
+        # RFC 8628 §3.3.1: the code stays printed and the plain URI stays
+        # usable (typing the code on a phone is a supported path), but the
+        # browser gets the link that carries the code -- one thing to
+        # follow instead of two things to transcribe. `.get` because the
+        # SDK is versioned independently of the server it talks to: an
+        # older API returns no verification_uri_complete.
+        complete_uri = start.get("verification_uri_complete") or verification_uri
+
         print(f"Code : {user_code}")
         print(f"Ouvrez {verification_uri} et entrez ce code pour connecter ce terminal.")
 
         try:
-            webbrowser.open(verification_uri)
+            webbrowser.open(complete_uri)
         except Exception:
             pass  # best-effort only -- never fails the login flow
 
@@ -255,21 +263,140 @@ def _cmd_status(_args: argparse.Namespace) -> int:
     return 0
 
 
-def _step(label: str, started: float) -> None:
-    print(f"  [{time.perf_counter() - started:6.2f} s] {label}")
+# The two messages of the verify scenario, in the SAME thread: a stated
+# preference, then a change of mind. Kept verbatim (French, "en fait X
+# plutôt que Y") because this exact phrasing is what was measured to make
+# the extractor classify the second message as action="supersede" rather
+# than action="create" — a "create" would open a conflict set instead, and
+# an open conflict is never served (app/context: reason_code
+# "conflict_open"), so the scenario would fail for a reason that has
+# nothing to do with what it is meant to demonstrate. Reword only with a
+# real extraction provider in front of you, never on inspection alone.
+_VERIFY_MESSAGE_1 = "Je préfère recevoir mes factures en français."
+_VERIFY_MESSAGE_2 = "En fait, envoie-les moi en anglais plutôt, pas en français."
+
+# What the demo fact is about. Matched loosely on the predicate because the
+# extractor mints the string itself ("invoice_language", "billing_language",
+# "langue_facture", …) — pinning one exact spelling would make verify fail
+# on a correct system that simply named the fact differently.
+_VERIFY_PREDICATE_HINT = "lang"
+_VERIFY_ENGLISH_TOKENS = ('"en"', "english", "anglais")
 
 
-def _fact_recalled(facts: list[dict]) -> dict | None:
+def _stdout_mark() -> str:
+    """The step marker: a tick when the output stream can encode one,
+    the ASCII "OK" otherwise.
+
+    `haki verify` is often piped or redirected, and a redirected stream
+    falls back to the locale encoding (cp1252 on a French Windows, ascii
+    under LC_ALL=C) — neither can encode "✔". Crashing the verification
+    command on its own decoration would be an absurd failure mode.
+    """
+    encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+    try:
+        "✔".encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        return "OK"
+    return "✔"
+
+
+# Width of the middle column. The captured messages are the widest thing
+# that goes in it, so it is sized on them: message 1 fits whole, message 2
+# is elided rather than pushing the notes column out of alignment.
+_VERIFY_DETAIL_WIDTH = 50
+
+
+def _verify_step(mark: str, label: str, detail: str, note: str = "") -> None:
+    print(f"  {mark} {label:<11} {detail:<{_VERIFY_DETAIL_WIDTH}} {note}".rstrip())
+
+
+def _quoted(message: str) -> str:
+    budget = _VERIFY_DETAIL_WIDTH - 2  # the two quotes
+    text = message if len(message) <= budget else message[: budget - 3] + "..."
+    return f'"{text}"'
+
+
+def _verify_event(subject_id: str, thread_id: str, content: str) -> dict:
+    return {
+        "org_id": "org_haki_verify",
+        "project_id": _VERIFY_PROJECT,
+        "subject_type": "user",
+        "subject_id": subject_id,
+        "thread_id": thread_id,
+        "kind": "conversation.message",
+        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "payload": {"role": "user", "content": content},
+        "idempotency_key": f"verify-{uuid.uuid4()}",
+    }
+
+
+def _language_fact(facts: list[dict]) -> dict | None:
+    """The scenario's fact, whatever exact predicate string it was given."""
     for fact in facts:
-        rendered = json.dumps(fact.get("value"), ensure_ascii=False).lower()
-        if "français" in rendered or "french" in rendered or '"fr"' in rendered:
+        if _VERIFY_PREDICATE_HINT in str(fact.get("predicate", "")).lower():
             return fact
     return None
 
 
+def _says_english(fact: dict) -> bool:
+    rendered = json.dumps(fact.get("value"), ensure_ascii=False).lower()
+    return any(token in rendered for token in _VERIFY_ENGLISH_TOKENS)
+
+
+def _render_value(fact: dict) -> str:
+    return json.dumps(fact.get("value"), ensure_ascii=False)
+
+
+def _valid_since(fact: dict) -> str:
+    raw = fact.get("valid_from")
+    return f"valid since {str(raw)[:10]}" if raw else ""
+
+
+def _verify_first_capture(
+    client: HakiClient, config: dict, event: dict
+) -> HakiClient:
+    """First capture, with the one-shot key repair verify has always done:
+    if the configured credential cannot write (401 — typically an admin
+    key, which manages keys but owns no project scope), mint a
+    project-scoped key with it, save it, retry once. Returns the client to
+    use for the rest of the scenario — a new one when a key was minted,
+    otherwise the one passed in."""
+    try:
+        client.capture([event])
+        return client
+    except HakiApiError as exc:
+        if exc.status_code != 401:
+            raise
+        created = client.create_key(
+            project_id=_VERIFY_PROJECT,
+            org_id="org_haki_verify",
+            label="haki verify",
+        )
+        config["api_key"] = created["key"]
+        _save_config(config["api_url"], config["api_key"])
+        print(f"  API key created for {_VERIFY_PROJECT} (saved to config)")
+        client.close()
+        retried = HakiClient(config["api_url"], api_key=created["key"])
+        retried.capture([event])
+        return retried
+
+
 def _cmd_verify(_args: argparse.Namespace) -> int:
-    """Timed end-to-end scenario: capture -> consolidate -> new thread ->
-    context recalls the fact. Exit 0 on success, 1 on any failure.
+    """Timed end-to-end scenario. Exit 0 on success, 1 on any failure.
+
+    Two messages in the SAME thread — a stated preference, then a change of
+    mind — then a context call from a NEW thread. What this demonstrates
+    that a plain capture-then-recall cannot: the packet serves the CURRENT
+    value, the replaced one is still on file marked superseded rather than
+    deleted, and the whole answer carries a trace id. That is the product
+    promise in one command, which is why both halves are hard requirements
+    here: recalling the stale value, or losing the old one entirely, both
+    exit 1.
+
+    Consolidation runs through the SUBJECT-scoped endpoint. The unscoped
+    POST /v1/consolidate this used to call drains every project's pending
+    jobs on a session without RLS — on a shared server that means a verify
+    run does (and waits on) other tenants' work.
 
     If no API key is configured, a bootstrap key creation is attempted for
     the verify project (works on a fresh server without HAKI_ADMIN_KEY, or
@@ -279,8 +406,10 @@ def _cmd_verify(_args: argparse.Namespace) -> int:
     subject_id = f"usr_verify_{uuid.uuid4().hex[:12]}"
     thread_1 = f"thr_{uuid.uuid4().hex[:8]}"
     thread_2 = f"thr_{uuid.uuid4().hex[:8]}"  # new thread: memory must survive it
+    mark = _stdout_mark()
 
     print(f"haki verify — subject {subject_id}")
+    print()
     try:
         config = _load_config()
         if not config.get("api_key"):
@@ -295,89 +424,123 @@ def _cmd_verify(_args: argparse.Namespace) -> int:
                 print(f"  API key created for {_VERIFY_PROJECT} (saved to config)")
             except HakiError:
                 pass  # dev-open mode, or key creation needs admin rights
-        with _client_from_config() as client:
+
+        client = _client_from_config()
+        try:
             t0 = time.perf_counter()
 
-            try:
-                client.capture(
-                    [
-                        {
-                            "org_id": "org_haki_verify",
-                            "project_id": _VERIFY_PROJECT,
-                            "subject_type": "user",
-                            "subject_id": subject_id,
-                            "thread_id": thread_1,
-                            "kind": "conversation.message",
-                            "occurred_at": datetime.now(timezone.utc).isoformat(),
-                            "payload": {
-                                "role": "user",
-                                "content": "Je préfère recevoir mes factures en français.",
-                            },
-                            "idempotency_key": f"verify-{uuid.uuid4()}",
-                        }
-                    ]
-                )
-            except HakiApiError as exc:
-                # The configured credential (e.g. an admin key) cannot write
-                # data: mint a project-scoped key with it, save it, retry once.
-                if exc.status_code != 401:
-                    raise
-                created = client.create_key(
+            client = _verify_first_capture(
+                client, config, _verify_event(subject_id, thread_1, _VERIFY_MESSAGE_1)
+            )
+            _verify_step(mark, "capture", _quoted(_VERIFY_MESSAGE_1), thread_1)
+
+            t = time.perf_counter()
+            client.consolidate_subject(
+                project_id=_VERIFY_PROJECT, subject_id=subject_id
+            )
+            consolidate_1_s = time.perf_counter() - t
+            extracted = len(
+                client.facts(
+                    project_id=_VERIFY_PROJECT, subject_id=subject_id, status="active"
+                )["facts"]
+            )
+            _verify_step(
+                mark,
+                "consolidate",
+                f"{extracted} fact(s) extracted",
+                f"{consolidate_1_s:.1f}s",
+            )
+
+            client.capture(
+                [_verify_event(subject_id, thread_1, _VERIFY_MESSAGE_2)]
+            )
+            _verify_step(
+                mark, "capture", _quoted(_VERIFY_MESSAGE_2), f"{thread_1} (same thread)"
+            )
+
+            t = time.perf_counter()
+            client.consolidate_subject(
+                project_id=_VERIFY_PROJECT, subject_id=subject_id
+            )
+            consolidate_2_s = time.perf_counter() - t
+
+            # Read the superseded side now so the consolidate line can state
+            # what actually happened instead of a job count.
+            replaced = _language_fact(
+                client.facts(
                     project_id=_VERIFY_PROJECT,
-                    org_id="org_haki_verify",
-                    label="haki verify",
-                )
-                config["api_key"] = created["key"]
-                _save_config(config["api_url"], config["api_key"])
-                print(f"  API key created for {_VERIFY_PROJECT} (saved to config)")
-                client.close()
-                client = HakiClient(config["api_url"], api_key=created["key"])
-                client.capture(
-                    [
-                        {
-                            "org_id": "org_haki_verify",
-                            "project_id": _VERIFY_PROJECT,
-                            "subject_type": "user",
-                            "subject_id": subject_id,
-                            "thread_id": thread_1,
-                            "kind": "conversation.message",
-                            "occurred_at": datetime.now(timezone.utc).isoformat(),
-                            "payload": {
-                                "role": "user",
-                                "content": "Je préfère recevoir mes factures en français.",
-                            },
-                            "idempotency_key": f"verify-{uuid.uuid4()}",
-                        }
-                    ]
-                )
-            _step(f"capture (thread {thread_1})", t0)
+                    subject_id=subject_id,
+                    status="superseded",
+                )["facts"]
+            )
+            _verify_step(
+                mark,
+                "consolidate",
+                "1 supersession" if replaced else "no supersession recorded",
+                f"{consolidate_2_s:.1f}s",
+            )
 
-            t1 = time.perf_counter()
-            result = client.consolidate()
-            _step(f"consolidate: {result.get('processed')} job(s) processed", t1)
-
-            t2 = time.perf_counter()
+            t = time.perf_counter()
             response = client.context(
                 subject_id=subject_id,
                 query="dans quelle langue envoyer les factures ?",
                 project_id=_VERIFY_PROJECT,
                 purpose=f"new thread {thread_2}",
             )
-            _step(f"context (new thread {thread_2})", t2)
+            _verify_step(
+                mark,
+                "context",
+                f"NEW thread {thread_2}",
+                f"{time.perf_counter() - t:.1f}s",
+            )
+            print()
 
-            facts = response["packet"]["facts"]
+            served = response["packet"]["facts"]
             trace_id = response["trace_id"]
-            fact = _fact_recalled(facts)
-            if fact is None:
-                print(f"  trace_id: {trace_id}")
-                print(f"FAIL: preference not recalled ({len(facts)} fact(s) served: "
-                      f"{json.dumps([f.get('value') for f in facts], ensure_ascii=False)})")
+            recalled = _language_fact(served)
+
+            if recalled is None:
+                print(f"    trace     {trace_id}")
+                print(
+                    f"FAIL: nothing recalled about the preference "
+                    f"({len(served)} fact(s) served: "
+                    f"{json.dumps([f.get('value') for f in served], ensure_ascii=False)})"
+                )
                 return 1
-            print(f"  recalled: {fact['predicate']} = "
-                  f"{json.dumps(fact['value'], ensure_ascii=False)}")
-            print(f"  trace_id: {trace_id}")
-            print(f"OK — total {time.perf_counter() - t0:.2f} s")
+
+            print(
+                f"    recalled  {recalled['predicate']} = "
+                f"{_render_value(recalled)}   {_valid_since(recalled)}".rstrip()
+            )
+            if replaced is not None:
+                print(
+                    f"    hidden    {replaced['predicate']} = "
+                    f"{_render_value(replaced)}   superseded"
+                )
+            print(f"    trace     {trace_id}")
+            print()
+
+            if not _says_english(recalled):
+                print(
+                    "FAIL: the update was not applied — the packet still serves "
+                    f"{_render_value(recalled)} after the correction."
+                )
+                return 1
+            if replaced is None:
+                print(
+                    "FAIL: the current value is served, but the value it replaced "
+                    "is not on file as superseded — the update was stored as a "
+                    "brand-new fact, so nothing proves the two are the same memory."
+                )
+                return 1
+
+            print(
+                "OK — your agent remembered across conversations, and it can "
+                f"prove it.  {time.perf_counter() - t0:.1f}s"
+            )
             return 0
+        finally:
+            client.close()
     except HakiError as exc:
         print(f"FAIL: {exc}")
         return 1

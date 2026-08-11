@@ -40,6 +40,7 @@ authenticates itself with the console service secret, not a customer key.
 import json
 import time
 from secrets import choice, token_hex
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Request
 from redis.asyncio import Redis
@@ -76,10 +77,43 @@ _RATE_LIMIT_KEY = "cli:ratelimit:start:{}"
 _RATE_LIMIT_MAX = 20
 _RATE_LIMIT_WINDOW = 60  # seconds
 
+# RFC 8628 §5.4 — the user_code is short enough to guess (32**8), so wrong
+# guesses must be capped. Approving a code hands the APPROVER's key to
+# whatever terminal is holding it, so a successful guess against someone
+# else's pending session plants an attacker-owned key in a victim's CLI —
+# every write that terminal makes then lands in the attacker's project.
+# Counting per approver (not per IP) is what makes this usable: every
+# approval reaches the API from the console backend's single address, so an
+# IP counter would be one shared bucket that any user could exhaust for
+# everyone. Only FAILED attempts count — a person approving several of
+# their own terminals in a row is normal and must stay unthrottled.
+_APPROVE_ATTEMPTS_KEY = "cli:ratelimit:approve:{}"
+_APPROVE_ATTEMPTS_MAX = 10
+_APPROVE_ATTEMPTS_WINDOW = 300  # seconds
+
 
 def _generate_user_code() -> str:
     raw = "".join(choice(_USER_CODE_ALPHABET) for _ in range(8))
     return f"{raw[:4]}-{raw[4:]}"
+
+
+def _normalize_user_code(raw: str) -> str:
+    """Reshape what a human typed back into the exact XXXX-XXXX key.
+
+    The code is compared as a literal Redis key, so "abcd efgh", "ABCDEFGH"
+    and "abcd-efgh" would otherwise be three different wrong codes — each
+    one also burning an attempt against the §5.4 cap below. Normalizing
+    here rather than in the console means every approving surface gets the
+    same forgiveness, and the rule is covered by the API's own tests.
+
+    Only cosmetics are forgiven: separators and case. Anything that is not
+    eight alphanumerics is passed through untouched, to be rejected as the
+    unknown code it is.
+    """
+    cleaned = "".join(char for char in raw.upper() if char.isalnum())
+    if len(cleaned) != 8:
+        return raw
+    return f"{cleaned[:4]}-{cleaned[4:]}"
 
 
 async def _check_rate_limit(redis: Redis, request: Request) -> None:
@@ -94,6 +128,35 @@ async def _check_rate_limit(redis: Redis, request: Request) -> None:
             message="too many device-code requests from this address, try again shortly",
             status_code=429,
         )
+
+
+async def _check_approve_attempts(redis: Redis, approver_ref: str | None) -> str:
+    """Raise 429 once this approver has burned through its wrong guesses.
+
+    Returns the Redis key so a failed attempt can be counted against it.
+    `approver_ref` is the console's identifier for the signed-in human; an
+    absent one falls back to a single shared bucket rather than to no limit
+    at all — a caller that declines to identify itself gets the strictest
+    treatment, never the loosest.
+    """
+    key = _APPROVE_ATTEMPTS_KEY.format(approver_ref or "anonymous")
+    attempts = await redis.get(key)
+    if attempts is not None and int(attempts) >= _APPROVE_ATTEMPTS_MAX:
+        raise ApiError(
+            type="rate_limited",
+            message=(
+                "too many incorrect codes, wait a few minutes and run "
+                "`haki login` again for a fresh one"
+            ),
+            status_code=429,
+        )
+    return key
+
+
+async def _count_failed_attempt(redis: Redis, key: str) -> None:
+    count = await redis.incr(key)
+    if count == 1:
+        await redis.expire(key, _APPROVE_ATTEMPTS_WINDOW)
 
 
 @router.post("/cli/device/start", response_model=DeviceStartResponse, status_code=201)
@@ -131,10 +194,14 @@ async def device_start(
         _DEVICE_KEY.format(device_code), json.dumps(payload), ex=EXPIRES_IN
     )
 
+    verification_uri = f"{settings.console_base_url}/cli-auth"
     return DeviceStartResponse(
         device_code=device_code,
         user_code=user_code,
-        verification_uri=f"{settings.console_base_url}/cli-auth",
+        verification_uri=verification_uri,
+        verification_uri_complete=(
+            f"{verification_uri}?code={quote(user_code, safe='')}"
+        ),
         expires_in=EXPIRES_IN,
         interval=POLL_INTERVAL,
     )
@@ -194,8 +261,12 @@ async def device_approve(
     if request.headers.get("authorization") != f"Bearer {settings.console_service_key}":
         raise _unauthorized()
 
-    device_code = await redis.get(_USER_CODE_KEY.format(body.user_code))
+    attempts_key = await _check_approve_attempts(redis, body.approver_ref)
+
+    user_code = _normalize_user_code(body.user_code)
+    device_code = await redis.get(_USER_CODE_KEY.format(user_code))
     if device_code is None:
+        await _count_failed_attempt(redis, attempts_key)
         raise ApiError(
             type="user_code_not_found",
             message="unknown or expired user_code",

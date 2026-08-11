@@ -9,8 +9,12 @@ configured LLM provider, validates them, and applies the fact lifecycle:
 - action "supersede" -> the current active fact becomes `superseded` (Ledger
   transition), the new fact becomes `active` with `supersedes_id`;
 - action "create" with a different value than an active fact of the same
-  predicate -> both facts enter an OPEN conflict set; the new fact stays
-  `candidate` and is never served while the conflict is open;
+  identity -> both facts enter an OPEN conflict set; the new fact stays
+  `candidate` and is never served while the conflict is open. A conflict
+  set holds at most CONFLICT_SET_MAX_MEMBERS facts: a third competing
+  value is held in its own single-member open set rather than joining, so
+  one bad match cannot turn a set into a magnet that swallows every later
+  candidate;
 - action "reject" -> the candidate is counted (`rejected`,
   `rejected_with_reason`) and logged, NEVER becomes a Fact;
 - otherwise -> candidate promoted to `active`.
@@ -32,13 +36,21 @@ phrases is rejected as `imperative_directive` regardless of the provider's
 verdict — see `_imperative_directive_reason` for that check and its
 documented (narrow, not exhaustive) scope.
 
-"Same predicate" above is resolved by `_resolve_existing_fact`: exact string
-match first, then a semantic fallback (cosine distance on the already-
-computed fact embedding) when no exact match exists. An LLM-generated
-predicate is not a reliable join key on natural language on its own — this
-is the write-time adjudication step, decoupled from extraction, that keeps a
-same-concept update from silently coexisting with the fact it was meant to
-replace.
+"Same fact" above is resolved by `_resolve_existing_fact`, on the key
+(subject, predicate, identity qualifiers): exact predicate match first,
+then a semantic fallback (cosine distance on the already-computed fact
+embedding) when no exact match exists. An LLM-generated predicate is not a
+reliable join key on natural language on its own — this is the write-time
+adjudication step, decoupled from extraction, that keeps a same-concept
+update from silently coexisting with the fact it was meant to replace.
+
+Qualifiers are part of that key, and the guard is hard: different
+qualifiers are never the same fact, however close the embeddings are. The
+first real-scale eval run traced 66-80% of open conflicts to the opposite
+behavior — the fallback taking the nearest active fact on distance alone,
+pairing `lower_quartile` with `upper_quartile`. The extraction prompt is
+the other half of the same fix: a qualifier belongs in the `qualifiers`
+field, never buried in the predicate name.
 
 Guarantees:
 - a provider/DB exception fails the job (`failed`, error in payload) and
@@ -50,11 +62,11 @@ Guarantees:
   active fact reinforces it (counter + date) instead of creating a row.
   Concurrency: the whole write phase is serialized per (project_id,
   subject_id) with a transaction-scoped advisory lock, and a partial
-  unique index (migration 0015) makes two ACTIVE facts with the same
-  exact predicate impossible at the DB level even if some future write
-  path forgets the lock — legitimate re-assertions are absorbed as
-  duplicates/reinforcements BEFORE insertion, so the index only ever
-  fires on a genuine race.
+  unique index (migration 0015, widened to include identity qualifiers by
+  0016) makes two ACTIVE facts with the same identity impossible at the DB
+  level even if some future write path forgets the lock — legitimate
+  re-assertions are absorbed as duplicates/reinforcements BEFORE
+  insertion, so the index only ever fires on a genuine race.
 """
 
 import json
@@ -66,7 +78,8 @@ from typing import Any
 
 import httpx
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import Text, literal, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import metrics
@@ -103,9 +116,65 @@ logger = logging.getLogger(__name__)
 # 0.35. 0.28 sits in that gap with margin on both sides.
 SEMANTIC_MATCH_MAX_DISTANCE = 0.28
 
+# A conflict is a disagreement between two competing values of ONE fact.
+# Nothing in the product's model needs a three-way one, and the eval run
+# that motivated the identity fix above found 3+ member sets in ~24% of
+# conflicts, almost always as accumulation rather than genuine multi-way
+# disagreement: one bad match turns a set into a magnet that every later
+# loosely-matching candidate joins, and every member is blocked from the
+# context packet together.
+CONFLICT_SET_MAX_MEMBERS = 2
+
+
+# Qualifier keys that describe WHERE a fact came from rather than WHEN or
+# under WHAT CONDITIONS it holds. They are stamped by this module (M8
+# attribution), not declared by the extractor, and they must stay out of
+# the identity key: two people asserting the same thing is one fact,
+# reinforced — not two competing active facts.
+_PROVENANCE_QUALIFIERS = frozenset({"attributed_to"})
+
 
 def _canonical(value: dict[str, Any]) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _identity_qualifiers(qualifiers: dict[str, Any] | None) -> dict[str, Any]:
+    """The part of `qualifiers` that takes part in a fact's identity.
+
+    A fact is identified by (subject, predicate, qualifiers) — not by the
+    predicate string alone. The eval run that motivated this found the
+    qualifier hidden INSIDE the predicate name instead
+    (`wake_up_time_weekday` vs `wake_up_time_weekend`), which left nothing
+    downstream able to tell two conditions of the same measure apart: they
+    read as two unrelated strings to exact matching, and as the same
+    concept to the semantic fallback. Mirrors the DB index of migration
+    0016 — the two must agree, or the write path and its backstop disagree
+    about what "the same fact" means.
+    """
+    return {
+        key: value
+        for key, value in (qualifiers or {}).items()
+        if key not in _PROVENANCE_QUALIFIERS
+    }
+
+
+def _identity_qualifiers_match(fact: Fact, qualifiers: dict[str, Any] | None) -> bool:
+    return _canonical(_identity_qualifiers(fact.qualifiers)) == _canonical(
+        _identity_qualifiers(qualifiers)
+    )
+
+
+def _identity_qualifiers_sql():
+    """SQL mirror of `_identity_qualifiers`, for filtering inside a query.
+
+    Must stay in step with the expression indexed by migration 0016 — the
+    write path and its DB backstop have to agree on what identifies a fact,
+    or one of them starts rejecting rows the other considers distinct.
+    """
+    expression = Fact.qualifiers
+    for key in sorted(_PROVENANCE_QUALIFIERS):
+        expression = expression.op("-")(literal(key, Text))
+    return expression
 
 
 def _search_text(predicate: str, value: dict[str, Any]) -> str:
@@ -195,7 +264,12 @@ def _untrusted_instruction_reason(event: Event, candidate: ExtractedFact) -> str
 
 
 async def _active_fact(
-    session: AsyncSession, *, project_id: str, subject_id: str, predicate: str
+    session: AsyncSession,
+    *,
+    project_id: str,
+    subject_id: str,
+    predicate: str,
+    qualifiers: dict[str, Any] | None,
 ) -> Fact | None:
     stmt = select(Fact).where(
         Fact.project_id == project_id,
@@ -203,7 +277,10 @@ async def _active_fact(
         Fact.predicate == predicate,
         Fact.status == FactStatus.active,
     )
-    return (await session.execute(stmt)).scalars().first()
+    for fact in (await session.execute(stmt)).scalars().all():
+        if _identity_qualifiers_match(fact, qualifiers):
+            return fact
+    return None
 
 
 async def _find_duplicate(
@@ -213,12 +290,19 @@ async def _find_duplicate(
     subject_id: str,
     predicate: str,
     value: dict[str, Any],
+    qualifiers: dict[str, Any] | None,
 ) -> Fact | None:
     """Content-based dedup: the already-memorized (non-deleted) fact with
-    this exact predicate and identical canonical value, or None. Prefers an
-    ACTIVE match so the caller can reinforce it; a non-active match (e.g. a
-    superseded value being re-asserted) is still returned and counted as a
-    plain duplicate, exactly as before."""
+    this exact predicate, the same identity qualifiers and an identical
+    canonical value, or None. Prefers an ACTIVE match so the caller can
+    reinforce it; a non-active match (e.g. a superseded value being
+    re-asserted) is still returned and counted as a plain duplicate,
+    exactly as before.
+
+    Qualifiers matter here as much as in supersession: "8am on weekdays"
+    and "8am at the weekend" carry the same predicate and the same value
+    and are not the same fact, so collapsing them as duplicates would lose
+    one of them outright."""
     stmt = select(Fact).where(
         Fact.project_id == project_id,
         Fact.subject_id == subject_id,
@@ -230,6 +314,7 @@ async def _find_duplicate(
         fact
         for fact in (await session.execute(stmt)).scalars().all()
         if _canonical(fact.value) == canonical
+        and _identity_qualifiers_match(fact, qualifiers)
     ]
     if not matches:
         return None
@@ -243,6 +328,7 @@ async def _resolve_existing_fact(
     project_id: str,
     subject_id: str,
     predicate: str,
+    qualifiers: dict[str, Any] | None,
     embedding: list[float],
 ) -> Fact | None:
     """Find the active fact a candidate should be adjudicated against.
@@ -257,9 +343,24 @@ async def _resolve_existing_fact(
     file (e.g. "personal_best_5k" vs "goal_personal_best_time"), which
     previously left both facts active in parallel with the stale one still
     served as current.
+
+    BOTH paths are gated on identity qualifiers, and the gate is hard:
+    different qualifiers are never the same fact, however close the
+    embeddings are. Without it the semantic fallback takes the single
+    nearest active fact on cosine distance alone, which is how the eval run
+    produced conflicts between `lower_quartile` and `upper_quartile`, or
+    between two different book authors — near neighbours in meaning, not
+    the same fact. The exact-predicate path needs it just as much: once
+    qualifiers live in their own field rather than inside the predicate
+    name, "wake up time on weekdays" and "wake up time at the weekend"
+    share a predicate, and matching on the string alone would merge them.
     """
     exact = await _active_fact(
-        session, project_id=project_id, subject_id=subject_id, predicate=predicate
+        session,
+        project_id=project_id,
+        subject_id=subject_id,
+        predicate=predicate,
+        qualifiers=qualifiers,
     )
     if exact is not None:
         return exact
@@ -271,6 +372,14 @@ async def _resolve_existing_fact(
             Fact.subject_id == subject_id,
             Fact.status == FactStatus.active,
             Fact.embedding.is_not(None),
+            # Filtered in SQL, not after the fact: ordering by distance and
+            # then discarding an incompatible winner would hide a
+            # compatible second-nearest behind it. Bound as a dict, not as
+            # canonical JSON text — a string bound to a JSONB parameter is
+            # serialized again and compares as the JSON *string* "{}",
+            # which silently matches nothing.
+            _identity_qualifiers_sql()
+            == literal(_identity_qualifiers(qualifiers), JSONB),
         )
         .order_by(Fact.embedding.cosine_distance(embedding))
         .limit(1)
@@ -438,6 +547,7 @@ async def _apply_candidate(
         subject_id=event.subject_id,
         predicate=candidate.predicate,
         value=candidate.value,
+        qualifiers=candidate.qualifiers,
     )
     if duplicate is not None:
         _reinforce_or_count_duplicate(duplicate, event=event, result=result)
@@ -445,11 +555,15 @@ async def _apply_candidate(
         return
 
     target_predicate = candidate.supersedes_predicate or candidate.predicate
+    # The candidate's own qualifiers, before this module stamps provenance
+    # onto them below: identity is what the extractor declared about WHEN
+    # and under WHAT CONDITIONS the fact holds, never who reported it.
     existing = await _resolve_existing_fact(
         session,
         project_id=event.project_id,
         subject_id=event.subject_id,
         predicate=target_predicate,
+        qualifiers=candidate.qualifiers,
         embedding=embedding,
     )
 
@@ -624,6 +738,49 @@ async def _apply_candidate(
                 ),
             )
             session.add(conflict)
+        elif len(conflict.fact_ids) >= CONFLICT_SET_MAX_MEMBERS:
+            # Cap reached. A conflict is a disagreement between two
+            # competing values of one fact; a third member is accumulation,
+            # not a three-way disagreement — the eval run found 3+ member
+            # sets in ~24% of cases and they were almost always an artefact
+            # of one bad match acting as a magnet, every later candidate
+            # joining and being blocked along with the rest.
+            #
+            # The candidate is held in its OWN single-member open set
+            # instead of joining: same mechanics as the M8 quarantine
+            # above, so it stays unserved, visible on the Conflicts page
+            # and resolvable, while the original pair stays a readable
+            # pair. Adding it to a SECOND set alongside the active fact
+            # would put that fact in two open sets at once and make
+            # `_open_conflict_set` pick between them arbitrarily.
+            session.add(
+                ConflictSet(
+                    project_id=event.project_id,
+                    subject_id=event.subject_id,
+                    fact_ids=[fact.id],
+                    status="open",
+                    reason=(
+                        f"predicate '{candidate.predicate}': "
+                        f"{_canonical(candidate.value)} held — the conflict on "
+                        f"this fact already has {len(conflict.fact_ids)} members"
+                    ),
+                )
+            )
+            await session.flush()
+            result["conflicts"] += 1
+            result["conflict_capped"] += 1
+            # Loud on purpose: repeated capping on one subject is the
+            # signature of a bad match upstream, and it is the counter to
+            # watch after any change to the matching rules.
+            logger.warning(
+                "consolidator: conflict set %s for subject %s is at capacity; "
+                "candidate fact %s (predicate '%s') held separately",
+                conflict.id,
+                event.subject_id,
+                fact.id,
+                candidate.predicate,
+            )
+            return
         else:
             conflict.fact_ids = [*conflict.fact_ids, fact.id]
         await session.flush()
@@ -670,6 +827,10 @@ async def _process_job(
         "created": 0,
         "superseded": 0,
         "conflicts": 0,
+        # Subset of `conflicts`: candidates held apart because the conflict
+        # on their fact was already full. Worth its own counter — it is the
+        # number to watch after any change to the matching rules.
+        "conflict_capped": 0,
         "duplicates": 0,
         "reinforced": 0,
         "quarantined": 0,

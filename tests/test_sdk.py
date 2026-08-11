@@ -133,21 +133,138 @@ def test_capture_turn_builds_a_well_formed_event():
     assert event["idempotency_key"].startswith("turn-")
 
 
+async def test_consolidate_subject_leaves_other_subjects_pending():
+    """POST /v1/consolidate/subject is the scoped counterpart: it must
+    process ONLY the named subject's jobs. The unscoped endpoint drains
+    every project on the server — the reason `haki verify` moved off it."""
+    mine = f"usr_scoped_{uuid.uuid4().hex[:8]}"
+    other = f"usr_other_{uuid.uuid4().hex[:8]}"
+
+    async with sdk_client() as client:
+        for subject in (mine, other):
+            await client.capture(
+                [
+                    make_memory_event(
+                        [mock_fact("plan", {"tier": "pro"}, subject_id=subject)],
+                        subject_id=subject,
+                    )
+                ],
+                idempotency_key=f"sdk-{uuid.uuid4()}",
+            )
+
+        scoped = await client.consolidate_subject(
+            project_id="prj_support", subject_id=mine
+        )
+        assert scoped["processed"] == 1
+        # Idempotent: nothing left pending for that subject.
+        assert (
+            await client.consolidate_subject(project_id="prj_support", subject_id=mine)
+        )["processed"] == 0
+
+        # The other subject's job was untouched and is still waiting.
+        assert (
+            await client.consolidate_subject(project_id="prj_support", subject_id=other)
+        )["processed"] == 1
+
+
+async def test_facts_lists_superseded_values_the_packet_never_serves():
+    """GET /v1/facts?status=superseded is how a caller sees what a newer
+    value replaced — the context packet deliberately serves only the
+    current one."""
+    subject_id = f"usr_facts_{uuid.uuid4().hex[:8]}"
+
+    async with sdk_client() as client:
+        await client.capture(
+            [
+                make_memory_event(
+                    [
+                        mock_fact(
+                            "invoice_language", {"language": "fr"}, subject_id=subject_id
+                        )
+                    ],
+                    subject_id=subject_id,
+                )
+            ],
+            idempotency_key=f"sdk-{uuid.uuid4()}",
+        )
+        await client.consolidate_subject(
+            project_id="prj_support", subject_id=subject_id
+        )
+        await client.capture(
+            [
+                make_memory_event(
+                    [
+                        mock_fact(
+                            "invoice_language",
+                            {"language": "en"},
+                            subject_id=subject_id,
+                            action="supersede",
+                            supersedes_predicate="invoice_language",
+                        )
+                    ],
+                    subject_id=subject_id,
+                    occurred_at="2026-07-28T11:00:00Z",
+                )
+            ],
+            idempotency_key=f"sdk-{uuid.uuid4()}",
+        )
+        await client.consolidate_subject(
+            project_id="prj_support", subject_id=subject_id
+        )
+
+        superseded = (
+            await client.facts(
+                project_id="prj_support", subject_id=subject_id, status="superseded"
+            )
+        )["facts"]
+        assert [f["value"] for f in superseded] == [{"language": "fr"}]
+        assert superseded[0]["valid_to"] is not None
+
+        every_status = (
+            await client.facts(project_id="prj_support", subject_id=subject_id)
+        )["facts"]
+        assert {"language": "fr"} in [f["value"] for f in every_status]
+        assert {"language": "en"} in [f["value"] for f in every_status]
+
+
 async def test_verify_scenario_simulated_via_client_calls():
-    """The `haki verify` flow, driven through client calls (no CLI subprocess):
-    capture a preference -> consolidate -> NEW thread -> context recalls it."""
+    """The `haki verify` flow, driven through client calls (no CLI
+    subprocess): a preference, then a change of mind in the SAME thread ->
+    scoped consolidation -> a NEW thread recalls the CURRENT value only,
+    with the replaced one still on file as superseded."""
     subject_id = f"usr_verify_{uuid.uuid4().hex[:8]}"
-    event = make_memory_event(
+    first = make_memory_event(
         [mock_fact("invoice_language", {"language": "fr"}, subject_id=subject_id)],
         subject_id=subject_id,
     )
-    event["thread_id"] = "thr_first"
+    first["thread_id"] = "thr_first"
+    second = make_memory_event(
+        [
+            mock_fact(
+                "invoice_language",
+                {"language": "en"},
+                subject_id=subject_id,
+                action="supersede",
+                supersedes_predicate="invoice_language",
+            )
+        ],
+        subject_id=subject_id,
+        occurred_at="2026-07-28T11:00:00Z",
+    )
+    second["thread_id"] = "thr_first"  # same thread: this is a correction
 
     async with sdk_client() as client:
-        await client.capture([event], idempotency_key=f"verify-{uuid.uuid4()}")
-        assert (await client.consolidate())["processed"] == 1
+        await client.capture([first], idempotency_key=f"verify-{uuid.uuid4()}")
+        await client.consolidate_subject(
+            project_id="prj_support", subject_id=subject_id
+        )
+        await client.capture([second], idempotency_key=f"verify-{uuid.uuid4()}")
+        await client.consolidate_subject(
+            project_id="prj_support", subject_id=subject_id
+        )
 
-        # New thread: the memory must survive the thread boundary.
+        # New thread: the memory must survive the thread boundary, and only
+        # the current value may be served.
         response = await client.context(
             subject_id=subject_id,
             query="invoice_language",
@@ -155,8 +272,15 @@ async def test_verify_scenario_simulated_via_client_calls():
             purpose="new thread thr_second",
         )
         values = [f["value"] for f in response["packet"]["facts"]]
-        assert {"language": "fr"} in values
+        assert values == [{"language": "en"}]
         assert response["trace_id"]
+
+        replaced = (
+            await client.facts(
+                project_id="prj_support", subject_id=subject_id, status="superseded"
+            )
+        )["facts"]
+        assert [f["value"] for f in replaced] == [{"language": "fr"}]
 
 
 def test_sync_client_maps_typed_errors():

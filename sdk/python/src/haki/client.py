@@ -130,8 +130,44 @@ class HakiClient:
         )
 
     def consolidate(self) -> dict[str, Any]:
-        """Process pending/failed consolidation jobs now. Returns {processed}."""
+        """Process pending/failed consolidation jobs now. Returns {processed}.
+
+        Dev/ops endpoint: it drains the pending jobs of EVERY project on the
+        server, on a session without RLS scoping. Fine on a local dev
+        server, wrong against a shared one — prefer `consolidate_subject`
+        whenever the subject is known.
+        """
         return self._request("POST", "/v1/consolidate")
+
+    def consolidate_subject(
+        self, *, project_id: str, subject_id: str
+    ) -> dict[str, Any]:
+        """Consolidate one subject's pending jobs now. Returns {processed}.
+
+        The scoped counterpart of `consolidate()`: same synchronous
+        "extraction happened, look now" behavior, but bounded to one
+        project/subject, so a caller never triggers work on another
+        tenant's data and never waits behind it.
+        """
+        return self._request(
+            "POST",
+            "/v1/consolidate/subject",
+            params={"project_id": project_id, "subject_id": subject_id},
+        )
+
+    def facts(
+        self, *, project_id: str, subject_id: str, status: str | None = None
+    ) -> dict[str, Any]:
+        """Memorized facts of one subject. Returns {facts: [...]}.
+
+        Unlike the context packet, this lists facts in EVERY status —
+        `status="superseded"` is how a caller sees what a newer value
+        replaced, which the packet deliberately never serves.
+        """
+        params = {"project_id": project_id, "subject_id": subject_id}
+        if status is not None:
+            params["status"] = status
+        return self._request("GET", "/v1/facts", params=params)
 
     def forget(
         self,
@@ -314,6 +350,23 @@ class AsyncHakiClient:
 
     async def consolidate(self) -> dict[str, Any]:
         return await self._request("POST", "/v1/consolidate")
+
+    async def consolidate_subject(
+        self, *, project_id: str, subject_id: str
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/v1/consolidate/subject",
+            params={"project_id": project_id, "subject_id": subject_id},
+        )
+
+    async def facts(
+        self, *, project_id: str, subject_id: str, status: str | None = None
+    ) -> dict[str, Any]:
+        params = {"project_id": project_id, "subject_id": subject_id}
+        if status is not None:
+            params["status"] = status
+        return await self._request("GET", "/v1/facts", params=params)
 
     async def forget(
         self,

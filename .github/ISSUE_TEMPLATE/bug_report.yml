@@ -1,0 +1,53 @@
+name: Bug report
+description: Something isn't working as expected
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and, if relevant, what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps, ideally including a curl command or a small code snippet.
+      placeholder: |
+        1. uv run uvicorn app.main:app --port 8100
+        2. curl -X POST http://localhost:8100/v1/capture -d '...'
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or error output
+      render: shell
+  - type: input
+    id: version
+    attributes:
+      label: Haki version / commit
+      description: Output of `git rev-parse HEAD`, or the release tag if you installed via a package.
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - API (app/)
+        - Python SDK / CLI
+        - TypeScript SDK / CLI
+        - MCP server / Cursor integration
+        - n8n integration
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      placeholder: "OS, Python/Node version, Docker version"

@@ -55,6 +55,7 @@ def aggregate_system(records: list[dict], system: str) -> dict:
 
     successes = 0
     per_type: dict[str, dict] = {}
+    per_retrieval_need: dict[str, dict] = {}
     abstention_total = abstention_success = 0
     leakage_total = leakage_hits = 0
     context_tokens: list[float] = []
@@ -74,6 +75,15 @@ def aggregate_system(records: list[dict], system: str) -> dict:
         bucket = per_type.setdefault(record["qtype"], {"n": 0, "correct": 0})
         bucket["n"] += 1
         bucket["correct"] += success
+
+        # "unknown": records from before this classifier existed. Kept as
+        # its own bucket rather than dropped, so old and new runs both
+        # aggregate cleanly without silently hiding unlabeled questions.
+        need_bucket = per_retrieval_need.setdefault(
+            record.get("retrieval_need", "unknown"), {"n": 0, "correct": 0}
+        )
+        need_bucket["n"] += 1
+        need_bucket["correct"] += success
 
         if abstention_expected:
             abstention_total += 1
@@ -99,11 +109,20 @@ def aggregate_system(records: list[dict], system: str) -> dict:
 
     for bucket in per_type.values():
         bucket["accuracy"] = bucket["correct"] / bucket["n"] if bucket["n"] else None
+    for bucket in per_retrieval_need.values():
+        bucket["accuracy"] = bucket["correct"] / bucket["n"] if bucket["n"] else None
 
     return {
         "n": n,
         "accuracy": successes / n,
         "per_type": dict(sorted(per_type.items())),
+        # Retrieval-need breakdown (12 aout, external feedback): distinct
+        # from per_type (the dataset's own question-category taxonomy) --
+        # this is what KIND of memory representation the question needs
+        # (point value / narrative / count), see
+        # datasets.classify_retrieval_need. Makes individual failures
+        # diagnosable by category instead of one undifferentiated bucket.
+        "per_retrieval_need": dict(sorted(per_retrieval_need.items())),
         "abstention": {
             "n": abstention_total,
             "accuracy": (abstention_success / abstention_total) if abstention_total else None,

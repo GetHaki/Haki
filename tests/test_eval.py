@@ -237,6 +237,32 @@ def test_truncate_sessions_keeps_most_recent():
 
 
 # --------------------------------------------------------------------------
+# Retrieval-need classification
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "question,expected",
+    [
+        ("How many Korean restaurants have I tried in my city?", "count"),
+        ("How often do I attend yoga classes to help with my anxiety?", "count"),
+        ("How much did the mortgage pre-approval amount change by?", "count"),
+        ("Why did Caroline choose the adoption agency?", "narrative"),
+        ("How does Melanie prioritize self-care?", "narrative"),
+        (
+            "Would Caroline still want to pursue counseling if she hadn't received support?",
+            "narrative",
+        ),
+        ("Can you describe Melanie's morning routine?", "narrative"),
+        ("What was my personal best time in the charity 5K run?", "point_value"),
+        ("Where did Rachel move to after her recent relocation?", "point_value"),
+        ("When did Caroline go to the LGBTQ support group?", "point_value"),
+    ],
+)
+def test_classify_retrieval_need(question, expected):
+    assert datasets.classify_retrieval_need(question) == expected
+
+
+# --------------------------------------------------------------------------
 # Metrics
 # --------------------------------------------------------------------------
 
@@ -340,6 +366,25 @@ def test_metrics_cost_split_falls_back_to_legacy_cost_usd():
     assert stats["cost_query_usd"] == pytest.approx(0.03)
     assert stats["cost_ingest_usd"] == pytest.approx(0.0)
     assert stats["cost_per_query_usd"] == pytest.approx(0.03)
+
+
+def test_metrics_per_retrieval_need_breakdown():
+    """Distinct from per_type (the dataset's own category) -- this is what
+    KIND of memory representation the question needs, so a single
+    combined accuracy doesn't hide that e.g. count questions fail
+    differently than point-value ones. Records missing the field (older
+    runs, before this classifier existed) land in their own "unknown"
+    bucket instead of being dropped or crashing aggregation."""
+    records = [
+        {**_record("q1", "single-hop", "correct"), "retrieval_need": "point_value"},
+        {**_record("q2", "single-hop", "incorrect"), "retrieval_need": "point_value"},
+        {**_record("q3", "single-hop", "incorrect"), "retrieval_need": "count"},
+        {**_record("q4", "single-hop", "correct")},  # no retrieval_need field
+    ]
+    stats = metrics.aggregate(records)["haki"]
+    assert stats["per_retrieval_need"]["point_value"] == {"n": 2, "correct": 1, "accuracy": 0.5}
+    assert stats["per_retrieval_need"]["count"] == {"n": 1, "correct": 0, "accuracy": 0.0}
+    assert stats["per_retrieval_need"]["unknown"] == {"n": 1, "correct": 1, "accuracy": 1.0}
 
 
 def test_metrics_two_systems_independent():

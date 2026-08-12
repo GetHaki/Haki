@@ -289,3 +289,39 @@ def render_episodes(episodes: list[dict]) -> str:
         occurred = episode.get("occurred_at") or "?"
         lines.append(f"- [{occurred}] {episode.get('kind', '?')}: {episode.get('excerpt', '')}")
     return "\n".join(lines) if lines else "(no dated events in memory)"
+
+
+# Retrieval-need classification (12 aout, external feedback): a fixed
+# facts/episodes budget split (EPISODE_MIN_BUDGET_SHARE) is a stopgap --
+# what a question actually needs varies by shape. "What's the current
+# value of X" is served well by a handful of facts; "why/how did X" or a
+# hypothetical needs the source narrative; "how many X" is a count a
+# retrieval packet (facts OR episodes) can't reliably answer at all, since
+# neither guarantees every instance survived extraction or made the
+# packet. This labels each question with its dominant need so failures
+# become diagnosable by category instead of one undifferentiated bucket --
+# NOT used to route retrieval yet (see EPISODE_MIN_BUDGET_SHARE's own
+# comment in app/context/__init__.py: don't retune the ratio before this
+# breakdown exists across a real run).
+RETRIEVAL_NEEDS = ("count", "narrative", "point_value")
+
+_COUNT_RE = re.compile(r"^\s*how\s+(many|much|often)\b", re.IGNORECASE)
+_NARRATIVE_RE = re.compile(
+    r"^\s*(why|would|could|should|how (?:do|does|did)|in what way)\b"
+    r"|\b(describe|compare|summarize|summarise|explain)\b",
+    re.IGNORECASE,
+)
+
+
+def classify_retrieval_need(question: str) -> str:
+    """Heuristic, not ML: keyword/prefix rules on the question text alone,
+    order matters (count checked first so "how often" doesn't fall into
+    the "how do/does/did" narrative branch). Defaults to "point_value" --
+    the common case ("what/where/when/who is/was X") needs a specific
+    current or dated fact, which is exactly what the fact ledger already
+    targets."""
+    if _COUNT_RE.search(question):
+        return "count"
+    if _NARRATIVE_RE.search(question):
+        return "narrative"
+    return "point_value"

@@ -100,6 +100,23 @@ def write_reports(
             row.append(f"{_pct(bucket['accuracy'])} ({bucket['n']})" if bucket else "—")
         lines.append("| " + " | ".join(row) + " |")
 
+    needs = sorted({t for stats in summary.values() for t in stats.get("per_retrieval_need", {})})
+    if needs:
+        lines += [
+            "",
+            "### Accuracy par besoin de récupération (point_value / narrative / count)",
+            "",
+        ]
+        header = "| Besoin | " + " | ".join(summary.keys()) + " |"
+        lines.append(header)
+        lines.append("|---|" + "---|" * len(summary))
+        for need in needs:
+            row = [need]
+            for stats in summary.values():
+                bucket = stats.get("per_retrieval_need", {}).get(need)
+                row.append(f"{_pct(bucket['accuracy'])} ({bucket['n']})" if bucket else "—")
+            lines.append("| " + " | ".join(row) + " |")
+
     lines += ["", "## Détail par question", "", "| Question | Type | " + " | ".join(summary.keys()) + " |", "|---|---|" + "---|" * len(summary)]
     for record in records:
         row = [f"`{record['qid']}`", record["qtype"]]

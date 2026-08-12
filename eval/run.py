@@ -222,6 +222,7 @@ async def run(args: argparse.Namespace) -> int:
             record: dict = {
                 "qid": question.qid,
                 "qtype": question.qtype,
+                "retrieval_need": datasets.classify_retrieval_need(question.question),
                 "abstention_expected": question.abstention_expected,
                 "question": question.question,
                 "gold_answer": question.answer,

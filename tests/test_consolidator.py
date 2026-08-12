@@ -336,6 +336,71 @@ async def test_second_event_in_same_job_sees_first_events_new_fact_as_existing(c
         assert (await session.execute(select(ConflictSet))).scalars().all() == []
 
 
+async def test_relevant_existing_facts_filters_and_ranks_once_a_subject_grows_large():
+    """existing_facts sent to the extractor is capped and semantically
+    filtered once a subject has more active facts than
+    EXISTING_FACTS_FILTER_THRESHOLD -- found via a real eval re-ingestion
+    (12 aout): with 85 active facts in view, the real extractor invented a
+    brand-new predicate instead of reusing the one already on file. Below
+    the threshold nothing changes (every active fact, unfiltered); above it,
+    only the ones closest to the event's own embedding are shown -- proven
+    here by an exact-embedding match (distance 0) surviving the cut.
+    """
+    from app.consolidator import (
+        EXISTING_FACTS_FILTER_THRESHOLD,
+        EXISTING_FACTS_TOP_K,
+        _relevant_existing_facts,
+    )
+    from app.providers.fake import _embed_one
+
+    async def make_fact(session, subject_id, predicate, text):
+        fact = Fact(
+            org_id="org_acme",
+            project_id="prj_support",
+            subject_id=subject_id,
+            predicate=predicate,
+            value={"v": predicate},
+            status=FactStatus.active,
+            confidence=0.9,
+        )
+        fact.embedding = _embed_one(text)
+        session.add(fact)
+        return fact
+
+    async with async_session() as session:
+        small_subject = f"usr_small_{uuid.uuid4().hex[:8]}"
+        for i in range(5):
+            await make_fact(session, small_subject, f"small_fact_{i}", f"text {i}")
+        await session.commit()
+
+        small_result = await _relevant_existing_facts(
+            session,
+            project_id="prj_support",
+            subject_id=small_subject,
+            query_embedding=_embed_one("anything"),
+        )
+        assert len(small_result) == 5
+
+    async with async_session() as session:
+        big_subject = f"usr_big_{uuid.uuid4().hex[:8]}"
+        for i in range(EXISTING_FACTS_FILTER_THRESHOLD + 5):
+            await make_fact(session, big_subject, f"filler_{i}", f"filler text {i}")
+        target = await make_fact(
+            session, big_subject, "personal_best_5k", "QUERY MATCH TEXT"
+        )
+        await session.commit()
+        target_id = target.id
+
+        big_result = await _relevant_existing_facts(
+            session,
+            project_id="prj_support",
+            subject_id=big_subject,
+            query_embedding=_embed_one("QUERY MATCH TEXT"),
+        )
+        assert len(big_result) == EXISTING_FACTS_TOP_K
+        assert target_id in {f.id for f in big_result}
+
+
 async def test_provider_failure_fails_job_keeps_events_and_replay_works(client):
     class BrokenProvider:
         async def extract_facts(self, events, existing=None):

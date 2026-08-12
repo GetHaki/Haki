@@ -125,6 +125,22 @@ SEMANTIC_MATCH_MAX_DISTANCE = 0.28
 # context packet together.
 CONFLICT_SET_MAX_MEMBERS = 2
 
+# existing_facts sent to the extractor (extraction-time context, distinct
+# from the consolidator's own identity matching below): capped and
+# semantically filtered once a subject has accumulated more active facts
+# than this. Found via a real eval re-ingestion (12 aout): with 85 active
+# facts and a topic-switching session in view, the real extractor invented a
+# NEW predicate ("marathon_goal_time") instead of reusing the existing
+# "personal_best_5k" sitting right there in the list — a needle-in-a-
+# haystack failure at extraction time, not a matching bug (_resolve_
+# existing_fact already has a semantic fallback for this at APPLICATION
+# time; this is the same underlying problem one step earlier, where the
+# extractor first decides the predicate name and the create/supersede
+# action). Below the threshold, every active fact is sent unfiltered — the
+# common case for a new or lightly-used subject, unaffected by this at all.
+EXISTING_FACTS_FILTER_THRESHOLD = 40
+EXISTING_FACTS_TOP_K = 40
+
 
 # Qualifier keys that describe WHERE a fact came from rather than WHEN or
 # under WHAT CONDITIONS it holds. They are stamped by this module (M8
@@ -388,6 +404,52 @@ async def _resolve_existing_fact(
     if row is None or row.distance > SEMANTIC_MATCH_MAX_DISTANCE:
         return None
     return row[0]
+
+
+async def _relevant_existing_facts(
+    session: AsyncSession,
+    *,
+    project_id: str,
+    subject_id: str,
+    query_embedding: list[float] | None,
+) -> list[Fact]:
+    """Active facts to show the extractor ahead of one event: all of them,
+    unless the subject has accumulated more than EXISTING_FACTS_FILTER_
+    THRESHOLD — see that constant for why a full list stops being useful
+    context past a point and starts being noise the model loses the right
+    entry in. Above the threshold, ranked by cosine distance to the event's
+    own embedding: the same signal _resolve_existing_fact already uses to
+    match a candidate back to an active fact after extraction, applied one
+    step earlier so the extractor can find it in the first place.
+    """
+    all_active = (
+        (
+            await session.execute(
+                select(Fact).where(
+                    Fact.project_id == project_id,
+                    Fact.subject_id == subject_id,
+                    Fact.status == FactStatus.active,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if len(all_active) <= EXISTING_FACTS_FILTER_THRESHOLD or query_embedding is None:
+        return list(all_active)
+
+    stmt = (
+        select(Fact)
+        .where(
+            Fact.project_id == project_id,
+            Fact.subject_id == subject_id,
+            Fact.status == FactStatus.active,
+            Fact.embedding.is_not(None),
+        )
+        .order_by(Fact.embedding.cosine_distance(query_embedding))
+        .limit(EXISTING_FACTS_TOP_K)
+    )
+    return list((await session.execute(stmt)).scalars().all())
 
 
 # Anti-echo write gate (M1 — "porte d'ecriture"): how many of the scope's
@@ -893,18 +955,11 @@ async def _process_job(
     # across the apply phase — a wider contention window, accepted
     # because correctness here matters more than that narrower window.
     for event in events:
-        active_facts = (
-            (
-                await session.execute(
-                    select(Fact).where(
-                        Fact.project_id == event.project_id,
-                        Fact.subject_id == event.subject_id,
-                        Fact.status == FactStatus.active,
-                    )
-                )
-            )
-            .scalars()
-            .all()
+        active_facts = await _relevant_existing_facts(
+            session,
+            project_id=event.project_id,
+            subject_id=event.subject_id,
+            query_embedding=event.embedding,
         )
         existing = [
             {

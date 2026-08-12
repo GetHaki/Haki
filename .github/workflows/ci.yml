@@ -104,9 +104,15 @@ jobs:
       # Backgrounded: this job's real subject is the TS SDK, the API is
       # only here to be a real target for it — same fake providers as the
       # python job (see `env:` above), no network/LLM calls, deterministic.
+      # PID recorded to a file: an earlier version left this running for
+      # the rest of the job, and the setup-uv post-action's cache prune
+      # then hung for 5 minutes against the same venv/cache before failing
+      # (exit code 2) — stopped explicitly below instead, right after the
+      # step that needs it.
       - name: Start Haki API
         run: |
           uv run uvicorn app.main:app --host 0.0.0.0 --port 8100 &
+          echo $! > haki-api.pid
           for i in $(seq 1 30); do
             curl -sf http://localhost:8100/health && exit 0
             sleep 1
@@ -134,3 +140,7 @@ jobs:
       - name: Test
         working-directory: sdk/typescript
         run: npm test
+
+      - name: Stop Haki API
+        if: always()
+        run: kill "$(cat haki-api.pid)" 2>/dev/null || true

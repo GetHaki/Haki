@@ -16,6 +16,7 @@ Design notes:
 """
 
 import asyncio
+import warnings
 from collections import OrderedDict
 
 _CACHE_MAX_ENTRIES = 1024
@@ -32,7 +33,16 @@ class LocalEmbedder:
         if self._model is None:
             from fastembed import TextEmbedding
 
-            self._model = TextEmbedding(model_name=_MODEL_NAME)
+            # fastembed unconditionally warns on this model name, pointing
+            # at fastembed==0.5.1 as the way back to its OLDER CLS-pooling
+            # behaviour -- irrelevant here: fastembed is pinned to 0.8.0
+            # (see pyproject.toml) and has been the only version this
+            # project has ever used, so every stored embedding already
+            # uses mean pooling. Following the warning's own suggestion
+            # would be the actual regression.
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=r"The model .* now uses mean pooling")
+                self._model = TextEmbedding(model_name=_MODEL_NAME)
 
     def _embed_missing(self, texts: list[str]) -> dict[str, list[float]]:
         self._load()

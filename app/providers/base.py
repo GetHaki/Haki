@@ -72,6 +72,16 @@ REJECT_REASONS: tuple[str, ...] = (
 class ExtractedFact(BaseModel):
     """One memory candidate produced by an extraction provider."""
 
+    # Chain-of-thought BEFORE the decision, not a summary after it (pattern
+    # verified against Graphiti/Zep, GitHub issue #1666: putting a reasoning
+    # field ahead of the verdict in a structured-output schema raised a
+    # small model's contradiction-detection success from 47% to 93% — the
+    # prompt requires providers to emit this key first so it conditions
+    # predicate/action, not just documents them after the fact). Optional
+    # here (FakeProvider and other providers never set it) — informational
+    # only, never read downstream; app.consolidator addresses candidate
+    # fields by name and never persists it onto a Fact row.
+    reasoning: str | None = Field(default=None, max_length=2000)
     subject_id: str = Field(min_length=1, max_length=128)
     predicate: str = Field(min_length=1, max_length=128)
     value: dict[str, Any]

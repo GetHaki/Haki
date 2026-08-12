@@ -27,7 +27,18 @@ from app.models import Event
 from app.providers.base import ExtractedFact, RawCandidate
 
 _SYSTEM_PROMPT = """You extract durable memory facts from agent events.
-Reply with a JSON object {"facts": [...]} where each fact has:
+Reply with a JSON object {"facts": [...]} where each fact has, IN THIS KEY
+ORDER (reasoning always first — see why below):
+- reasoning (string, 1-2 sentences, ALWAYS FIRST): before choosing
+  predicate/action, state what the event actually says, whether
+  "existing_facts" already has an entry for this topic (name it if so),
+  and therefore why this is create vs supersede vs reject. Committing to
+  this reasoning BEFORE the decision fields — not summarizing it after —
+  is what makes it useful: write it first, every time, even when the
+  answer feels obvious. This single change measurably improves a small
+  model's predicate-reuse and conflict-vs-new-topic judgment, which is
+  exactly where this extractor has been observed to fail (inventing a new
+  predicate for an existing topic, or missing a genuine update).
 - subject_id (string): entity the fact is about (reuse the event subject_id)
 - predicate (string): short snake_case name for WHAT is being recorded,
   e.g. "invoice_language". Name the measure only. Any condition that

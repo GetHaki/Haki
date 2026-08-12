@@ -99,6 +99,35 @@ async def test_capture_then_worker_creates_active_fact_with_provenance(client):
     }
 
 
+async def test_candidate_reasoning_field_validates_and_is_never_persisted(client):
+    """ExtractedFact.reasoning (chain-of-thought before the action decision,
+    see app/providers/base.py) must validate when a provider includes it,
+    and must never leak onto the stored Fact row -- it is a generation-time
+    aid, not durable data."""
+    await capture(
+        client,
+        [
+            make_memory_event(
+                [
+                    {
+                        **mock_fact("invoice_language", {"language": "fr"}),
+                        "reasoning": (
+                            "No existing_facts entry for invoice_language, so "
+                            "this is a new topic: action create."
+                        ),
+                    }
+                ]
+            )
+        ],
+    )
+    assert await run_worker() == 1
+
+    facts = await facts_for("usr_42", "invoice_language")
+    assert len(facts) == 1
+    assert facts[0].value == {"language": "fr"}
+    assert not hasattr(facts[0], "reasoning")
+
+
 async def test_candidate_subject_id_drift_is_ignored_scope_stays_the_event(client):
     """Security invariant (README): the model never chooses scopes. If the
     extractor emits a candidate.subject_id that drifts from the event's own

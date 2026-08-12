@@ -7,6 +7,7 @@ import pytest
 
 from app.config import settings
 from app.consolidator import _search_text
+from app.context import episode_text
 from app.providers.fake import mock_fact
 from tests.test_consolidator import capture, make_memory_event, run_worker
 
@@ -46,18 +47,12 @@ async def test_budget_packs_best_scored_facts_and_traces_over_budget(client):
             "project_id": "prj_support",
             "subject_id": "usr_42",
             "query": "topic",
-            # 160, not 60: facts are now capped at budget_tokens * (1 -
-            # EPISODE_MIN_BUDGET_SHARE) so episodes always get a real share
-            # (see app/context/__init__.py) — at ~55 estimated tokens per
-            # fact here, a facts share of 80 (half of 160) still fits
-            # exactly one of the three and excludes the other two, which is
-            # what this test is actually about.
-            "budget_tokens": 160,
+            "budget_tokens": 60,
         },
     )
     assert response.status_code == 200
     body = response.json()
-    assert body["token_count"] <= 160
+    assert body["token_count"] <= 60
     assert 1 <= len(body["packet"]["facts"]) < 3
 
     trace = await client.get(
@@ -70,14 +65,18 @@ async def test_budget_packs_best_scored_facts_and_traces_over_budget(client):
     assert len(included) == len(body["packet"]["facts"])
 
 
-async def test_episodes_get_a_guaranteed_share_even_with_many_active_facts(client):
-    """EPISODE_MIN_BUDGET_SHARE: a subject with enough active facts to
-    consume the whole budget on their own must still get an episode served,
-    not zero. Facts alone would exhaust budget_tokens on this data (6 facts
-    x ~55 tokens = ~330 > 300); the reservation caps facts at
-    facts_budget_cap (150) so the episode loop, which still checks against
-    the FULL budget_tokens, has real room left."""
+async def test_unified_pool_lets_a_highly_relevant_episode_outrank_low_relevance_facts(client):
+    """Key merging (13 aout): no more fixed floor for episodes (removed
+    EPISODE_MIN_BUDGET_SHARE) -- they win real budget space by outscoring
+    less relevant facts in ONE ranked pool, not by a guaranteed share. Six
+    facts irrelevant to the query (FakeEmbedder: different texts ~1.0
+    cosine distance, near-zero similarity) would alone exceed a 300-token
+    budget (~55 tokens each); one episode whose content EXACTLY matches
+    the query (FakeEmbedder: identical text -> distance 0, near-max
+    similarity) must still win a slot despite competing against 6 higher-
+    count candidates -- proof the merge is real, not order-dependent."""
     big = {"detail": "x" * 200}
+    episode_payload = {"messages": [{"role": "user", "content": "I visited Lisbon in July."}]}
     await capture(
         client,
         [
@@ -98,7 +97,7 @@ async def test_episodes_get_a_guaranteed_share_even_with_many_active_facts(clien
                 "subject_id": "usr_42",
                 "kind": "chat_session",
                 "occurred_at": "2026-07-29T10:00:00Z",
-                "payload": {"messages": [{"role": "user", "content": "I visited Lisbon in July."}]},
+                "payload": episode_payload,
             },
         ],
     )
@@ -109,7 +108,7 @@ async def test_episodes_get_a_guaranteed_share_even_with_many_active_facts(clien
         json={
             "project_id": "prj_support",
             "subject_id": "usr_42",
-            "query": "topic",
+            "query": episode_text("chat_session", episode_payload),
             "budget_tokens": 300,
         },
     )
@@ -117,10 +116,10 @@ async def test_episodes_get_a_guaranteed_share_even_with_many_active_facts(clien
     body = response.json()
     packet = body["packet"]
     assert body["token_count"] <= 300
-    # Facts alone would fit up to 5 of the 6 (275 tokens) if unreserved --
-    # the cap must leave some out.
+    # Six irrelevant facts (~55 tokens each) don't all fit in 300 tokens
+    # regardless of the episode -- budget alone forces some out.
     assert len(packet["facts"]) < 6
-    # The episode still made it in: the reservation did its job.
+    # The episode wins a slot on merit (top score), not on a reserved share.
     assert len(packet["episodes"]) == 1
     assert "Lisbon" in packet["episodes"][0]["excerpt"]
 

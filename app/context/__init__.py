@@ -34,15 +34,19 @@ than the scoring itself (measured). Trade-off, documented: a fact that is
 neither in the vector top-K nor in the full-text top-K cannot be served even
 if recency would have lifted it — and facts beyond the cap are not traced.
 
-Budget: tokens estimated as max(1, len(text) // 4); facts are packed by
-decreasing score, capped at (budget_tokens * (1 - EPISODE_MIN_BUDGET_SHARE))
-rather than the full budget — episodes get a guaranteed floor instead of
-whatever a fact scan happens to leave behind (12-13 aout finding: the same
-question set, same budget, answered from raw episode text instead of
-extracted facts alone, scored +46.6 points — a fact is compact and durable,
-but lossy; the source wording it was extracted from is not). The rest is
-excluded with reason_code over_budget. Every decision is written to
-context_traces.
+Budget: tokens estimated as max(1, len(text) // 4). Facts and episodes are
+packed from ONE ranked pool (key merging, 13 aout) — episodes scored on
+the same weighted formula as facts, similarity + recency, minus the
+full-text term facts get and episodes structurally can't yet (see
+EPISODE_W_SIMILARITY/EPISODE_W_RECENCY) — rather than two separately-
+budgeted pools merged by a fixed share (the interim fix shipped 12 aout,
+after the same question set/budget answered from raw episode text instead
+of extracted facts alone scored +46.6 points: a fact is compact and
+durable, but lossy; the source wording it was extracted from is not). The
+rest is excluded with reason_code over_budget. Every decision is written
+to context_traces. Multi-hop expansion (below) stays a facts-only bolt-on
+outside the unified pool — it was never on the same score scale as the
+primary pass either, before or after this change.
 
 Recall gate (M3): when settings.recall_max_distance > 0, candidates whose
 cosine distance to the query exceeds it are excluded (reason_code
@@ -118,27 +122,37 @@ EPISODE_TEXT_CHARS = 4000
 # points) — matches the published finding (LongMemEval, ICLR 2025, S5.2)
 # that facts-only retrieval loses information relative to raw text, and
 # that concatenating both ("key merging") beats indexing them as two
-# separate pools merged by rank (what this module did until now). Raised
-# to match EPISODE_TEXT_CHARS: once the packing loop below is budget-aware
-# (see EPISODE_MIN_BUDGET_SHARE), the token budget check is what should
-# decide how much of an episode fits, not a second, tighter, unconditional
-# truncation applied before that check ever runs.
+# separate pools merged by rank — now what this module does, see the
+# unified pool below). Raised to match EPISODE_TEXT_CHARS: the token
+# budget check is what should decide how much of an episode fits, not a
+# second, tighter, unconditional truncation applied before that check ever
+# runs.
 EPISODE_EXCERPT_CHARS = EPISODE_TEXT_CHARS
 # Top-K source events retrieved per context call (cosine, hnsw).
 EPISODE_TOP_K = 8
 
-# Facts are packed first (see below) and, being cheap (a handful of tokens
-# each), can easily consume an entire budget before episodes ever get a
-# turn — the previous "facts first, episodes with whatever remains" order
-# meant a subject with enough active facts could starve episodes down to
-# zero regardless of budget_tokens. Reserving a floor guarantees episodes
-# always get real space to compete in, instead of only the crumbs a fact
-# scan happened to leave behind. 0.5 is a starting point, not a calibrated
-# value — recheck against real eval data once the fact vs. episode ranking
-# is scored on a comparable scale (see the module docstring's note on
-# "rank merging" vs "key merging"): a genuinely unified ranked pool would
-# make this reservation unnecessary.
-EPISODE_MIN_BUDGET_SHARE = 0.5
+# Episode scoring (key merging, 13 aout): facts and episodes are packed
+# from ONE ranked pool, not two separate budgets — the previous fixed
+# EPISODE_MIN_BUDGET_SHARE floor (12 aout) was an honest stopgap, not the
+# real fix; this is the real fix. Episodes are scored with the SAME
+# weighted formula as facts (similarity + recency), just missing the
+# full-text term: `events` has no search_vector column yet (facts do,
+# migration 0004) — no full-text index to rank against, so that axis is
+# left at zero rather than faked. Renormalized so the two SCORED axes
+# (similarity, recency) keep facts' relative 4:1 emphasis and the score
+# stays on the same 0-1 scale as a fact's — not summed directly against
+# W_SIMILARITY/W_RECENCY, which would cap episodes at 0.75 and rank them
+# systematically below facts regardless of actual relevance. A fact can
+# still out-rank an equally-similar episode via its extra full-text axis
+# (a fact matched lexically as well as semantically SHOULD win) — that
+# asymmetry is honest, not a bug: facts are compact structured text,
+# lexical match is cheap signal for them; episodes are prose, where
+# semantic + temporal proximity carry more of the signal. Heuristic
+# renormalization, not empirically calibrated — recalibrate once episodes
+# have their own full-text axis (giving them the real 3-term formula) or
+# once enough real eval data exists to tune the ratio directly.
+EPISODE_W_SIMILARITY = W_SIMILARITY / (W_SIMILARITY + W_RECENCY)
+EPISODE_W_RECENCY = W_RECENCY / (W_SIMILARITY + W_RECENCY)
 
 
 def episode_text(kind: str, payload: dict | None) -> str:
@@ -502,21 +516,64 @@ async def build_context(
                 }
             )
 
-    # Greedy packing under the token budget, best score first — behind the
-    # relevance floor (M3): the budget is a ceiling, not a target.
-    #
-    # Facts are capped at (budget_tokens - the episode reservation), not the
-    # full budget: at a few tokens each, a subject with enough active facts
-    # can otherwise fill the entire budget before episodes ever get a turn
-    # (see EPISODE_MIN_BUDGET_SHARE) — an unconditional cap, not "whatever
-    # facts happen to leave behind". If facts don't use their whole share,
-    # the difference is still available to episodes below: `token_count`
-    # reflects what was ACTUALLY packed, and episodes are packed against the
-    # full `budget_tokens`, not against `facts_budget_cap`.
+    # Episodic memory (sprint 10, key merging 13 aout): the most relevant
+    # SOURCE EVENTS of the same scope, scored on the SAME weighted formula
+    # as facts — similarity + recency, see EPISODE_W_SIMILARITY/
+    # EPISODE_W_RECENCY — so they compete fairly in ONE ranked pool below,
+    # not two separately-budgeted ones. This is what answers "what
+    # happened / when" questions, and (12-13 aout finding) carries
+    # information a compact fact loses entirely: the extractor keeps
+    # durable facts only, episodes keep the dated events in their own
+    # words.
+    episode_similarity = func.coalesce(
+        1 - Event.embedding.cosine_distance(query_embedding), 0.0
+    )
+    episode_recency = func.exp(
+        -func.extract("epoch", now - Event.occurred_at) / RECENCY_TAU_SECONDS
+    )
+    episode_score = (
+        EPISODE_W_SIMILARITY * episode_similarity + EPISODE_W_RECENCY * episode_recency
+    ).cast(Float)
+    episodes_start = time.perf_counter()
+    episode_rows = (
+        (
+            await session.execute(
+                select(
+                    Event.id,
+                    Event.kind,
+                    Event.occurred_at,
+                    Event.payload,
+                    Event.embedding.cosine_distance(query_embedding).label("distance"),
+                    episode_score.label("score"),
+                )
+                .where(
+                    Event.project_id == project_id,
+                    Event.subject_id == subject_id,
+                    Event.embedding.is_not(None),
+                    # Provenance guard (M8): untrusted-origin events are
+                    # never served as episodes — an episode is a VERBATIM
+                    # payload excerpt replayed into the agent's context,
+                    # i.e. a direct injection channel for ingested content.
+                    # Their extracted facts already go through the
+                    # quarantine path; the raw payload must not bypass it.
+                    Event.origin_trust != "untrusted",
+                )
+                .order_by(episode_score.desc())
+                .limit(EPISODE_TOP_K)
+            )
+        )
+        .all()
+    )
+    stage_timings["episodes"] = round((time.perf_counter() - episodes_start) * 1000)
+
+    # Unified ranked pool (key merging): facts and episodes, both filtered
+    # by the SAME recall floor (M3, semantic/distance axis only — never the
+    # composite score, see its module-level comment), merged into one list
+    # by their comparable score, packed greedily against budget_tokens in a
+    # SINGLE pass. A fact and an episode compete on their actual merits now,
+    # not on which separately-budgeted pool they happened to land in.
     recall_max_distance = settings.recall_max_distance
-    facts_budget_cap = budget_tokens - round(budget_tokens * EPISODE_MIN_BUDGET_SHARE)
-    packet_facts: list[dict[str, Any]] = []
-    token_count = 0
+    pool: list[tuple[float, str, Any]] = []
     for row in eligible:
         if recall_max_distance > 0 and (
             row.distance is None or row.distance > recall_max_distance
@@ -529,33 +586,70 @@ async def build_context(
                 }
             )
             continue
-        cost = estimate_tokens(_render(row.predicate, row.value))
-        if token_count + cost <= facts_budget_cap:
-            packet_facts.append(_packet_fact(row, freshness_by_id.get(row.id, "current")))
-            token_count += cost
+        pool.append((row.score, "fact", row))
+    for row in episode_rows:
+        if recall_max_distance > 0 and (
+            row.distance is None or row.distance > recall_max_distance
+        ):
             decisions.append(
                 {
-                    "fact_id": str(row.id),
-                    "action": "included",
-                    "reason_code": "top_score",
+                    "episode_id": str(row.id),
+                    "action": "excluded",
+                    "reason_code": "below_relevance_floor",
                 }
             )
+            continue
+        pool.append((row.score, "episode", row))
+    pool.sort(key=lambda item: item[0], reverse=True)
+
+    packet_facts: list[dict[str, Any]] = []
+    packet_episodes: list[dict[str, Any]] = []
+    token_count = 0
+    for _score, kind, row in pool:
+        if kind == "fact":
+            cost = estimate_tokens(_render(row.predicate, row.value))
         else:
+            excerpt = episode_excerpt(row.kind, row.payload)
+            cost = estimate_tokens(f"{row.occurred_at:%Y-%m-%d %H:%M} {row.kind} {excerpt}")
+        if token_count + cost > budget_tokens:
+            if kind == "fact":
+                decisions.append(
+                    {"fact_id": str(row.id), "action": "excluded", "reason_code": "over_budget"}
+                )
+            else:
+                decisions.append(
+                    {"episode_id": str(row.id), "action": "excluded", "reason_code": "over_budget"}
+                )
+            continue
+        token_count += cost
+        if kind == "fact":
+            packet_facts.append(_packet_fact(row, freshness_by_id.get(row.id, "current")))
             decisions.append(
+                {"fact_id": str(row.id), "action": "included", "reason_code": "top_score"}
+            )
+        else:
+            packet_episodes.append(
                 {
-                    "fact_id": str(row.id),
-                    "action": "excluded",
-                    "reason_code": "over_budget",
+                    "event_id": str(row.id),
+                    "kind": row.kind,
+                    "occurred_at": row.occurred_at.isoformat() if row.occurred_at else None,
+                    "excerpt": excerpt,
                 }
+            )
+            decisions.append(
+                {"episode_id": str(row.id), "action": "included", "reason_code": "top_score"}
             )
 
     # Multi-hop expansion: only worth trying if the main pass packed
-    # something to seed entities from, and left room in the FACTS budget
-    # (not the shared total — see above).
+    # something to seed entities from, and budget remains. Stays a
+    # facts-only bolt-on OUTSIDE the unified pool above: ts_rank_cd within
+    # a per-entity query was never on the same score scale as the primary
+    # hybrid/episode score, before or after key merging — appended directly
+    # against whatever budget the unified pass left, not re-merged into it.
     # Multi-hop rows are deliberately NOT gated by the recall floor: they
     # are seeded only by gate-passing facts, and their whole point is
     # lexical evidence that is semantically far from the ORIGINAL query.
-    if packet_facts and token_count < facts_budget_cap:
+    if packet_facts and token_count < budget_tokens:
         multi_hop_start = time.perf_counter()
         query_words = {t.lower() for t in _ENTITY_TOKEN_RE.findall(query)}
         seed_texts = [_render(f["predicate"], f["value"]) for f in packet_facts]
@@ -573,7 +667,7 @@ async def build_context(
             (time.perf_counter() - multi_hop_start) * 1000
         )
         for row in extra_rows:
-            if token_count >= facts_budget_cap:
+            if token_count >= budget_tokens:
                 break
             freshness = _fact_freshness(row, now_dt)
             if freshness == "expired":
@@ -586,7 +680,7 @@ async def build_context(
                 )
                 continue
             cost = estimate_tokens(_render(row.predicate, row.value))
-            if token_count + cost <= facts_budget_cap:
+            if token_count + cost <= budget_tokens:
                 packet_facts.append(_packet_fact(row, freshness))
                 token_count += cost
                 decisions.append(
@@ -596,88 +690,6 @@ async def build_context(
                         "reason_code": "multi_hop_expansion",
                     }
                 )
-
-    # Episodic memory (sprint 10): the most relevant SOURCE EVENTS of the
-    # same scope (cosine top-K over events.embedding, hnsw), packed under
-    # the SAME budget_tokens as facts — but facts were capped above at
-    # facts_budget_cap, so episodes are guaranteed at least
-    # EPISODE_MIN_BUDGET_SHARE of the budget, plus whatever facts left
-    # unused. This is what answers "what happened / when" questions, and
-    # (12-13 aout finding) carries information a compact fact loses
-    # entirely: the extractor keeps durable facts only, episodes keep the
-    # dated events in their own words.
-    episodes_start = time.perf_counter()
-    episode_rows = (
-        (
-            await session.execute(
-                select(
-                    Event.id,
-                    Event.kind,
-                    Event.occurred_at,
-                    Event.payload,
-                    Event.embedding.cosine_distance(query_embedding).label("distance"),
-                )
-                .where(
-                    Event.project_id == project_id,
-                    Event.subject_id == subject_id,
-                    Event.embedding.is_not(None),
-                    # Provenance guard (M8): untrusted-origin events are
-                    # never served as episodes — an episode is a VERBATIM
-                    # payload excerpt replayed into the agent's context,
-                    # i.e. a direct injection channel for ingested content.
-                    # Their extracted facts already go through the
-                    # quarantine path; the raw payload must not bypass it.
-                    Event.origin_trust != "untrusted",
-                )
-                .order_by(Event.embedding.cosine_distance(query_embedding))
-                .limit(EPISODE_TOP_K)
-            )
-        )
-        .all()
-    )
-    stage_timings["episodes"] = round((time.perf_counter() - episodes_start) * 1000)
-    packet_episodes: list[dict[str, Any]] = []
-    for row in episode_rows:
-        if recall_max_distance > 0 and (
-            row.distance is None or row.distance > recall_max_distance
-        ):
-            decisions.append(
-                {
-                    "episode_id": str(row.id),
-                    "action": "excluded",
-                    "reason_code": "below_relevance_floor",
-                }
-            )
-            continue
-        excerpt = episode_excerpt(row.kind, row.payload)
-        cost = estimate_tokens(
-            f"{row.occurred_at:%Y-%m-%d %H:%M} {row.kind} {excerpt}"
-        )
-        if token_count + cost <= budget_tokens:
-            packet_episodes.append(
-                {
-                    "event_id": str(row.id),
-                    "kind": row.kind,
-                    "occurred_at": row.occurred_at.isoformat() if row.occurred_at else None,
-                    "excerpt": excerpt,
-                }
-            )
-            token_count += cost
-            decisions.append(
-                {
-                    "episode_id": str(row.id),
-                    "action": "included",
-                    "reason_code": "top_score",
-                }
-            )
-        else:
-            decisions.append(
-                {
-                    "episode_id": str(row.id),
-                    "action": "excluded",
-                    "reason_code": "over_budget",
-                }
-            )
 
     # Fragmentation detector (M4): a subject with ZERO memory that is
     # registered as an alias of another subject is NOT a cold start — the

@@ -35,8 +35,14 @@ neither in the vector top-K nor in the full-text top-K cannot be served even
 if recency would have lifted it — and facts beyond the cap are not traced.
 
 Budget: tokens estimated as max(1, len(text) // 4); facts are packed by
-decreasing score until the budget is full, the rest is excluded with
-reason_code over_budget. Every decision is written to context_traces.
+decreasing score, capped at (budget_tokens * (1 - EPISODE_MIN_BUDGET_SHARE))
+rather than the full budget — episodes get a guaranteed floor instead of
+whatever a fact scan happens to leave behind (12-13 aout finding: the same
+question set, same budget, answered from raw episode text instead of
+extracted facts alone, scored +46.6 points — a fact is compact and durable,
+but lossy; the source wording it was extracted from is not). The rest is
+excluded with reason_code over_budget. Every decision is written to
+context_traces.
 
 Recall gate (M3): when settings.recall_max_distance > 0, candidates whose
 cosine distance to the query exceeds it are excluded (reason_code
@@ -104,9 +110,35 @@ def estimate_tokens(text: str) -> int:
 # Episodic memory (sprint 10): how much of an event's payload feeds the
 # embedding, and how much is shown in the packet excerpt.
 EPISODE_TEXT_CHARS = 4000
-EPISODE_EXCERPT_CHARS = 300
+# Was 300 (~75 tokens) — a source excerpt that short is barely more than a
+# label, not enough to answer anything requiring the actual wording. Real
+# eval evidence (12-13 aout): the SAME 15-question LongMemEval sample,
+# SAME 4000-token budget, answered from raw source-session text instead of
+# extracted facts, scored 73.3% against 26.7% for facts alone (+46.6
+# points) — matches the published finding (LongMemEval, ICLR 2025, S5.2)
+# that facts-only retrieval loses information relative to raw text, and
+# that concatenating both ("key merging") beats indexing them as two
+# separate pools merged by rank (what this module did until now). Raised
+# to match EPISODE_TEXT_CHARS: once the packing loop below is budget-aware
+# (see EPISODE_MIN_BUDGET_SHARE), the token budget check is what should
+# decide how much of an episode fits, not a second, tighter, unconditional
+# truncation applied before that check ever runs.
+EPISODE_EXCERPT_CHARS = EPISODE_TEXT_CHARS
 # Top-K source events retrieved per context call (cosine, hnsw).
 EPISODE_TOP_K = 8
+
+# Facts are packed first (see below) and, being cheap (a handful of tokens
+# each), can easily consume an entire budget before episodes ever get a
+# turn — the previous "facts first, episodes with whatever remains" order
+# meant a subject with enough active facts could starve episodes down to
+# zero regardless of budget_tokens. Reserving a floor guarantees episodes
+# always get real space to compete in, instead of only the crumbs a fact
+# scan happened to leave behind. 0.5 is a starting point, not a calibrated
+# value — recheck against real eval data once the fact vs. episode ranking
+# is scored on a comparable scale (see the module docstring's note on
+# "rank merging" vs "key merging"): a genuinely unified ranked pool would
+# make this reservation unnecessary.
+EPISODE_MIN_BUDGET_SHARE = 0.5
 
 
 def episode_text(kind: str, payload: dict | None) -> str:
@@ -117,7 +149,9 @@ def episode_text(kind: str, payload: dict | None) -> str:
 
 
 def episode_excerpt(kind: str, payload: dict | None) -> str:
-    """Short human/agent-readable excerpt for the packet (~300 chars)."""
+    """Human/agent-readable excerpt for the packet — as much of the source
+    text as EPISODE_EXCERPT_CHARS allows; the token-budget packing loop is
+    what actually decides how much of it gets served."""
     return episode_text(kind, payload)[:EPISODE_EXCERPT_CHARS]
 
 
@@ -470,7 +504,17 @@ async def build_context(
 
     # Greedy packing under the token budget, best score first — behind the
     # relevance floor (M3): the budget is a ceiling, not a target.
+    #
+    # Facts are capped at (budget_tokens - the episode reservation), not the
+    # full budget: at a few tokens each, a subject with enough active facts
+    # can otherwise fill the entire budget before episodes ever get a turn
+    # (see EPISODE_MIN_BUDGET_SHARE) — an unconditional cap, not "whatever
+    # facts happen to leave behind". If facts don't use their whole share,
+    # the difference is still available to episodes below: `token_count`
+    # reflects what was ACTUALLY packed, and episodes are packed against the
+    # full `budget_tokens`, not against `facts_budget_cap`.
     recall_max_distance = settings.recall_max_distance
+    facts_budget_cap = budget_tokens - round(budget_tokens * EPISODE_MIN_BUDGET_SHARE)
     packet_facts: list[dict[str, Any]] = []
     token_count = 0
     for row in eligible:
@@ -486,7 +530,7 @@ async def build_context(
             )
             continue
         cost = estimate_tokens(_render(row.predicate, row.value))
-        if token_count + cost <= budget_tokens:
+        if token_count + cost <= facts_budget_cap:
             packet_facts.append(_packet_fact(row, freshness_by_id.get(row.id, "current")))
             token_count += cost
             decisions.append(
@@ -506,11 +550,12 @@ async def build_context(
             )
 
     # Multi-hop expansion: only worth trying if the main pass packed
-    # something to seed entities from, and left room in the budget.
+    # something to seed entities from, and left room in the FACTS budget
+    # (not the shared total — see above).
     # Multi-hop rows are deliberately NOT gated by the recall floor: they
     # are seeded only by gate-passing facts, and their whole point is
     # lexical evidence that is semantically far from the ORIGINAL query.
-    if packet_facts and token_count < budget_tokens:
+    if packet_facts and token_count < facts_budget_cap:
         multi_hop_start = time.perf_counter()
         query_words = {t.lower() for t in _ENTITY_TOKEN_RE.findall(query)}
         seed_texts = [_render(f["predicate"], f["value"]) for f in packet_facts]
@@ -528,7 +573,7 @@ async def build_context(
             (time.perf_counter() - multi_hop_start) * 1000
         )
         for row in extra_rows:
-            if token_count >= budget_tokens:
+            if token_count >= facts_budget_cap:
                 break
             freshness = _fact_freshness(row, now_dt)
             if freshness == "expired":
@@ -541,7 +586,7 @@ async def build_context(
                 )
                 continue
             cost = estimate_tokens(_render(row.predicate, row.value))
-            if token_count + cost <= budget_tokens:
+            if token_count + cost <= facts_budget_cap:
                 packet_facts.append(_packet_fact(row, freshness))
                 token_count += cost
                 decisions.append(
@@ -552,11 +597,15 @@ async def build_context(
                     }
                 )
 
-    # Episodic memory (sprint 10): after the facts, the most relevant SOURCE
-    # EVENTS of the same scope (cosine top-K over events.embedding, hnsw),
-    # packed under the SAME budget — facts first, episodes with what
-    # remains. This is what answers "what happened / when" questions: the
-    # extractor keeps durable facts only, episodes keep the dated events.
+    # Episodic memory (sprint 10): the most relevant SOURCE EVENTS of the
+    # same scope (cosine top-K over events.embedding, hnsw), packed under
+    # the SAME budget_tokens as facts — but facts were capped above at
+    # facts_budget_cap, so episodes are guaranteed at least
+    # EPISODE_MIN_BUDGET_SHARE of the budget, plus whatever facts left
+    # unused. This is what answers "what happened / when" questions, and
+    # (12-13 aout finding) carries information a compact fact loses
+    # entirely: the extractor keeps durable facts only, episodes keep the
+    # dated events in their own words.
     episodes_start = time.perf_counter()
     episode_rows = (
         (

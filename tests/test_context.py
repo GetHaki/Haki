@@ -46,12 +46,18 @@ async def test_budget_packs_best_scored_facts_and_traces_over_budget(client):
             "project_id": "prj_support",
             "subject_id": "usr_42",
             "query": "topic",
-            "budget_tokens": 60,
+            # 160, not 60: facts are now capped at budget_tokens * (1 -
+            # EPISODE_MIN_BUDGET_SHARE) so episodes always get a real share
+            # (see app/context/__init__.py) — at ~55 estimated tokens per
+            # fact here, a facts share of 80 (half of 160) still fits
+            # exactly one of the three and excludes the other two, which is
+            # what this test is actually about.
+            "budget_tokens": 160,
         },
     )
     assert response.status_code == 200
     body = response.json()
-    assert body["token_count"] <= 60
+    assert body["token_count"] <= 160
     assert 1 <= len(body["packet"]["facts"]) < 3
 
     trace = await client.get(
@@ -62,6 +68,61 @@ async def test_budget_packs_best_scored_facts_and_traces_over_budget(client):
     assert any(d["reason_code"] == "over_budget" for d in decisions)
     included = [d for d in decisions if d["action"] == "included"]
     assert len(included) == len(body["packet"]["facts"])
+
+
+async def test_episodes_get_a_guaranteed_share_even_with_many_active_facts(client):
+    """EPISODE_MIN_BUDGET_SHARE: a subject with enough active facts to
+    consume the whole budget on their own must still get an episode served,
+    not zero. Facts alone would exhaust budget_tokens on this data (6 facts
+    x ~55 tokens = ~330 > 300); the reservation caps facts at
+    facts_budget_cap (150) so the episode loop, which still checks against
+    the FULL budget_tokens, has real room left."""
+    big = {"detail": "x" * 200}
+    await capture(
+        client,
+        [
+            make_memory_event(
+                [
+                    mock_fact("topic_a", big),
+                    mock_fact("topic_b", big),
+                    mock_fact("topic_c", big),
+                    mock_fact("topic_d", big),
+                    mock_fact("topic_e", big),
+                    mock_fact("topic_f", big),
+                ]
+            ),
+            {
+                "org_id": "org_acme",
+                "project_id": "prj_support",
+                "subject_type": "user",
+                "subject_id": "usr_42",
+                "kind": "chat_session",
+                "occurred_at": "2026-07-29T10:00:00Z",
+                "payload": {"messages": [{"role": "user", "content": "I visited Lisbon in July."}]},
+            },
+        ],
+    )
+    await run_worker()
+
+    response = await client.post(
+        "/v1/context",
+        json={
+            "project_id": "prj_support",
+            "subject_id": "usr_42",
+            "query": "topic",
+            "budget_tokens": 300,
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    packet = body["packet"]
+    assert body["token_count"] <= 300
+    # Facts alone would fit up to 5 of the 6 (275 tokens) if unreserved --
+    # the cap must leave some out.
+    assert len(packet["facts"]) < 6
+    # The episode still made it in: the reservation did its job.
+    assert len(packet["episodes"]) == 1
+    assert "Lisbon" in packet["episodes"][0]["excerpt"]
 
 
 async def test_budget_zero_or_negative_is_a_typed_error(client):

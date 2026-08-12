@@ -7,3 +7,11 @@ dist/
 *.egg-info/
 .pytest_cache/
 uv.lock.bak
+
+# Run artifacts, never source — same reasoning as the private repo's fix
+# (a stale tracked result file breaks eval.merge_shards's cloud fusion job:
+# a fresh checkout would surface it next to a shard's real output, and the
+# merge script correctly refuses to combine shards that end up spanning
+# more than one dataset/run).
+eval/data/
+eval/results/

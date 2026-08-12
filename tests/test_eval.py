@@ -6,6 +6,8 @@ Hermetic: mini fabricated fixtures, no network, no LLM, no database access
 """
 
 import json
+import subprocess
+import sys
 
 import pytest
 
@@ -167,6 +169,56 @@ def test_select_types_filter_then_subset(longmemeval_file):
 
 
 # --------------------------------------------------------------------------
+# Sharding (parallel cloud runs — GitHub Actions caps a job at 6h, far short
+# of a full LoCoMo/LongMemEval run)
+# --------------------------------------------------------------------------
+
+def _q(qid, history_id=""):
+    return datasets.Question(
+        qid=qid,
+        qtype="knowledge-update",
+        question="q",
+        answer="a",
+        question_date=None,
+        abstention_expected=False,
+        sessions=[],
+        history_id=history_id,
+    )
+
+
+def test_shard_count_one_is_a_no_op():
+    questions = [_q("a"), _q("b"), _q("c")]
+    assert datasets.shard(questions, 0, 1) == questions
+
+
+def test_shard_partitions_without_gaps_or_overlaps():
+    questions = [_q(str(i)) for i in range(11)]  # no history_id -> qid used
+    shards = [datasets.shard(questions, i, 4) for i in range(4)]
+    seen = [q.qid for s in shards for q in s]
+    assert sorted(seen) == sorted(q.qid for q in questions)  # nothing lost
+    assert len(seen) == len(set(seen))  # nothing duplicated across shards
+
+
+def test_shard_never_splits_a_shared_history_locomo_style():
+    """LoCoMo: ~200 questions can share ONE conversation (history_id). A
+    naive index-based split would scatter them across shards, and since
+    eval/run.py's ingestion cache is per-process, every shard touching that
+    conversation would re-ingest it from scratch — real LLM cost multiplied
+    by however many shards happen to touch it."""
+    questions = (
+        [_q(f"conv1_q{i}", history_id="conv1") for i in range(20)]
+        + [_q(f"conv2_q{i}", history_id="conv2") for i in range(5)]
+    )
+    shards = [datasets.shard(questions, i, 3) for i in range(3)]
+    for s in shards:
+        history_ids = {q.history_id for q in s}
+        assert len(history_ids) <= 1, f"shard mixes histories: {history_ids}"
+    # every question still assigned to exactly one shard
+    seen = [q.qid for s in shards for q in s]
+    assert sorted(seen) == sorted(q.qid for q in questions)
+
+
+# --------------------------------------------------------------------------
 # Transcript truncation (baseline full-context)
 # --------------------------------------------------------------------------
 
@@ -293,3 +345,88 @@ def test_parse_judge_output_garbage_is_incorrect():
 
 def test_render_facts_empty():
     assert datasets.render_facts([]) == "(no facts in memory)"
+
+
+# --------------------------------------------------------------------------
+# Shard merging (eval.merge_shards — combines parallel cloud shards back
+# into one report; real subprocess, same pattern as tests/test_cli.py and
+# tests/test_mcp.py for exercising an actual CLI entrypoint)
+# --------------------------------------------------------------------------
+
+def _shard_file(tmp_path, name, dataset, run_id, records):
+    from eval.report import write_reports
+
+    path = write_reports(
+        tmp_path,
+        dataset,
+        run_id,
+        {"name": dataset, "dataset": {}, "selection": {}},
+        records,
+        metrics.aggregate(records),
+    )[0]
+    renamed = tmp_path / name
+    path.rename(renamed)
+    return renamed
+
+
+def _run_merge(tmp_path, *shard_paths, run_id="merged-test"):
+    return subprocess.run(
+        [sys.executable, "-m", "eval.merge_shards", "--run-id", run_id, *map(str, shard_paths)],
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_merge_shards_combines_records_and_recomputes_summary(tmp_path):
+    shard0 = _shard_file(
+        tmp_path, "s0.json", "toy", "run-shard0",
+        [_record("q1", "knowledge-update", "correct")],
+    )
+    shard1 = _shard_file(
+        tmp_path, "s1.json", "toy", "run-shard1",
+        [_record("q2", "knowledge-update", "incorrect")],
+    )
+    from eval.run import RESULTS_DIR
+
+    run_id = "test-merge-combine"
+    try:
+        result = _run_merge(tmp_path, shard0, shard1, run_id=run_id)
+        assert result.returncode == 0, result.stdout + result.stderr
+        merged = json.loads((RESULTS_DIR / f"toy_{run_id}.json").read_text(encoding="utf-8"))
+        assert {r["qid"] for r in merged["questions"]} == {"q1", "q2"}
+        assert merged["summary"]["haki"]["accuracy"] == 0.5
+    finally:
+        (RESULTS_DIR / f"toy_{run_id}.json").unlink(missing_ok=True)
+        (RESULTS_DIR / f"toy_{run_id}.md").unlink(missing_ok=True)
+
+
+def test_merge_shards_refuses_duplicate_qid_across_shards(tmp_path):
+    # Shards are partitioned by history_id specifically so this can't
+    # legitimately happen (see datasets.shard) — a duplicate means the
+    # inputs aren't really disjoint shards, and merging would silently
+    # double-count a question instead of catching the mistake.
+    shard0 = _shard_file(
+        tmp_path, "s0.json", "toy", "run-shard0",
+        [_record("dup", "knowledge-update", "correct")],
+    )
+    shard1 = _shard_file(
+        tmp_path, "s1.json", "toy", "run-shard1",
+        [_record("dup", "knowledge-update", "incorrect")],
+    )
+    result = _run_merge(tmp_path, shard0, shard1, run_id="test-merge-dup")
+    assert result.returncode != 0
+    assert "duplicate qid" in result.stdout
+
+
+def test_merge_shards_refuses_different_datasets(tmp_path):
+    shard0 = _shard_file(
+        tmp_path, "s0.json", "dataset_a", "run-shard0",
+        [_record("q1", "knowledge-update", "correct")],
+    )
+    shard1 = _shard_file(
+        tmp_path, "s1.json", "dataset_b", "run-shard1",
+        [_record("q2", "knowledge-update", "correct")],
+    )
+    result = _run_merge(tmp_path, shard0, shard1, run_id="test-merge-mismatch")
+    assert result.returncode != 0
+    assert "different datasets" in result.stdout

@@ -212,6 +212,39 @@ def select(
     return questions
 
 
+def shard(
+    questions: list[Question],
+    shard_index: int,
+    shard_count: int,
+) -> list[Question]:
+    """Split `questions` into `shard_count` groups for parallel cloud runs
+    (a single GitHub Actions job caps out at 6h, far short of a full
+    LoCoMo/LongMemEval run), grouped by history_id (or qid when unset) so a
+    shared ingested history is never split across two shards. Critical for
+    LoCoMo: ~200 questions can share ONE conversation (eval/run.py's
+    `ingested` cache is per-process, not shared across shards) — splitting
+    them would make every shard that touches that conversation re-ingest it
+    from scratch, multiplying real LLM extraction cost by however many
+    shards happen to touch it. Round-robin assignment by first appearance of
+    each history_id, deterministic given the same `questions` order in.
+    """
+    if shard_count <= 1:
+        return questions
+    order: list[str] = []
+    seen: set[str] = set()
+    for question in questions:
+        key = question.history_id or question.qid
+        if key not in seen:
+            seen.add(key)
+            order.append(key)
+    assigned = {key: i % shard_count for i, key in enumerate(order)}
+    return [
+        question
+        for question in questions
+        if assigned[question.history_id or question.qid] == shard_index
+    ]
+
+
 def render_transcript(sessions: list[Session]) -> str:
     lines: list[str] = []
     for session in sessions:

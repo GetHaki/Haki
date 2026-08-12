@@ -170,12 +170,18 @@ async def run(args: argparse.Namespace) -> int:
     types = args.types.split(",") if args.types else config.get("selection", {}).get("types")
     subset = args.subset if args.subset is not None else config.get("selection", {}).get("subset")
     selected = datasets.select(questions, subset=subset, types=types)
+    if args.shard_count and args.shard_count > 1:
+        selected = datasets.shard(selected, args.shard_index, args.shard_count)
     if not selected:
         print("aucune question sélectionnée (filtres trop restrictifs ?)")
         return 1
 
     run_id = args.run_id or datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    config["selection"] = {"subset": subset, "types": types}
+    config["selection"] = {
+        "subset": subset,
+        "types": types,
+        "shard": f"{args.shard_index}/{args.shard_count}" if args.shard_count and args.shard_count > 1 else None,
+    }
     config["run_id"] = run_id
     config["dataset"]["sha256"] = config["dataset"].get("sha256") or sha256_file(dataset_path)
 
@@ -356,6 +362,15 @@ def main() -> int:
     parser.add_argument("--api-url", default="http://localhost:8000")
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--keep-data", action="store_true", help="ne pas nettoyer le projet eval")
+    parser.add_argument(
+        "--shard-index", type=int, default=0, help="index de ce shard (0-based), avec --shard-count"
+    )
+    parser.add_argument(
+        "--shard-count",
+        type=int,
+        default=1,
+        help="nombre total de shards — repartit par history_id (jamais une conversation coupee en deux), pour paralleliser un run complet sur plusieurs jobs cloud bornes a 6h chacun",
+    )
     args = parser.parse_args()
     try:
         return asyncio.run(run(args))

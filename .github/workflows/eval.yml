@@ -1,0 +1,188 @@
+name: Eval
+
+# Manual only — real LLM calls (extraction, answer, judge), real cost, real
+# time (several minutes per question). Never on push/PR.
+#
+# Built to get eval runs off the maintainer's home connection: a run that
+# takes over an hour is one bad Wi-Fi drop away from a silent crash (the
+# harness has no retry-on-network-error, so one dropped request kills the
+# whole process) — this runs on GitHub's runners instead, same live-server
+# pattern as ci.yml's typescript job (real Postgres, real uvicorn, fake
+# embedder to stay within the local 384-dim index — HAKI_LLM_PROVIDER=openai
+# for extraction/answer/judge, HAKI_EMBED_PROVIDER left at its local default
+# since HAKI_EMBED_PROVIDER=openai is unsupported, see app/providers/openai.py).
+#
+# Sharded by default (shard_count, default 1 = single job, same behavior as
+# before sharding existed): a single GitHub Actions job caps out at 6h,
+# nowhere near enough for a full LoCoMo (1986 questions) or LongMemEval (211
+# questions) run at several minutes/question. eval/datasets.shard() splits
+# by history_id so a shared ingested conversation (LoCoMo: ~200 questions
+# can share one) is never split across shards — that would multiply real
+# LLM ingestion cost by however many shards touch it. Each shard uploads its
+# own results artifact; the merge job combines them with
+# eval.merge_shards into one final report, even when shard_count=1 (kept
+# uniform on purpose — one code path, not two).
+#
+# Requires a repository secret HAKI_LLM_API_KEY (OpenRouter key) — add it
+# under Settings > Secrets and variables > Actions. Never pasted into this
+# file or entered by the agent on the user's behalf.
+on:
+  workflow_dispatch:
+    inputs:
+      config:
+        description: "eval/configs/<file>.json"
+        default: "eval/configs/longmemeval_s.json"
+      subset:
+        description: "N premières questions (déterministe), vide = tout le dataset"
+        default: "15"
+      types:
+        description: "filtre CSV, ex: knowledge-update,temporal-reasoning — vide = tout"
+        default: "knowledge-update"
+      systems:
+        description: "haki,baseline | haki | baseline"
+        default: "haki,baseline"
+      shard_count:
+        description: "Nombre de shards paralleles — 1 = pas de sharding. LoCoMo complet (10 conversations): 10. LongMemEval complet (211 questions, aucune conversation partagee): 20-30."
+        default: "1"
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.set.outputs.shards }}
+    steps:
+      - id: set
+        run: |
+          N="${{ github.event.inputs.shard_count }}"
+          SHARDS=$(seq 0 $((N - 1)) | jq -R . | jq -s -c 'map(tonumber)')
+          echo "shards=$SHARDS" >> "$GITHUB_OUTPUT"
+          echo "planned $N shard(s): $SHARDS"
+
+  run-eval:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: haki
+          POSTGRES_PASSWORD: haki
+          POSTGRES_DB: haki
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U haki -d haki"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      HAKI_LLM_PROVIDER: openai
+      HAKI_LLM_BASE_URL: https://openrouter.ai/api/v1
+      HAKI_LLM_API_KEY: ${{ secrets.HAKI_LLM_API_KEY }}
+      HAKI_LLM_MODEL: openai/gpt-4o-mini
+      HAKI_AUTH_REQUIRED: "true"
+      HAKI_ADMIN_KEY: gh-actions-eval-admin-key
+      HAKI_EVAL_ADMIN_KEY: gh-actions-eval-admin-key
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      # onnxruntime (fastembed's local embedder) needs it at import time —
+      # same requirement as the production Dockerfile.
+      - name: Install libgomp1
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgomp1
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Run migrations
+        run: uv run alembic upgrade head
+
+      - name: Download eval dataset
+        run: uv run python -m eval.download "${{ github.event.inputs.config }}"
+
+      - name: Start Haki API
+        run: |
+          uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 &
+          echo $! > haki-api.pid
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8000/health && exit 0
+            sleep 1
+          done
+          echo "Haki API never became healthy" >&2
+          exit 1
+
+      - name: Run eval shard
+        run: |
+          ARGS="--config ${{ github.event.inputs.config }} --api-url http://localhost:8000"
+          ARGS="$ARGS --run-id gh-${{ github.run_id }}-shard${{ matrix.shard }} --systems ${{ github.event.inputs.systems }}"
+          ARGS="$ARGS --shard-index ${{ matrix.shard }} --shard-count ${{ github.event.inputs.shard_count }}"
+          if [ -n "${{ github.event.inputs.subset }}" ]; then ARGS="$ARGS --subset ${{ github.event.inputs.subset }}"; fi
+          if [ -n "${{ github.event.inputs.types }}" ]; then ARGS="$ARGS --types ${{ github.event.inputs.types }}"; fi
+          uv run python -u -m eval.run $ARGS
+
+      - name: Stop Haki API
+        if: always()
+        run: kill "$(cat haki-api.pid)" 2>/dev/null || true
+
+      - name: Upload shard results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-shard-${{ matrix.shard }}-${{ github.run_id }}
+          path: |
+            eval/results/*.json
+            eval/results/*.md
+          if-no-files-found: warn
+
+  merge:
+    needs: run-eval
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      # eval.merge_shards only needs the harness's own (stdlib + httpx)
+      # dependencies, not the full API stack — but --all-extras is cheap
+      # and keeps this identical to every other job's install step.
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Download all shard results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: eval-shard-*-${{ github.run_id }}
+          path: shard-results
+          merge-multiple: true
+
+      - name: Merge into one report
+        run: |
+          uv run python -m eval.merge_shards --run-id gh-${{ github.run_id }} shard-results/*.json
+
+      - name: Upload merged report
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-merged-${{ github.run_id }}
+          path: |
+            eval/results/*_gh-${{ github.run_id }}.json
+            eval/results/*_gh-${{ github.run_id }}.md

@@ -260,6 +260,82 @@ async def test_conflicting_create_opens_conflict_set_and_hides_both_facts(client
     assert all(d["reason_code"] == "conflict_open" for d in fact_decisions)
 
 
+async def test_second_event_in_same_job_sees_first_events_new_fact_as_existing(client):
+    """Structural bug found by re-ingesting real eval data (11 aout): a bulk
+    capture() call batches many events for ONE subject into a SINGLE
+    consolidate job (an eval harness ingesting a subject's whole history, a
+    customer backfill/import). The old code extracted every event's
+    candidates FIRST — each querying "active facts" fresh from the DB,
+    before ANY candidate of this same job had been applied — then applied
+    them all second. So the second event's extraction never saw the fact
+    the first event of the SAME job was about to create: a real provider
+    given an empty existing_facts view has no way to recognize a
+    same-predicate value change as an update and emit action="supersede"
+    instead of "create". Confirmed against real data: `personal_best_5k`
+    27:12 -> 25:50, 7 days apart but both landing in one capture() batch,
+    misclassified as a contradiction on every re-ingestion run — even
+    after the fact-identity (qualifiers) fix, since that fix is about
+    matching, not about what the extractor's input snapshot contains.
+
+    FakeProvider ignores `existing` entirely (its action is fully scripted
+    per test), so the fix's effect cannot be observed through the
+    extraction DECISION — only through the snapshot itself. This test
+    spies on exactly that: what `existing` the second event's call
+    receives.
+    """
+
+    class SpyProvider(FakeProvider):
+        def __init__(self) -> None:
+            self.existing_seen: list[list[dict]] = []
+
+        async def extract_facts(self, events, existing=None):
+            self.existing_seen.append(existing or [])
+            return await super().extract_facts(events, existing=existing)
+
+    spy = SpyProvider()
+    await capture(
+        client,
+        [
+            make_memory_event(
+                [mock_fact("personal_best_5k", {"time": "27:12"})],
+                occurred_at="2026-07-20T10:00:00Z",
+            ),
+            make_memory_event(
+                [
+                    mock_fact(
+                        "personal_best_5k", {"time": "25:50"}, action="supersede"
+                    )
+                ],
+                occurred_at="2026-07-27T10:00:00Z",
+            ),
+        ],
+    )
+    assert await run_worker(extractor=spy) == 1
+
+    assert len(spy.existing_seen) == 2
+    assert spy.existing_seen[0] == []  # first event: nothing exists yet
+    assert any(
+        e["predicate"] == "personal_best_5k" and e["value"] == {"time": "27:12"}
+        for e in spy.existing_seen[1]
+    ), (
+        "second event of the same job must see the fact the first event "
+        f"just created, got {spy.existing_seen[1]!r}"
+    )
+
+    # And the consolidator itself lands on a clean supersession, not a
+    # conflict, once the provider (here, told directly via action=
+    # "supersede") makes the right call with that visibility.
+    facts = await facts_for("usr_42", "personal_best_5k")
+    assert len(facts) == 2
+    old = next(f for f in facts if f.value == {"time": "27:12"})
+    new = next(f for f in facts if f.value == {"time": "25:50"})
+    assert old.status is FactStatus.superseded
+    assert new.status is FactStatus.active
+    assert new.supersedes_id == old.id
+    async with async_session() as session:
+        assert (await session.execute(select(ConflictSet))).scalars().all() == []
+
+
 async def test_provider_failure_fails_job_keeps_events_and_replay_works(client):
     class BrokenProvider:
         async def extract_facts(self, events, existing=None):

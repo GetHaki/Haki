@@ -818,7 +818,13 @@ async def _process_job(
 ) -> dict[str, Any]:
     event_ids = [uuid.UUID(e) for e in job.payload.get("event_ids", [])]
     events = (
-        (await session.execute(select(Event).where(Event.id.in_(event_ids))))
+        (
+            await session.execute(
+                select(Event)
+                .where(Event.id.in_(event_ids))
+                .order_by(Event.occurred_at, Event.id)
+            )
+        )
         .scalars()
         .all()
     )
@@ -838,12 +844,54 @@ async def _process_job(
         "rejected_with_reason": {reason: 0 for reason in REJECT_REASONS},
     }
 
-    # Extraction per event: exact provenance (source_event_ids) for every
-    # candidate. The subject's currently active facts are passed along so
-    # the provider can emit "supersede" on a change of mind instead of
-    # piling up contradictions. A provider exception propagates -> job
-    # failed, events intact.
-    candidates: list[tuple[Event, Any]] = []
+    # Episodic memory (sprint 10): embed each processed event once, up
+    # front (derived data, re-computable — the only post-insert write
+    # allowed on events). Events already embedded (replayed job) are
+    # skipped. Independent of extraction order, so done before the
+    # per-event loop below.
+    unembedded = [event for event in events if event.embedding is None]
+    if unembedded:
+        event_embeddings = await embedder.embed(
+            [episode_text(event.kind, event.payload) for event in unembedded]
+        )
+        for event, embedding in zip(unembedded, event_embeddings):
+            event.embedding = embedding
+
+    # Locks acquired up front, before any extraction — earlier than before
+    # (see the loop below for why) but the lock's actual job is unchanged:
+    # serializing two JOBS for the same subject across workers, never
+    # events within this one job. Sorted: a job spanning several subjects
+    # always locks them in the same order (deadlock avoidance).
+    for project_id, subject_id in sorted(
+        {(event.project_id, event.subject_id) for event in events}
+    ):
+        await acquire_subject_write_lock(
+            session, project_id=project_id, subject_id=subject_id
+        )
+
+    # Extraction and application are interleaved per event, in
+    # chronological order — NOT extract-the-whole-batch-then-apply-the-
+    # whole-batch as before. A job's event_ids can span many sessions for
+    # ONE subject (a bulk import, a backfill, an eval harness ingesting a
+    # subject's whole history through one capture() call): with the old
+    # two-phase split, event N's "active facts" snapshot was queried
+    # before ANY candidate from this same job had been applied, so it
+    # never included what event N-1 of the SAME job was about to create.
+    # A real provider given an empty existing_facts view for event N has
+    # no way to recognize a same-predicate value change as an update and
+    # correctly emit action="supersede" — confirmed against real eval
+    # data: a personal record updated 7 days later, both mentions landing
+    # in one capture() batch, was misclassified as a contradiction instead
+    # of a supersession on every re-ingestion run, even after the
+    # fact-identity (qualifiers) fix, because that fix addresses
+    # identity matching, not this — the extractor never saw the earlier
+    # value to compare against in the first place. Interleaving makes
+    # event N's active-facts query see everything already applied from
+    # events 1..N-1 of this same job, same as it always has across
+    # separate jobs. Trade-off: the per-subject lock above is now held
+    # across the (slower) extraction round-trips too, instead of only
+    # across the apply phase — a wider contention window, accepted
+    # because correctness here matters more than that narrower window.
     for event in events:
         active_facts = (
             (
@@ -866,95 +914,71 @@ async def _process_job(
             }
             for fact in active_facts
         ]
+
+        # Validate before embedding: an invalid candidate is rejected and
+        # logged, never crashes the job. A candidate the provider itself
+        # marked action="reject" (write gate M1) is a well-formed
+        # observation the extractor deliberately screened out (echo,
+        # noise, unsourced inference...) — counted the same way and never
+        # reaches embedding/application.
+        to_apply: list[ExtractedFact] = []
         for raw in await extractor.extract_facts([event], existing=existing):
-            candidates.append((event, raw))
+            try:
+                candidate = ExtractedFact.model_validate(raw)
+            except ValidationError as exc:
+                # No reason code: the candidate never even parsed, so
+                # there is no taxonomy to classify it against.
+                result["rejected"] += 1
+                logger.warning(
+                    "consolidator: rejected invalid candidate (job %s): %s",
+                    job.id,
+                    exc,
+                )
+                continue
+            if candidate.action == "reject":
+                _record_rejection(
+                    result, candidate.reject_reason, job_id=job.id, source="provider"
+                )
+                continue
+            directive_reason = _imperative_directive_reason(candidate)
+            if directive_reason is not None:
+                _record_rejection(
+                    result, directive_reason, job_id=job.id, source="directive-filter"
+                )
+                continue
+            trust_reason = _untrusted_instruction_reason(event, candidate)
+            if trust_reason is not None:
+                _record_rejection(
+                    result, trust_reason, job_id=job.id, source="trust-gate"
+                )
+                continue
+            to_apply.append(candidate)
 
-    # Validate everything before embedding: an invalid candidate is rejected
-    # and logged, never crashes the batch. A candidate the provider itself
-    # marked action="reject" (write gate M1) is a well-formed observation the
-    # extractor deliberately screened out (echo, noise, unsourced
-    # inference...) — it is counted the same way and never reaches
-    # embedding/application.
-    to_apply: list[tuple[Event, ExtractedFact]] = []
-    for event, raw in candidates:
-        try:
-            candidate = ExtractedFact.model_validate(raw)
-        except ValidationError as exc:
-            # No reason code: the candidate never even parsed, so there is
-            # no taxonomy to classify it against.
-            result["rejected"] += 1
-            logger.warning(
-                "consolidator: rejected invalid candidate (job %s): %s", job.id, exc
+        if not to_apply:
+            continue
+
+        texts = [_search_text(fact.predicate, fact.value) for fact in to_apply]
+        embeddings = await embedder.embed(texts)
+
+        for candidate, embedding in zip(to_apply, embeddings):
+            # Anti-echo write gate (M1), post-validation: a candidate that
+            # only reformulates a fact already SERVED to this subject in a
+            # recent context packet is rejected here, before it can ever
+            # reach the ledger — this is what stops a served fact from
+            # being echoed back, re-extracted, and re-stored without
+            # bound.
+            echo_reason = await _echo_reject_reason(
+                session,
+                project_id=event.project_id,
+                subject_id=event.subject_id,
+                embedding=embedding,
             )
-            continue
-        if candidate.action == "reject":
-            _record_rejection(
-                result, candidate.reject_reason, job_id=job.id, source="provider"
+            if echo_reason is not None:
+                _record_rejection(result, echo_reason, job_id=job.id, source="anti-echo")
+                continue
+            await _apply_candidate(
+                session, candidate, embedding=embedding, event=event, result=result
             )
-            continue
-        directive_reason = _imperative_directive_reason(candidate)
-        if directive_reason is not None:
-            _record_rejection(
-                result, directive_reason, job_id=job.id, source="directive-filter"
-            )
-            continue
-        trust_reason = _untrusted_instruction_reason(event, candidate)
-        if trust_reason is not None:
-            _record_rejection(result, trust_reason, job_id=job.id, source="trust-gate")
-            continue
-        to_apply.append((event, candidate))
-
-    texts = [_search_text(fact.predicate, fact.value) for _, fact in to_apply]
-    embeddings = await embedder.embed(texts) if texts else []
-
-    # Episodic memory (sprint 10): embed each processed event once (derived
-    # data, re-computable — the only post-insert write allowed on events).
-    # Events already embedded (replayed job) are skipped.
-    unembedded = [event for event in events if event.embedding is None]
-    if unembedded:
-        event_embeddings = await embedder.embed(
-            [episode_text(event.kind, event.payload) for event in unembedded]
-        )
-        for event, embedding in zip(unembedded, event_embeddings):
-            event.embedding = embedding
-
-    # Serialize the whole write phase per scope BEFORE any read-check-act
-    # decision (duplicate check, semantic resolution, anti-echo, creation):
-    # this is what makes two concurrent consolidations of the same subject
-    # unable to both observe "no duplicate" and both insert. Acquired only
-    # NOW — after the extractor/embedder calls — so the lock is never held
-    # across a slow provider round-trip. Sorted: a job spanning several
-    # subjects always locks them in the same order (deadlock avoidance).
-    # No session.expire_all() needed after acquiring: fact VALUES are
-    # immutable post-insert (only status/valid_to/version/embedding ever
-    # change) and every status filter is evaluated in SQL against a fresh
-    # READ COMMITTED snapshot, so a stale identity-map object can never
-    # make a dedup decision wrong.
-    for project_id, subject_id in sorted(
-        {(event.project_id, event.subject_id) for event, _ in to_apply}
-    ):
-        await acquire_subject_write_lock(
-            session, project_id=project_id, subject_id=subject_id
-        )
-
-    for (event, candidate), embedding in zip(to_apply, embeddings):
-        # Anti-echo write gate (M1), post-validation: a candidate that only
-        # reformulates a fact already SERVED to this subject in a recent
-        # context packet is rejected here, before it can ever reach the
-        # ledger — this is what stops a served fact from being echoed back,
-        # re-extracted, and re-stored without bound.
-        echo_reason = await _echo_reject_reason(
-            session,
-            project_id=event.project_id,
-            subject_id=event.subject_id,
-            embedding=embedding,
-        )
-        if echo_reason is not None:
-            _record_rejection(result, echo_reason, job_id=job.id, source="anti-echo")
-            continue
-        await _apply_candidate(
-            session, candidate, embedding=embedding, event=event, result=result
-        )
     return result
 
 

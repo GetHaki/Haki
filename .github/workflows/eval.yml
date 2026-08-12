@@ -33,10 +33,10 @@ on:
         description: "eval/configs/<file>.json"
         default: "eval/configs/longmemeval_s.json"
       subset:
-        description: "N premières questions (déterministe), vide = tout le dataset"
+        description: "N premières questions (déterministe), 'all' = tout le dataset (attention au coût sur un run complet)"
         default: "15"
       types:
-        description: "filtre CSV, ex: knowledge-update,temporal-reasoning — vide = tout"
+        description: "filtre CSV (types du dataset choisi — ex knowledge-update pour LongMemEval, single-hop pour LoCoMo), 'all' = tous les types"
         default: "knowledge-update"
       systems:
         description: "haki,baseline | haki | baseline"
@@ -129,8 +129,20 @@ jobs:
           ARGS="--config ${{ github.event.inputs.config }} --api-url http://localhost:8000"
           ARGS="$ARGS --run-id gh-${{ github.run_id }}-shard${{ matrix.shard }} --systems ${{ github.event.inputs.systems }}"
           ARGS="$ARGS --shard-index ${{ matrix.shard }} --shard-count ${{ github.event.inputs.shard_count }}"
-          if [ -n "${{ github.event.inputs.subset }}" ]; then ARGS="$ARGS --subset ${{ github.event.inputs.subset }}"; fi
-          if [ -n "${{ github.event.inputs.types }}" ]; then ARGS="$ARGS --types ${{ github.event.inputs.types }}"; fi
+          # 'all' means "no filter": a workflow_dispatch API call that sends
+          # an empty string for an input silently falls back to that
+          # input's YAML default instead of passing the empty string
+          # through (confirmed live: a LoCoMo dispatch with subset/types set
+          # to "" resolved as "15"/"knowledge-update" here, and
+          # knowledge-update isn't even a LoCoMo type — every shard selected
+          # zero questions). 'all' is a real, non-empty value, so it always
+          # overrides correctly regardless of how the run was dispatched.
+          if [ -n "${{ github.event.inputs.subset }}" ] && [ "${{ github.event.inputs.subset }}" != "all" ]; then
+            ARGS="$ARGS --subset ${{ github.event.inputs.subset }}"
+          fi
+          if [ -n "${{ github.event.inputs.types }}" ] && [ "${{ github.event.inputs.types }}" != "all" ]; then
+            ARGS="$ARGS --types ${{ github.event.inputs.types }}"
+          fi
           uv run python -u -m eval.run $ARGS
 
       - name: Stop Haki API

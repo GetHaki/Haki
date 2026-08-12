@@ -57,25 +57,80 @@ jobs:
 
   typescript:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: sdk/typescript
+    # sdk/typescript/test/sdk.test.mjs tests against a REAL running Haki API
+    # (its own docstring says so) — HAKI_AUTH_REQUIRED=true, HAKI_LLM_PROVIDER
+    # and HAKI_EMBED_PROVIDER=fake, on localhost:8100 (the SDK's default,
+    # matching the Dockerfile's EXPOSE 8100). This job never had that server;
+    # every run since CI was added failed on `npm test` with "cannot reach
+    # Haki at http://localhost:8100: fetch failed" for every test but the two
+    # that need no server at all (buildPromptContext, the CLI config test).
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: haki
+          POSTGRES_PASSWORD: haki
+          POSTGRES_DB: haki
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U haki -d haki"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      HAKI_LLM_PROVIDER: fake
+      HAKI_EMBED_PROVIDER: fake
+      HAKI_AUTH_REQUIRED: "true"
+      HAKI_ADMIN_KEY: ci-ts-sdk-admin-key
+      HAKI_TEST_ADMIN_KEY: ci-ts-sdk-admin-key
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install API dependencies
+        run: uv sync --all-extras
+
+      - name: Run migrations
+        run: uv run alembic upgrade head
+
+      # Backgrounded: this job's real subject is the TS SDK, the API is
+      # only here to be a real target for it — same fake providers as the
+      # python job (see `env:` above), no network/LLM calls, deterministic.
+      - name: Start Haki API
+        run: |
+          uv run uvicorn app.main:app --host 0.0.0.0 --port 8100 &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8100/health && exit 0
+            sleep 1
+          done
+          echo "Haki API never became healthy" >&2
+          exit 1
 
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: "22"
 
-      - name: Install dependencies
+      - name: Install SDK dependencies
+        working-directory: sdk/typescript
         run: npm install
 
       - name: Type check
+        working-directory: sdk/typescript
         run: npx tsc --noEmit
 
       - name: Build
+        working-directory: sdk/typescript
         run: npm run build
 
       - name: Test
+        working-directory: sdk/typescript
         run: npm test

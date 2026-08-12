@@ -193,7 +193,7 @@ async def run(args: argparse.Namespace) -> int:
     judge_prompt = (ROOT / config["prompts"]["judge"]).read_text(encoding="utf-8")
 
     systems = set(args.systems.split(","))
-    project_id = f"{config.get('haki_project_prefix', 'prj_eval')}_{run_id}"
+    project_id = args.reuse_project or f"{config.get('haki_project_prefix', 'prj_eval')}_{run_id}"
     org_id = config.get("haki_org", "org_eval")
     haki: HakiClient | None = None
     api_key = None
@@ -204,7 +204,14 @@ async def run(args: argparse.Namespace) -> int:
             print(f"API Haki injoignable sur {args.api_url} — lance uvicorn d'abord.")
             return 1
         api_key = await haki.create_project_key(org_id, project_id, label=f"eval {run_id}")
-        print(f"projet eval: {project_id}")
+        if args.reuse_project:
+            print(
+                f"projet eval REUTILISE: {project_id} — ingestion sautee entierement, "
+                "en confiance que ce projet a deja ete peuple par un run precedent sur "
+                "EXACTEMENT le meme sous-ensemble de questions"
+            )
+        else:
+            print(f"projet eval: {project_id}")
 
     records: list[dict] = []
     ingested: set[str] = set()
@@ -233,7 +240,7 @@ async def run(args: argparse.Namespace) -> int:
                 t0 = time.perf_counter()
                 ingest_s = 0.0
                 ingested_now = False
-                if subject not in ingested:
+                if subject not in ingested and not args.reuse_project:
                     events = question_events(question, org_id, project_id, run_id)
                     await haki.capture(api_key, events)
                     await haki.consolidate_until_idle(api_key, project_id)
@@ -347,9 +354,11 @@ async def run(args: argparse.Namespace) -> int:
     print(json.dumps(summary, indent=2, ensure_ascii=False))
     print(f"durée totale: {elapsed / 60:.1f} min")
 
-    if "haki" in systems and not args.keep_data:
+    if "haki" in systems and not args.keep_data and not args.reuse_project:
         deleted = await cleanup_project(project_id)
         print(f"projet {project_id} nettoyé: {deleted}")
+    elif args.reuse_project:
+        print(f"projet reutilise {project_id} laisse intact (jamais nettoye par --reuse-project)")
     return 0
 
 
@@ -362,6 +371,22 @@ def main() -> int:
     parser.add_argument("--api-url", default="http://localhost:8000")
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--keep-data", action="store_true", help="ne pas nettoyer le projet eval")
+    parser.add_argument(
+        "--reuse-project",
+        default=None,
+        help=(
+            "reutilise un projet Haki deja peuple par un run precedent (ingestion "
+            "sautee entierement) au lieu d'un projet fraichement genere -- pour "
+            "retester un parametre de LECTURE seule (ex. context_budget_tokens, "
+            "qui n'intervient qu'a la requete /v1/context) sans repayer "
+            "l'extraction, de loin le plus gros poste de cout sur un dataset ou "
+            "chaque question a son propre historique (LongMemEval). Implique "
+            "--keep-data. Le sous-ensemble de questions DOIT etre exactement le "
+            "meme que celui qui a peuple ce projet -- aucune verification cote "
+            "harnais, un ecart se traduirait par des paquets de contexte vides "
+            "plutot qu'une erreur explicite."
+        ),
+    )
     parser.add_argument(
         "--shard-index", type=int, default=0, help="index de ce shard (0-based), avec --shard-count"
     )

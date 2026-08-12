@@ -289,8 +289,19 @@ async def run(args: argparse.Namespace) -> int:
                     # (documented estimate: history tokens in, ~5% out), paid
                     # once per ingested history, not per question.
                     "extraction_tokens_est": record["history_tokens_est"] if ingested_now else 0,
-                    "cost_usd": cost_usd(ptok + jptok, ctok + jctok, prices)
-                    + (
+                    # Split, not summed: cost_query_usd is paid on EVERY
+                    # question (answer + judge) and is what actually scales
+                    # with traffic; cost_ingest_usd is paid ONCE per history
+                    # (extraction) and amortizes over however many questions
+                    # get asked about that same subject afterwards. Reporting
+                    # only their sum (the old cost_usd) let a single-question-
+                    # per-history benchmark like LongMemEval_S make Haki look
+                    # more expensive than a full-context baseline, when the
+                    # two costs behave completely differently at scale —
+                    # flagged externally (12-13 aout) after the episode-
+                    # budget-reservation chantier flipped this comparison.
+                    "cost_query_usd": cost_usd(ptok + jptok, ctok + jctok, prices),
+                    "cost_ingest_usd": (
                         cost_usd(
                             record["history_tokens_est"],
                             int(record["history_tokens_est"] * 0.05),
@@ -300,6 +311,10 @@ async def run(args: argparse.Namespace) -> int:
                         else 0.0
                     ),
                 }
+                record["systems"]["haki"]["cost_usd"] = (
+                    record["systems"]["haki"]["cost_query_usd"]
+                    + record["systems"]["haki"]["cost_ingest_usd"]
+                )
                 print(
                     f"  haki: {verdict['label']}"
                     f"{' OUTDATED' if verdict['outdated'] else ''} "
@@ -324,6 +339,10 @@ async def run(args: argparse.Namespace) -> int:
                     "truncated": truncated,
                     "context_tokens": ptok,
                     "latency_ms": None,
+                    # No ingestion step for the full-context baseline -- the
+                    # whole cost is per-query, every time.
+                    "cost_query_usd": cost_usd(ptok + jptok, ctok + jctok, prices),
+                    "cost_ingest_usd": 0.0,
                     "cost_usd": cost_usd(ptok + jptok, ctok + jctok, prices),
                 }
                 print(

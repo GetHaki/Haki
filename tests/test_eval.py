@@ -303,6 +303,45 @@ def test_metrics_tokens_latency_cost():
     assert stats["cost_usd"] == pytest.approx(0.03)
 
 
+def test_metrics_cost_split_query_vs_ingest():
+    """cost_ingest_usd (paid once per history) must not be counted as
+    per-query cost -- a single combined cost_usd hides whether Haki is
+    cheaper than a full-context baseline once ingestion amortizes."""
+    records = [
+        {
+            "qid": "q1", "qtype": "single-hop", "abstention_expected": False,
+            "systems": {"haki": {
+                "label": "correct", "outdated": False, "context_tokens": 500,
+                "latency_ms": 50.0, "cost_query_usd": 0.001, "cost_ingest_usd": 0.05,
+            }},
+        },
+        {
+            "qid": "q2", "qtype": "single-hop", "abstention_expected": False,
+            "systems": {"haki": {
+                "label": "correct", "outdated": False, "context_tokens": 500,
+                "latency_ms": 50.0, "cost_query_usd": 0.001, "cost_ingest_usd": 0.0,
+            }},
+        },
+    ]
+    stats = metrics.aggregate(records)["haki"]
+    assert stats["cost_query_usd"] == pytest.approx(0.002)
+    assert stats["cost_ingest_usd"] == pytest.approx(0.05)
+    assert stats["n_ingested"] == 1
+    assert stats["cost_per_query_usd"] == pytest.approx(0.001)
+    assert stats["cost_per_ingest_usd"] == pytest.approx(0.05)
+    assert stats["cost_usd"] == pytest.approx(0.0)  # old field absent on these records
+
+
+def test_metrics_cost_split_falls_back_to_legacy_cost_usd():
+    """Pre-split records (only cost_usd) must still aggregate -- treated as
+    pure query cost, the dominant case for old runs/tests."""
+    records = [_record("q1", "single-hop", "correct", cost=0.03)]
+    stats = metrics.aggregate(records)["haki"]
+    assert stats["cost_query_usd"] == pytest.approx(0.03)
+    assert stats["cost_ingest_usd"] == pytest.approx(0.0)
+    assert stats["cost_per_query_usd"] == pytest.approx(0.03)
+
+
 def test_metrics_two_systems_independent():
     records = [
         {**_record("q1", "single-hop", "correct"), },

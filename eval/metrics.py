@@ -60,6 +60,9 @@ def aggregate_system(records: list[dict], system: str) -> dict:
     context_tokens: list[float] = []
     latencies: list[float] = []
     cost = 0.0
+    cost_query = 0.0
+    cost_ingest = 0.0
+    n_ingested = 0
 
     for record in judged:
         result = record["systems"][system]
@@ -85,6 +88,14 @@ def aggregate_system(records: list[dict], system: str) -> dict:
         if result.get("latency_ms") is not None:
             latencies.append(float(result["latency_ms"]))
         cost += float(result.get("cost_usd", 0.0))
+        # Older records (pre-split) only have cost_usd -- treat it as pure
+        # query cost rather than dropping it, since that's the dominant case
+        # (baseline always, haki whenever this run didn't trigger ingestion).
+        ingest = float(result.get("cost_ingest_usd", 0.0))
+        cost_ingest += ingest
+        cost_query += float(result.get("cost_query_usd", result.get("cost_usd", 0.0) - ingest))
+        if ingest > 0:
+            n_ingested += 1
 
     for bucket in per_type.values():
         bucket["accuracy"] = bucket["correct"] / bucket["n"] if bucket["n"] else None
@@ -103,7 +114,24 @@ def aggregate_system(records: list[dict], system: str) -> dict:
         },
         "context_tokens_mean": (sum(context_tokens) / len(context_tokens)) if context_tokens else None,
         "latency_ms": {"p50": percentile(latencies, 50), "p95": percentile(latencies, 95)},
+        # cost_usd: total spend for this run (kept for backward compat).
+        # cost_query_usd / cost_ingest_usd: same total, split by WHAT it pays
+        # for -- ingestion (extraction, paid once per history) vs query
+        # (answer+judge, paid every question). cost_per_query_usd is the
+        # marginal cost once ingestion is already amortized -- the number
+        # that actually determines whether Haki is cheaper than a
+        # full-context baseline, which a single combined cost_usd hides:
+        # on a benchmark that asks ~1 question per ingested history
+        # (LongMemEval_S), the ingestion cost dominates and Haki can look
+        # more expensive than the baseline even though its per-query cost is
+        # far lower -- flagged externally (12-13 aout) after the episode-
+        # budget-reservation chantier flipped this exact comparison.
         "cost_usd": cost,
+        "cost_query_usd": cost_query,
+        "cost_ingest_usd": cost_ingest,
+        "n_ingested": n_ingested,
+        "cost_per_query_usd": (cost_query / n) if n else None,
+        "cost_per_ingest_usd": (cost_ingest / n_ingested) if n_ingested else None,
     }
 
 

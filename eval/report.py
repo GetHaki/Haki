@@ -69,8 +69,8 @@ def write_reports(
         "",
         "## Résultats",
         "",
-        "| Système | Accuracy | Abstention (n) | Contradiction leakage (n) | Tokens contexte (moy.) | Latence p50 / p95 (ms) | Coût (USD) |",
-        "|---|---|---|---|---|---|---|"
+        "| Système | Accuracy | Abstention (n) | Contradiction leakage (n) | Tokens contexte (moy.) | Latence p50 / p95 (ms) | Coût/requête (USD) | Coût ingestion (USD, n historiques) | Coût total (USD) |",
+        "|---|---|---|---|---|---|---|---|---|"
         ,
     ]
     for system, stats in summary.items():
@@ -83,6 +83,8 @@ def write_reports(
             f"| {_pct(stats.get('contradiction_leakage', {}).get('rate'))} ({stats.get('contradiction_leakage', {}).get('n', 0)}) "
             f"| {_num(stats.get('context_tokens_mean'))} "
             f"| {_num(latency.get('p50'), 1)} / {_num(latency.get('p95'), 1)} "
+            f"| {_num(stats.get('cost_per_query_usd'), 5)} "
+            f"| {_num(stats.get('cost_ingest_usd'), 4)} ({stats.get('n_ingested', 0)}) "
             f"| {_num(stats.get('cost_usd'), 4)} |"
         )
 

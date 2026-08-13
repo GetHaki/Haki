@@ -7,6 +7,7 @@ from app.models.fact import FACT_KINDS, VOLATILITY_CLASSES, Fact, FactStatus
 from app.models.feedback import Feedback
 from app.models.job import Job, JobStatus
 from app.models.organization import Organization
+from app.models.predicate_alias import PredicateAlias
 from app.models.receipt import ForgetReceipt
 from app.models.subject_alias import SubjectAlias, SubjectMergeReceipt
 from app.models.trace import ContextTrace
@@ -26,6 +27,7 @@ __all__ = [
     "Job",
     "JobStatus",
     "Organization",
+    "PredicateAlias",
     "SubjectAlias",
     "SubjectMergeReceipt",
     "VOLATILITY_CLASSES",

@@ -38,11 +38,16 @@ documented (narrow, not exhaustive) scope.
 
 "Same fact" above is resolved by `_resolve_existing_fact`, on the key
 (subject, predicate, identity qualifiers): exact predicate match first,
-then a semantic fallback (cosine distance on the already-computed fact
-embedding) when no exact match exists. An LLM-generated predicate is not a
-reliable join key on natural language on its own — this is the write-time
-adjudication step, decoupled from extraction, that keeps a same-concept
-update from silently coexisting with the fact it was meant to replace.
+then a registered predicate_aliases synonym for this subject (13 aout —
+see PredicateAlias), then a semantic fallback (cosine distance on the
+already-computed fact embedding) only if both miss. An LLM-generated
+predicate is not a reliable join key on natural language on its own — this
+is the write-time adjudication step, decoupled from extraction, that keeps
+a same-concept update from silently coexisting with the fact it was meant
+to replace. Every semantic-fallback match under a different predicate
+string is learned as a new alias, so the same subject's next occurrence of
+that synonym pair resolves deterministically instead of re-rolling the
+embedding-distance dice.
 
 Qualifiers are part of that key, and the guard is hard: different
 qualifiers are never the same fact, however close the embeddings are. The
@@ -79,13 +84,22 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 from sqlalchemy import Text, literal, select
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import metrics
 from app.ledger.core import acquire_subject_write_lock, create_fact, transition_fact_status
 from app.context import episode_text
-from app.models import ConflictSet, ContextTrace, Event, Fact, FactStatus, Job, JobStatus
+from app.models import (
+    ConflictSet,
+    ContextTrace,
+    Event,
+    Fact,
+    FactStatus,
+    Job,
+    JobStatus,
+    PredicateAlias,
+)
 from app.models.event import ORIGIN_TRUST_RANK
 from app.providers import (
     REJECT_REASONS,
@@ -350,26 +364,35 @@ async def _resolve_existing_fact(
     """Find the active fact a candidate should be adjudicated against.
 
     This is the "adjudicate against the existing" step, decoupled from
-    extraction (Control-Plane Placement, arXiv:2606.15903): exact predicate
-    match first (fast path — extraction was lexically consistent, the common
-    case). If none, fall back to a semantic match among the subject's active
-    facts, using the candidate's already-computed embedding — no extra LLM
-    call. This closes the gap where the extractor recognizes an update but
-    mints a slightly different predicate string than the one already on
-    file (e.g. "personal_best_5k" vs "goal_personal_best_time"), which
-    previously left both facts active in parallel with the stale one still
-    served as current.
+    extraction (Control-Plane Placement, arXiv:2606.15903), in the exact
+    order the 11 aout diagnostic specified — "canonical key first, alias
+    table second, semantic fallback last": (1) exact predicate match (fast
+    path — extraction was lexically consistent, the common case); (2) a
+    registered predicate_aliases entry for this exact subject, a
+    deterministic memory of a synonym pair already confirmed once (see
+    PredicateAlias); (3) only if both miss, a semantic match among the
+    subject's active facts on the candidate's already-computed embedding —
+    no extra LLM call. This closes the gap where the extractor recognizes
+    an update but mints a slightly different predicate string than the one
+    already on file (e.g. "personal_best_5k" vs "goal_personal_best_time"),
+    which previously left both facts active in parallel with the stale one
+    still served as current. A successful semantic match (step 3) is
+    recorded as a new alias so the SAME pair resolves deterministically at
+    step 2 next time, instead of re-rolling the embedding-distance dice on
+    every future event for this subject.
 
-    BOTH paths are gated on identity qualifiers, and the gate is hard:
-    different qualifiers are never the same fact, however close the
-    embeddings are. Without it the semantic fallback takes the single
-    nearest active fact on cosine distance alone, which is how the eval run
-    produced conflicts between `lower_quartile` and `upper_quartile`, or
-    between two different book authors — near neighbours in meaning, not
-    the same fact. The exact-predicate path needs it just as much: once
-    qualifiers live in their own field rather than inside the predicate
-    name, "wake up time on weekdays" and "wake up time at the weekend"
-    share a predicate, and matching on the string alone would merge them.
+    ALL THREE paths are gated on identity qualifiers, and the gate is
+    hard: different qualifiers are never the same fact, however close the
+    embeddings are (or however confidently an alias was learned — an alias
+    is a predicate-NAME synonym, not a qualifier override). Without it the
+    semantic fallback takes the single nearest active fact on cosine
+    distance alone, which is how the eval run produced conflicts between
+    `lower_quartile` and `upper_quartile`, or between two different book
+    authors — near neighbours in meaning, not the same fact. The exact and
+    alias paths need it just as much: once qualifiers live in their own
+    field rather than inside the predicate name, "wake up time on
+    weekdays" and "wake up time at the weekend" share a predicate, and
+    matching on the string alone (or an alias of it) would merge them.
     """
     exact = await _active_fact(
         session,
@@ -380,6 +403,26 @@ async def _resolve_existing_fact(
     )
     if exact is not None:
         return exact
+
+    alias = (
+        await session.execute(
+            select(PredicateAlias.canonical_predicate).where(
+                PredicateAlias.project_id == project_id,
+                PredicateAlias.subject_id == subject_id,
+                PredicateAlias.alias_predicate == predicate,
+            )
+        )
+    ).scalar_one_or_none()
+    if alias is not None:
+        aliased = await _active_fact(
+            session,
+            project_id=project_id,
+            subject_id=subject_id,
+            predicate=alias,
+            qualifiers=qualifiers,
+        )
+        if aliased is not None:
+            return aliased
 
     stmt = (
         select(Fact, Fact.embedding.cosine_distance(embedding).label("distance"))
@@ -403,7 +446,26 @@ async def _resolve_existing_fact(
     row = (await session.execute(stmt)).first()
     if row is None or row.distance > SEMANTIC_MATCH_MAX_DISTANCE:
         return None
-    return row[0]
+    matched = row[0]
+    if matched.predicate != predicate:
+        # Learn it: the NEXT event for this subject using this exact
+        # synonym pair resolves deterministically at step 2 instead of
+        # depending on embedding luck again. First discovery wins — never
+        # overwritten by a later, possibly noisier, semantic match.
+        await session.execute(
+            pg_insert(PredicateAlias)
+            .values(
+                project_id=project_id,
+                subject_id=subject_id,
+                alias_predicate=predicate,
+                canonical_predicate=matched.predicate,
+                confidence=1 - row.distance,
+            )
+            .on_conflict_do_nothing(
+                index_elements=["project_id", "subject_id", "alias_predicate"]
+            )
+        )
+    return matched
 
 
 async def _relevant_existing_facts(

@@ -16,6 +16,12 @@ text, simulating what a real embedder would naturally produce for two
 restatements of the same concept. This tests the matching mechanism
 (`_resolve_existing_fact`) directly and deterministically, independent of
 embedding quality.
+
+Also covers the predicate-alias tier (13 aout, 11 aout diagnostic's
+proposed order — "canonical key first, alias table second, semantic
+fallback last"): a successful semantic match is learned as a
+PredicateAlias row, and a pre-registered alias resolves a candidate on its
+own, without needing (or getting) any embedding-distance help.
 """
 
 from sqlalchemy import select
@@ -24,7 +30,7 @@ import uuid
 
 from app.consolidator import _search_text
 from app.db import async_session
-from app.models import ConflictSet, Fact, FactStatus, Job
+from app.models import ConflictSet, Fact, FactStatus, Job, PredicateAlias
 from app.providers.fake import FakeProvider, mock_fact
 from tests.test_consolidator import capture, facts_for, make_memory_event, run_worker
 
@@ -155,6 +161,107 @@ async def test_semantic_predicate_variant_same_value_reinforces_without_new_row(
     async with async_session() as session:
         job = await session.get(Job, uuid.UUID(body["consolidation_job_id"]))
     assert job.payload["result"]["reinforced"] == 1
+
+
+async def test_semantic_match_learns_a_predicate_alias(client):
+    """13 aout chantier: a successful semantic-fallback match under a
+    DIFFERENT predicate string must be recorded as a predicate_aliases row
+    -- turning a repeated embedding-distance guess into a persisted,
+    deterministic fact about identity, exactly the 11 aout diagnostic's
+    proposed second tier ("canonical key first, alias table second,
+    semantic fallback last")."""
+    await capture(
+        client,
+        [make_memory_event([mock_fact("personal_best_5k", {"time": "27:12"})])],
+    )
+    await run_worker()
+    [old_fact] = await facts_for("usr_42", "personal_best_5k")
+    await _collide_embedding(old_fact, "goal_personal_best_time", {"time": "25:50"})
+
+    await capture(
+        client,
+        [
+            make_memory_event(
+                [
+                    mock_fact(
+                        "goal_personal_best_time",
+                        {"time": "25:50"},
+                        action="supersede",
+                        supersedes_predicate="goal_personal_best_time",
+                    )
+                ]
+            )
+        ],
+    )
+    await run_worker()
+
+    async with async_session() as session:
+        aliases = list(
+            (await session.execute(select(PredicateAlias))).scalars().all()
+        )
+    assert len(aliases) == 1
+    alias = aliases[0]
+    assert alias.project_id == "prj_support"
+    assert alias.subject_id == "usr_42"
+    assert alias.alias_predicate == "goal_personal_best_time"
+    assert alias.canonical_predicate == "personal_best_5k"
+    assert alias.confidence is not None and 0.0 < alias.confidence <= 1.0
+
+
+async def test_registered_predicate_alias_resolves_without_embedding_collision(client):
+    """The alias tier must work on its own merits, not as a side effect of
+    embedding luck: a PredicateAlias registered ahead of time resolves a
+    candidate correctly even when its NATURAL (non-colliding) FakeProvider
+    embedding is nowhere near the existing fact -- proving step 2
+    (registered alias) fires before step 3 (semantic fallback) would ever
+    have had a chance to."""
+    await capture(
+        client,
+        [make_memory_event([mock_fact("personal_best_5k", {"time": "27:12"})])],
+    )
+    await run_worker()
+    [old_fact] = await facts_for("usr_42", "personal_best_5k")
+
+    async with async_session() as session:
+        session.add(
+            PredicateAlias(
+                project_id="prj_support",
+                subject_id="usr_42",
+                alias_predicate="goal_time",
+                canonical_predicate="personal_best_5k",
+                confidence=0.95,
+            )
+        )
+        await session.commit()
+
+    # No _collide_embedding call: "goal_time" keeps FakeProvider's natural,
+    # uncorrelated embedding for this search text -- a real embedder-driven
+    # semantic fallback would have no reason to succeed here.
+    await capture(
+        client,
+        [
+            make_memory_event(
+                [
+                    mock_fact(
+                        "goal_time",
+                        {"time": "25:50"},
+                        action="supersede",
+                        supersedes_predicate="goal_time",
+                    )
+                ]
+            )
+        ],
+    )
+    await run_worker()
+
+    all_facts = await facts_for("usr_42")
+    assert len(all_facts) == 2
+    old = next(f for f in all_facts if f.id == old_fact.id)
+    new = next(f for f in all_facts if f.id != old_fact.id)
+    assert old.status is FactStatus.superseded
+    assert new.status is FactStatus.active
+    assert new.supersedes_id == old.id
+    assert new.predicate == "goal_time"
 
 
 async def test_unrelated_facts_are_not_falsely_merged(client):

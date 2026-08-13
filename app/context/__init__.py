@@ -254,7 +254,7 @@ async def _expand_via_entities(
                 (Fact.valid_to.is_(None)) | (Fact.valid_to > now),
                 Fact.search_vector.op("@@")(entity_query),
             )
-            .order_by(func.ts_rank_cd(Fact.search_vector, entity_query).desc())
+            .order_by(func.ts_rank_cd(Fact.search_vector, entity_query).desc(), Fact.id)
             .limit(MULTI_HOP_MAX_PER_ENTITY)
         )
         for row in (await session.execute(stmt)).all():
@@ -415,17 +415,26 @@ async def build_context(
     # Phase 1 — candidate generation with the indexes (hnsw + GIN). Without
     # this, phase 2 would score every active fact of the scope (~200 ms at
     # 10k facts in the sprint-3 benchmark).
+    #
+    # Every ORDER BY below carries `Fact.id` as a secondary key (see the
+    # same reasoning at the phase-2 query): ties on the primary key are a
+    # real, common case here, not a theoretical one -- with no secondary
+    # key, Postgres is free to return a tied group in whatever order its
+    # query plan happens to produce, which can and does shift between
+    # otherwise-identical calls (confirmed: scripts/
+    # check_retrieval_discrimination.py, run twice against the same
+    # project/subject/query/budget, returned two DIFFERENT fact sets).
     vector_top = (
         select(Fact.id)
         .where(*scope_filters)
-        .order_by(Fact.embedding.cosine_distance(query_embedding))
+        .order_by(Fact.embedding.cosine_distance(query_embedding), Fact.id)
         .limit(RETRIEVAL_TOP_K)
         .cte("vector_top")
     )
     fts_top = (
         select(Fact.id)
         .where(*scope_filters, Fact.search_vector.op("@@")(ts_query))
-        .order_by(func.ts_rank_cd(Fact.search_vector, ts_query).desc())
+        .order_by(func.ts_rank_cd(Fact.search_vector, ts_query).desc(), Fact.id)
         .limit(RETRIEVAL_TOP_K)
         .cte("fts_top")
     )
@@ -436,6 +445,25 @@ async def build_context(
     # of every returned row costs more than the scoring itself (measured in
     # the sprint-3 benchmark). The cap keeps the work flat no matter how many
     # facts the scope holds.
+    #
+    # `Fact.id` as a secondary sort key (13 aout, "Bug 2" diagnostic, 11
+    # aout): a fact's recency score depends only on coalesce(valid_from,
+    # recorded_from) -- facts written in the same consolidation batch
+    # routinely share that value down to the minute. For an off-topic
+    # query (similarity and full-text both exactly 0), recency is the
+    # ENTIRE score, so every fact in such a batch ties EXACTLY, not just
+    # approximately. `score.desc()` alone leaves that tie's order to
+    # Postgres's query plan, which is not guaranteed stable between two
+    # otherwise-identical calls -- confirmed empirically (see
+    # scripts/check_retrieval_discrimination.py): the same project,
+    # subject, query and budget returned two different fact sets on
+    # consecutive runs, purely from tie order, not from any real
+    # relevance signal. This was the ACTUAL mechanism behind the
+    # originally-reported "Bug 2" symptom (five different questions
+    # returning an identical packet) once budget headroom alone was ruled
+    # out on a high-volume subject (see the same script): a low-signal
+    # query hits a wide tie, and without a stable tiebreaker, "which facts
+    # win" is not reproducible even for the SAME query run twice.
     stmt = (
         select(
             Fact.id,
@@ -454,7 +482,7 @@ async def build_context(
             score.label("score"),
         )
         .where(Fact.id.in_(select(candidates.c.id)))
-        .order_by(score.desc())
+        .order_by(score.desc(), Fact.id)
         .limit(CANDIDATE_LIMIT)
     )
     retrieval_start = time.perf_counter()
@@ -558,7 +586,7 @@ async def build_context(
                     # quarantine path; the raw payload must not bypass it.
                     Event.origin_trust != "untrusted",
                 )
-                .order_by(episode_score.desc())
+                .order_by(episode_score.desc(), Event.id)
                 .limit(EPISODE_TOP_K)
             )
         )

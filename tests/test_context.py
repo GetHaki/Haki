@@ -4,10 +4,13 @@ token budget, scope isolation, trace inspection with reason codes.
 """
 
 import pytest
+from sqlalchemy import select
 
 from app.config import settings
 from app.consolidator import _search_text
 from app.context import episode_text
+from app.db import async_session
+from app.models import Fact
 from app.providers.fake import mock_fact
 from tests.test_consolidator import capture, make_memory_event, run_worker
 
@@ -63,6 +66,78 @@ async def test_budget_packs_best_scored_facts_and_traces_over_budget(client):
     assert any(d["reason_code"] == "over_budget" for d in decisions)
     included = [d for d in decisions if d["action"] == "included"]
     assert len(included) == len(body["packet"]["facts"])
+
+
+async def test_tied_score_facts_pack_deterministically_across_repeated_calls(client):
+    """13 aout, "Bug 2" root cause (11 aout: five different questions
+    returned an identical packet -- budget headroom explained SOME cases,
+    but not a HIGH-volume subject where discrimination should matter, see
+    scripts/check_retrieval_discrimination.py): facts written in the same
+    batch share coalesce(valid_from, recorded_from) down to the minute, so
+    once similarity is ALSO tied (a real case: two facts sharing an
+    embedding, e.g. from the semantic-fallback/alias mechanism, or simply
+    two facts an embedder happens to score identically for a given query)
+    their scores tie EXACTLY on every axis -- and without a secondary sort
+    key, which one wins a tight budget cutoff is left to Postgres's query
+    plan, not to anything meaningful, and is NOT guaranteed to repeat
+    across otherwise-identical calls.
+
+    FakeEmbedder does not naturally tie different predicates' similarity
+    (verified: topic_a/b/c score 0.068/0.251/0.055 for query "topic", not
+    tied) -- topic_b and topic_c are forced to share topic_b's embedding
+    here, the same technique tests/test_semantic_supersession.py uses to
+    simulate what a real embedder can and does produce naturally."""
+    big = {"detail": "x" * 200}
+    await capture(
+        client,
+        [
+            make_memory_event(
+                [
+                    mock_fact("topic_a", big),
+                    mock_fact("topic_b", big),
+                    mock_fact("topic_c", big),
+                ]
+            )
+        ],
+    )
+    await run_worker()
+
+    async with async_session() as session:
+        facts = (
+            (
+                await session.execute(
+                    select(Fact).where(Fact.project_id == "prj_support", Fact.subject_id == "usr_42")
+                )
+            )
+            .scalars()
+            .all()
+        )
+        by_predicate = {f.predicate: f for f in facts}
+        tied_embedding = by_predicate["topic_b"].embedding
+        by_predicate["topic_c"].embedding = tied_embedding
+        await session.commit()
+
+    # topic_a keeps its own (higher) natural score and is always included;
+    # budget fits exactly topic_a + one of the tied pair {topic_b, topic_c}
+    # (~55 tokens each, 3x > 110 >= 2x) -- which ONE of the tied pair wins
+    # is the actual thing under test.
+    ids_by_call = []
+    for _ in range(5):
+        response = await client.post(
+            "/v1/context",
+            json={
+                "project_id": "prj_support",
+                "subject_id": "usr_42",
+                "query": "topic",
+                "budget_tokens": 110,
+            },
+        )
+        assert response.status_code == 200
+        packet_facts = response.json()["packet"]["facts"]
+        assert len(packet_facts) == 2
+        ids_by_call.append(tuple(sorted(f["id"] for f in packet_facts)))
+
+    assert len(set(ids_by_call)) == 1, f"non-deterministic packet across repeated calls: {ids_by_call}"
 
 
 async def test_unified_pool_lets_a_highly_relevant_episode_outrank_low_relevance_facts(client):

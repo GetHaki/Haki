@@ -56,6 +56,11 @@ export interface PacketFact {
   origin_trust?: "trusted" | "semi_trusted" | "third_party" | "untrusted";
   /** Who actually said it, when a third party did. */
   attributed_to?: string | null;
+  /** Open conflicts (13 aout): true when served alongside a genuinely
+   * conflicting sibling (same `conflict_id`) instead of being hidden.
+   * Absent on older servers. */
+  contested?: boolean;
+  conflict_id?: string | null;
 }
 
 /** Source event excerpt served in the packet (episodic memory). */

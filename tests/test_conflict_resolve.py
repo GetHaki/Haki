@@ -40,12 +40,15 @@ async def test_resolve_keeps_one_fact_supersedes_the_other_and_closes_set(client
     kept = next(f for f in facts if f.value == {"lang": "en"})
     loser = next(f for f in facts if f.value == {"lang": "fr"})
 
-    # While open, context serves nothing (conflict_open).
+    # While open, context serves BOTH contested facts (13 aout, "stop
+    # hiding real conflicts") rather than nothing.
     response = await client.post(
         "/v1/context",
         json={"project_id": "prj_support", "subject_id": "usr_42", "query": "language"},
     )
-    assert response.json()["packet"]["facts"] == []
+    served = response.json()["packet"]["facts"]
+    assert {f["value"]["lang"] for f in served} == {"fr", "en"}
+    assert all(f["contested"] for f in served)
 
     response = await client.post(
         f"/v1/conflicts/{conflict.id}/resolve",
@@ -67,6 +70,17 @@ async def test_resolve_keeps_one_fact_supersedes_the_other_and_closes_set(client
     assert loser_row.supersedes_id == kept.id
     assert conflict_row.status == "resolved"
     assert conflict_row.resolved_at is not None
+
+    # Resolved: context now serves ONLY the kept fact, no longer contested
+    # — matches resolve_conflict's own docstring contract.
+    response = await client.post(
+        "/v1/context",
+        json={"project_id": "prj_support", "subject_id": "usr_42", "query": "language"},
+    )
+    served = response.json()["packet"]["facts"]
+    assert [f["value"] for f in served] == [{"lang": "en"}]
+    assert served[0]["contested"] is False
+    assert served[0]["conflict_id"] is None
 
     # After resolution, context serves the kept fact — and only it.
     response = await client.post(

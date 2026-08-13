@@ -64,18 +64,46 @@ export function buildPromptContext(packet: ContextPacket | null | undefined): st
         "Cite the source when you rely on a fact. Facts already reflect the " +
         "CURRENT, resolved truth — an outdated value is removed the moment a " +
         "newer one is confirmed, so you never need to compare dates between " +
-        "facts yourself; do not second-guess a fact's value.",
+        "facts yourself; do not second-guess a fact's value. EXCEPTION: a fact " +
+        "marked CONTESTED below is an unresolved disagreement — for those, and " +
+        "only those, compare 'valid from' dates yourself and treat the most " +
+        "recent one as current.",
+    );
+  }
+  // A minimal terse rule under-performs a spelled-out chain of steps for
+  // this exact task (Bug 3, 13 aout: gpt-4o-mini went 2/3 with a one-line
+  // rule, 3/3 with these same three steps as a worked chain-of-note) --
+  // only paid for the once-per-call header cost when a conflict is
+  // actually being served, not on every ordinary packet.
+  if (facts.some((f) => f.contested)) {
+    lines.push(
+      "One or more facts above are marked CONTESTED — an unresolved " +
+        "disagreement between two dated values for the same real-world " +
+        "fact, both shown so you are not left with zero information " +
+        "instead of a wrong one. Resolve each contested group yourself: " +
+        "1) find every CONTESTED fact that shares the same conflict id; " +
+        "2) compare their 'valid from' dates; 3) treat ONLY the value " +
+        "with the LATEST date as current, and discard the earlier one " +
+        "entirely — do not mention it, do not average it in, do not " +
+        "present both as still true.",
     );
   }
   for (const fact of facts) {
     const value = JSON.stringify(fact.value);
     const validFrom = fact.valid_from ?? "unknown date";
     const sources = (fact.source_event_ids ?? []).join(",") || "no-source";
-    const attribution = fact.attributed_to
+    let marker = fact.attributed_to
       ? ` [reported by a third party (${fact.attributed_to}) — not a statement by the subject]`
       : "";
+    if (fact.contested) {
+      marker +=
+        ` — CONTESTED (conflict ${fact.conflict_id}): an unresolved conflicting ` +
+        "value for this same fact is also shown below/above with the same " +
+        "conflict id; use the one with the most recent 'valid from' date as " +
+        "current, do not present both as equally true";
+    }
     lines.push(
-      `- ${fact.predicate}: ${value} (valid from ${validFrom}; sources: ${sources})${attribution}`,
+      `- ${fact.predicate}: ${value} (valid from ${validFrom}; sources: ${sources})${marker}`,
     );
   }
   if (episodes.length > 0) {

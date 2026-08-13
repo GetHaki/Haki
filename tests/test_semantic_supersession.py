@@ -98,8 +98,8 @@ async def test_semantic_match_opens_conflict_instead_of_silent_duplicate(client)
     (fails to recognize the update) under a different predicate with a
     different value. Before the fix, both stayed active in parallel and the
     stale count kept winning. The fix must at minimum route this into an
-    open conflict (both hidden) instead of silently serving the old value
-    as current."""
+    open conflict — served contested (13 aout, "stop hiding real
+    conflicts"), never silently as the old value alone."""
     await capture(
         client, [make_memory_event([mock_fact("bike_count", {"count": 3})])]
     )
@@ -120,8 +120,8 @@ async def test_semantic_match_opens_conflict_instead_of_silent_duplicate(client)
     all_facts = await facts_for("usr_42")
     assert len(all_facts) == 2
     # The stale fact is NOT left uniquely active: it is now a member of the
-    # open conflict, so it is never served — this is the core fix, whether
-    # or not the new candidate reached `active` status.
+    # open conflict, so it is never served ALONE — this is the core fix,
+    # whether or not the new candidate reached `active` status.
     assert {f.id for f in all_facts} == set(conflicts[0].fact_ids)
 
     response = await client.post(
@@ -129,7 +129,9 @@ async def test_semantic_match_opens_conflict_instead_of_silent_duplicate(client)
         json={"project_id": "prj_support", "subject_id": "usr_42", "query": "how many bikes"},
     )
     body = response.json()
-    assert body["packet"]["facts"] == []
+    served = body["packet"]["facts"]
+    assert {f["value"]["count"] for f in served} == {3, 4}
+    assert all(f["contested"] for f in served)
     assert any("open_conflict" in w for w in body["packet"]["warnings"])
 
 

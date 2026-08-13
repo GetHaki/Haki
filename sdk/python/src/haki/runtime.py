@@ -66,7 +66,27 @@ def build_prompt_context(packet: dict[str, Any]) -> str:
             "Cite the source when you rely on a fact. Facts already reflect the "
             "CURRENT, resolved truth — an outdated value is removed the moment a "
             "newer one is confirmed, so you never need to compare dates between "
-            "facts yourself; do not second-guess a fact's value.",
+            "facts yourself; do not second-guess a fact's value. EXCEPTION: a fact "
+            "marked CONTESTED below is an unresolved disagreement — for those, and "
+            "only those, compare 'valid from' dates yourself and treat the most "
+            "recent one as current.",
+        )
+    # A minimal terse rule under-performs a spelled-out chain of steps for
+    # this exact task (Bug 3, 13 aout: gpt-4o-mini went 2/3 with a one-line
+    # rule, 3/3 with these same three steps as a worked chain-of-note) --
+    # only paid for the once-per-call header cost when a conflict is
+    # actually being served, not on every ordinary packet.
+    if any(f.get("contested") for f in facts):
+        lines.append(
+            "One or more facts above are marked CONTESTED — an unresolved "
+            "disagreement between two dated values for the same real-world "
+            "fact, both shown so you are not left with zero information "
+            "instead of a wrong one. Resolve each contested group yourself: "
+            "1) find every CONTESTED fact that shares the same conflict id; "
+            "2) compare their 'valid from' dates; 3) treat ONLY the value "
+            "with the LATEST date as current, and discard the earlier one "
+            "entirely — do not mention it, do not average it in, do not "
+            "present both as still true."
         )
     for fact in facts:
         value = fact.get("value")
@@ -83,6 +103,14 @@ def build_prompt_context(packet: dict[str, Any]) -> str:
             marker += (
                 f" [reported by a third party ({fact['attributed_to']}) — "
                 "not a statement by the subject]"
+            )
+        if fact.get("contested"):
+            marker += (
+                " — CONTESTED (conflict "
+                f"{fact.get('conflict_id')}): an unresolved conflicting value for "
+                "this same fact is also shown below/above with the same conflict "
+                "id; use the one with the most recent 'valid from' date as current, "
+                "do not present both as equally true"
             )
         lines.append(
             f"- {fact.get('predicate')}: {value} "

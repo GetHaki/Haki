@@ -176,6 +176,59 @@ test("buildPromptContext: facts outrank episodes on conflict (Bug 3, 13 aout)", 
   assert.ok(block.includes("CURRENT, resolved truth"));
 });
 
+test("buildPromptContext: contested facts are marked, with the tie-break exception (13 aout)", () => {
+  // "Stop hiding real conflicts": a genuine two-sided disagreement is now
+  // served (app.context), both facts sharing a conflict_id, instead of an
+  // empty packet. Parity with the Python SDK's equivalent test.
+  const packet = {
+    facts: [
+      {
+        id: "f1",
+        predicate: "language",
+        value: { lang: "fr" },
+        valid_from: "2026-07-28T10:00:00+00:00",
+        source_event_ids: ["evt-1"],
+        contested: true,
+        conflict_id: "c1",
+      },
+      {
+        id: "f2",
+        predicate: "language",
+        value: { lang: "en" },
+        valid_from: "2026-07-29T10:00:00+00:00",
+        source_event_ids: ["evt-2"],
+        contested: true,
+        conflict_id: "c1",
+      },
+    ],
+    warnings: ["open_conflict: 2 fact(s) served with an unresolved conflicting value"],
+  };
+  const block = buildPromptContext(packet);
+  // Header exception sentence (1) + dedicated chain-of-note paragraph
+  // (2, only emitted when a fact is actually contested) + once per
+  // contested fact (2) -- five total.
+  assert.equal((block.match(/CONTESTED/g) ?? []).length, 5);
+  assert.ok(block.includes("find every CONTESTED fact that shares the same conflict id"));
+  assert.ok(block.includes("conflict c1"));
+  assert.ok(block.includes("compare 'valid from' dates yourself"));
+  // An ordinary (non-contested) fact never gets the per-fact marker (the
+  // header sentence always explains the exception, so "CONTESTED" alone
+  // is not a useful signal here -- the marker phrase is).
+  const ordinary = buildPromptContext({
+    facts: [
+      {
+        id: "f3",
+        predicate: "plan",
+        value: { tier: "pro" },
+        valid_from: "2026-07-28T10:00:00+00:00",
+        source_event_ids: ["evt-3"],
+      },
+    ],
+    warnings: [],
+  });
+  assert.ok(!ordinary.includes("— CONTESTED (conflict"));
+});
+
 test("no API key -> HakiApiError 401 unauthorized", async () => {
   const client = new HakiClient({ baseUrl: API_URL });
   await assert.rejects(

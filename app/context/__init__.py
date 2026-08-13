@@ -4,8 +4,22 @@ Hybrid retrieval over the facts of one exact scope, then assembly under a
 token budget, with a persisted decision trace.
 
 Hard filters BEFORE scoring: status = active, exact (project_id, subject_id)
-scope, valid_to IS NULL OR valid_to > now(). Facts listed in an OPEN conflict
-set are never served: they are blocked with reason_code conflict_open.
+scope, valid_to IS NULL OR valid_to > now().
+
+Open conflicts (13 aout, "stop hiding real conflicts"): a genuine two-sided
+disagreement (an open ConflictSet with 2 members — the cap, see
+CONFLICT_SET_MAX_MEMBERS) is now SERVED, both facts together, each marked
+`contested`/`conflict_id` in the packet, rather than hidden. This relies on
+the temporal tie-break fix (Bug 3, same day): once the answer prompt and
+`build_prompt_context` both reliably resolve two dated conflicting values by
+picking the most recent, showing both is strictly more informative than an
+empty packet — the oracle@900 test that justified hiding them (3/3 failures
+picking between two dated values with no working tie-break) no longer
+applies. A single-member open set — a held/quarantined candidate (M8
+untrusted origin, or the 3rd+ value once a pair is already capped, see
+CONFLICT_SET_MAX_MEMBERS) — is NOT a disagreement to show, it is a
+not-yet-trusted or not-yet-a-real-conflict value: still blocked outright,
+reason_code conflict_open, exactly as before.
 Post-retrieval, a volatility filter (M2) excludes a volatile/ephemeral fact
 past its freshness horizon from "current" (reason_code volatility_expired);
 a slow fact past its horizon is still served, flagged "unconfirmed" — see
@@ -77,6 +91,14 @@ W_SIMILARITY = 0.6
 W_FULLTEXT = 0.25
 W_RECENCY = 0.15
 RECENCY_TAU_SECONDS = 30 * 86400  # exponential decay time constant: 30 days
+
+# An open ConflictSet with this many members or more is a genuine two-sided
+# disagreement, not a held/quarantined single candidate — see the "Open
+# conflicts" paragraph above. Mirrors app.consolidator.CONFLICT_SET_MAX_
+# MEMBERS (also 2, the cap); not imported from there directly, since
+# app.consolidator already imports FROM this module (episode_text) and a
+# reverse import would cycle.
+CONTESTED_CONFLICT_MIN_MEMBERS = 2
 
 # Max rows hydrated/packed per context call. With the default 900-token
 # budget and facts as small as ~5 estimated tokens, ~180 facts can fit;
@@ -297,7 +319,9 @@ def _fact_freshness(row: Any, now: datetime) -> str:
     return "unconfirmed" if row.volatility == "slow" else "expired"
 
 
-def _packet_fact(row: Any, freshness: str = "current") -> dict[str, Any]:
+def _packet_fact(
+    row: Any, freshness: str = "current", *, conflict_id: str | None = None
+) -> dict[str, Any]:
     reference = row.last_reinforced_at or row.valid_from or row.recorded_from
     return {
         "id": str(row.id),
@@ -316,21 +340,24 @@ def _packet_fact(row: Any, freshness: str = "current") -> dict[str, Any]:
         # and who actually said it when a third party did.
         "origin_trust": row.origin_trust or "trusted",
         "attributed_to": (row.qualifiers or {}).get("attributed_to"),
+        # Open conflicts (13 aout): set together with its sibling(s) from the
+        # same open ConflictSet when this fact is one half of a genuine
+        # two-sided disagreement being served rather than hidden — see
+        # CONTESTED_CONFLICT_MIN_MEMBERS. None for an ordinary fact.
+        "contested": conflict_id is not None,
+        "conflict_id": conflict_id,
     }
 
 
-async def _open_conflict_fact_ids(
+async def _open_conflict_sets(
     session: AsyncSession, *, project_id: str, subject_id: str
-) -> set[uuid.UUID]:
+) -> list[ConflictSet]:
     stmt = select(ConflictSet).where(
         ConflictSet.project_id == project_id,
         ConflictSet.subject_id == subject_id,
         ConflictSet.status == "open",
     )
-    ids: set[uuid.UUID] = set()
-    for conflict in (await session.execute(stmt)).scalars().all():
-        ids.update(conflict.fact_ids)
-    return ids
+    return list((await session.execute(stmt)).scalars().all())
 
 
 def failed_packet(reasons: list[str]) -> dict[str, Any]:
@@ -489,16 +516,48 @@ async def build_context(
     rows = (await session.execute(stmt)).all()
     stage_timings["retrieval"] = round((time.perf_counter() - retrieval_start) * 1000)
 
-    blocked_ids = await _open_conflict_fact_ids(
+    # Split open conflicts (13 aout): a genuine 2-member disagreement is
+    # served, contested, sibling alongside sibling; a single-member set (a
+    # held/quarantined candidate) stays fully blocked — see
+    # CONTESTED_CONFLICT_MIN_MEMBERS and the module docstring.
+    open_conflicts = await _open_conflict_sets(
         session, project_id=project_id, subject_id=subject_id
     )
+    quarantined_ids: set[uuid.UUID] = set()
+    contested_conflict_by_fact: dict[uuid.UUID, ConflictSet] = {}
+    for conflict in open_conflicts:
+        if len(conflict.fact_ids) >= CONTESTED_CONFLICT_MIN_MEMBERS:
+            for fid in conflict.fact_ids:
+                contested_conflict_by_fact[fid] = conflict
+        else:
+            quarantined_ids.update(conflict.fact_ids)
+
+    # Every member of a contested set, fetched once regardless of status —
+    # the losing side of a genuine disagreement stays `candidate` (never
+    # scored by the phase-2 query above, which filters status == active)
+    # and needs to be hydrated directly so it can be packed alongside its
+    # active sibling.
+    contested_rows_by_id: dict[uuid.UUID, Fact] = {}
+    if contested_conflict_by_fact:
+        contested_members = (
+            (
+                await session.execute(
+                    select(Fact).where(
+                        Fact.id.in_(contested_conflict_by_fact.keys())
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        contested_rows_by_id = {f.id: f for f in contested_members}
 
     now_dt = datetime.now(timezone.utc)
     decisions: list[dict[str, Any]] = []
     eligible: list[Any] = []
     freshness_by_id: dict[uuid.UUID, str] = {}
     for row in rows:
-        if row.id in blocked_ids:
+        if row.id in quarantined_ids:
             decisions.append(
                 {
                     "fact_id": str(row.id),
@@ -520,14 +579,17 @@ async def build_context(
         freshness_by_id[row.id] = freshness
         eligible.append(row)
 
-    # Candidate facts waiting in an open conflict set are blocked too (they
-    # are not active, so they never entered the scored pool).
-    if blocked_ids:
-        candidates = (
+    # A held/quarantined candidate is blocked too (it is not active, so it
+    # never entered the scored `rows` above at all) — traced regardless of
+    # whether it would otherwise have matched this query, same as before
+    # 13 aout. Only single-member sets: a contested pair's candidate side
+    # is handled separately, packed alongside its active sibling below.
+    if quarantined_ids:
+        quarantined_candidates = (
             (
                 await session.execute(
                     select(Fact).where(
-                        Fact.id.in_(blocked_ids),
+                        Fact.id.in_(quarantined_ids),
                         Fact.status == FactStatus.candidate,
                     )
                 )
@@ -535,7 +597,7 @@ async def build_context(
             .scalars()
             .all()
         )
-        for fact in candidates:
+        for fact in quarantined_candidates:
             decisions.append(
                 {
                     "fact_id": str(fact.id),
@@ -632,6 +694,7 @@ async def build_context(
 
     packet_facts: list[dict[str, Any]] = []
     packet_episodes: list[dict[str, Any]] = []
+    packed_fact_ids: set[uuid.UUID] = set()
     token_count = 0
     for _score, kind, row in pool:
         if kind == "fact":
@@ -651,10 +714,67 @@ async def build_context(
             continue
         token_count += cost
         if kind == "fact":
-            packet_facts.append(_packet_fact(row, freshness_by_id.get(row.id, "current")))
-            decisions.append(
-                {"fact_id": str(row.id), "action": "included", "reason_code": "top_score"}
+            conflict = contested_conflict_by_fact.get(row.id)
+            packet_facts.append(
+                _packet_fact(
+                    row,
+                    freshness_by_id.get(row.id, "current"),
+                    conflict_id=str(conflict.id) if conflict else None,
+                )
             )
+            packed_fact_ids.add(row.id)
+            decisions.append(
+                {
+                    "fact_id": str(row.id),
+                    "action": "included",
+                    "reason_code": "conflict_disputed" if conflict else "top_score",
+                }
+            )
+            if conflict is not None:
+                # Serve the sibling(s) of this genuine disagreement right
+                # alongside it (13 aout): the losing side never entered the
+                # scored pool on its own (still `candidate`, filtered out of
+                # phase 2 above) — without this, the pool would only ever
+                # surface the winning/active half, defeating the point of
+                # showing the conflict instead of hiding it.
+                for sibling_id in conflict.fact_ids:
+                    if sibling_id == row.id or sibling_id in packed_fact_ids:
+                        continue
+                    sibling = contested_rows_by_id.get(sibling_id)
+                    if sibling is None:
+                        continue
+                    sibling_freshness = _fact_freshness(sibling, now_dt)
+                    if sibling_freshness == "expired":
+                        decisions.append(
+                            {
+                                "fact_id": str(sibling_id),
+                                "action": "excluded",
+                                "reason_code": "volatility_expired",
+                            }
+                        )
+                        continue
+                    sibling_cost = estimate_tokens(_render(sibling.predicate, sibling.value))
+                    if token_count + sibling_cost > budget_tokens:
+                        decisions.append(
+                            {
+                                "fact_id": str(sibling_id),
+                                "action": "excluded",
+                                "reason_code": "over_budget",
+                            }
+                        )
+                        continue
+                    token_count += sibling_cost
+                    packet_facts.append(
+                        _packet_fact(sibling, sibling_freshness, conflict_id=str(conflict.id))
+                    )
+                    packed_fact_ids.add(sibling_id)
+                    decisions.append(
+                        {
+                            "fact_id": str(sibling_id),
+                            "action": "included",
+                            "reason_code": "conflict_disputed",
+                        }
+                    )
         else:
             packet_episodes.append(
                 {
@@ -688,7 +808,9 @@ async def build_context(
             subject_id=subject_id,
             seed_texts=seed_texts,
             query_words=query_words,
-            exclude_ids=included_fact_ids | blocked_ids,
+            exclude_ids=included_fact_ids
+            | quarantined_ids
+            | set(contested_conflict_by_fact.keys()),
             now=now,
         )
         stage_timings["multi_hop_expansion"] = round(
@@ -756,6 +878,17 @@ async def build_context(
     if n_blocked:
         warnings.append(
             f"open_conflict: {n_blocked} fact(s) hidden pending conflict resolution"
+        )
+    n_disputed = sum(
+        1
+        for d in decisions
+        if d["reason_code"] == "conflict_disputed" and d["action"] == "included"
+    )
+    if n_disputed:
+        warnings.append(
+            f"open_conflict: {n_disputed} fact(s) served with an unresolved "
+            "conflicting value alongside them — apply the most recent "
+            "'valid from' date to determine which is current"
         )
     n_expired = sum(1 for d in decisions if d["reason_code"] == "volatility_expired")
     if n_expired:

@@ -422,8 +422,13 @@ async def test_capping_is_counted_separately_from_ordinary_conflicts(client):
 
 async def test_a_held_third_value_is_still_kept_out_of_the_packet(client):
     """Held apart must not mean quietly dropped OR quietly served: the
-    third value is a real row in an open conflict, and open-conflict facts
-    are never served (context reason_code 'conflict_open')."""
+    third value is a real row in its OWN single-member open conflict (a
+    held/quarantined candidate, not a two-sided disagreement), and that
+    stays hard-blocked (context reason_code 'conflict_open') even after
+    13 aout's "stop hiding real conflicts" change — only a genuine 2-member
+    conflict is now served, contested. The original pair (Dakar vs Abidjan)
+    IS one, so it's served, both sides marked contested; Lome never joined
+    a pair (capped), so it stays hidden."""
     subject = "usr_conflict_cap_3"
     await _assert_value(client, subject, {"city": "Dakar"}, "2026-07-28T10:00:00Z")
     await _assert_value(client, subject, {"city": "Abidjan"}, "2026-07-28T11:00:00Z")
@@ -445,4 +450,7 @@ async def test_a_held_third_value_is_still_kept_out_of_the_packet(client):
         },
     )
     assert response.status_code == 200
-    assert response.json()["packet"]["facts"] == []
+    served = response.json()["packet"]["facts"]
+    assert {f["value"]["city"] for f in served} == {"Dakar", "Abidjan"}
+    assert all(f["contested"] for f in served)
+    assert "Lome" not in {f["value"]["city"] for f in served}

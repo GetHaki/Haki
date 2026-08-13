@@ -238,7 +238,15 @@ async def test_supersede_with_partial_value_keeps_untouched_fields(client):
     assert active.value == {"target": "adoption agencies", "status": "completed"}
 
 
-async def test_conflicting_create_opens_conflict_set_and_hides_both_facts(client):
+async def test_conflicting_create_opens_conflict_set_and_serves_both_facts_contested(client):
+    """13 aout, "stop hiding real conflicts": a genuine 2-member open
+    conflict is now SERVED, both facts marked `contested` with a shared
+    `conflict_id`, instead of hidden — the temporal tie-break fix (Bug 3,
+    same day) means the LLM can now be trusted to resolve two dated values
+    itself, so an empty packet is strictly less informative than showing
+    both. A single-member (held/quarantined) set stays fully hidden — see
+    tests/test_fact_identity_qualifiers.py::test_a_held_third_value_is_still_kept_out_of_the_packet.
+    """
     await capture(
         client, [make_memory_event([mock_fact("language", {"lang": "fr"})])]
     )
@@ -268,13 +276,18 @@ async def test_conflicting_create_opens_conflict_set_and_hides_both_facts(client
     assert response.status_code == 200
     assert len(response.json()["conflicts"]) == 1
 
-    # Context excludes BOTH facts with reason_code conflict_open in the trace.
+    # Context serves BOTH facts, each marked contested with the same
+    # conflict_id — not hidden.
     response = await client.post(
         "/v1/context",
         json={"project_id": "prj_support", "subject_id": "usr_42", "query": "language"},
     )
     body = response.json()
-    assert body["packet"]["facts"] == []
+    served = body["packet"]["facts"]
+    assert {f["value"]["lang"] for f in served} == {"fr", "en"}
+    assert all(f["contested"] for f in served)
+    assert len({f["conflict_id"] for f in served}) == 1
+    assert served[0]["conflict_id"] == str(conflict.id)
     assert any("open_conflict" in w for w in body["packet"]["warnings"])
 
     trace = await client.get(
@@ -282,11 +295,13 @@ async def test_conflicting_create_opens_conflict_set_and_hides_both_facts(client
         params={"project_id": "prj_support", "subject_id": "usr_42"},
     )
     decisions = trace.json()["decisions"]
-    # Fact decisions: both blocked by the open conflict. (The trace may also
-    # carry episode decisions — the captured events, sprint 10.)
+    # Fact decisions: both included, both flagged as the disputed pair.
+    # (The trace may also carry episode decisions — the captured events,
+    # sprint 10.)
     fact_decisions = [d for d in decisions if d.get("fact_id")]
     assert len(fact_decisions) == 2
-    assert all(d["reason_code"] == "conflict_open" for d in fact_decisions)
+    assert all(d["action"] == "included" for d in fact_decisions)
+    assert all(d["reason_code"] == "conflict_disputed" for d in fact_decisions)
 
 
 async def test_second_event_in_same_job_sees_first_events_new_fact_as_existing(client):

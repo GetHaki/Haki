@@ -126,6 +126,66 @@ def test_build_prompt_context_states_facts_outrank_episodes_on_conflict():
     assert "CURRENT, resolved truth" in block
 
 
+def test_build_prompt_context_marks_contested_facts_and_their_tie_break():
+    """13 aout, "stop hiding real conflicts": a genuine two-sided
+    disagreement is now served (app.context), both facts sharing a
+    conflict_id, instead of an empty packet. The rendered prompt must
+    flag each side CONTESTED (not silently presented as equally certain
+    like an ordinary fact) and carry the explicit exception to the
+    "never compare dates yourself" rule -- for a contested pair, and only
+    a contested pair, the caller applies the same temporal tie-break Bug 3
+    verified."""
+    packet = {
+        "facts": [
+            {
+                "id": "f1",
+                "predicate": "language",
+                "value": {"lang": "fr"},
+                "valid_from": "2026-07-28T10:00:00+00:00",
+                "source_event_ids": ["evt-1"],
+                "contested": True,
+                "conflict_id": "c1",
+            },
+            {
+                "id": "f2",
+                "predicate": "language",
+                "value": {"lang": "en"},
+                "valid_from": "2026-07-29T10:00:00+00:00",
+                "source_event_ids": ["evt-2"],
+                "contested": True,
+                "conflict_id": "c1",
+            },
+        ],
+        "warnings": ["open_conflict: 2 fact(s) served with an unresolved conflicting value"],
+    }
+    block = build_prompt_context(packet)
+    # Header exception sentence (1) + dedicated chain-of-note paragraph
+    # (2, only emitted when a fact is actually contested) + once per
+    # contested fact (2) -- five total.
+    assert block.count("CONTESTED") == 5
+    assert "find every CONTESTED fact that shares the same conflict id" in block
+    assert "conflict c1" in block
+    assert "compare 'valid from' dates yourself" in block
+    # An ordinary (non-contested) fact never gets the per-fact marker (the
+    # header sentence always explains the exception, so "CONTESTED" alone
+    # is not a useful signal here -- the marker phrase is).
+    ordinary = build_prompt_context(
+        {
+            "facts": [
+                {
+                    "id": "f3",
+                    "predicate": "plan",
+                    "value": {"tier": "pro"},
+                    "valid_from": "2026-07-28T10:00:00+00:00",
+                    "source_event_ids": ["evt-3"],
+                }
+            ],
+            "warnings": [],
+        }
+    )
+    assert "— CONTESTED (conflict" not in ordinary
+
+
 def test_build_prompt_context_renders_nothing_for_no_relevant_memory_packet():
     """M3 recall gate: a packet the gate emptied (status ok, empty_reason
     set) renders as "" -- injecting a "no relevant memory" block would

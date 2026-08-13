@@ -53,6 +53,13 @@ class PacketFact(BaseModel):
     # persisted traces (context_traces.packet) re-validating unchanged.
     origin_trust: str = "trusted"
     attributed_to: str | None = None
+    # Open conflicts (13 aout): true when this fact is served alongside a
+    # genuinely conflicting sibling instead of being hidden — see
+    # app.context.CONTESTED_CONFLICT_MIN_MEMBERS. `conflict_id` correlates
+    # both sides of the same disagreement. Defaults keep old persisted
+    # traces (predating this field) re-validating unchanged.
+    contested: bool = False
+    conflict_id: str | None = None
 
 
 class PacketEpisode(BaseModel):

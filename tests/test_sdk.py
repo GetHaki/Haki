@@ -94,6 +94,38 @@ def test_build_prompt_context_contains_value_dates_and_sources():
     assert build_prompt_context({"facts": [], "warnings": []}) == ""
 
 
+def test_build_prompt_context_states_facts_outrank_episodes_on_conflict():
+    """13 aout, Bug 3 (temporal tie-break): once episodes carry raw
+    historical text alongside facts (key merging, 13 aout), an episode can
+    mention a value that has since been superseded. The rendered prompt
+    must say explicitly that a fact is the already-resolved current truth
+    and wins over a conflicting episode mention -- the guard the 11 aout
+    oracle test showed gpt-4o-mini needs spelled out, not left implicit."""
+    packet = {
+        "facts": [
+            {
+                "id": "f1",
+                "predicate": "wells_fargo_pre_approval",
+                "value": {"amount": "$400,000"},
+                "valid_from": "2023-11-30T00:00:00+00:00",
+                "source_event_ids": ["evt-2"],
+            }
+        ],
+        "episodes": [
+            {
+                "event_id": "evt-1",
+                "kind": "conversation.turn",
+                "occurred_at": "2023-08-11T00:00:00+00:00",
+                "excerpt": "user: I got pre-approved for $350,000 from Wells Fargo.",
+            }
+        ],
+        "warnings": [],
+    }
+    block = build_prompt_context(packet)
+    assert "the FACT is the current, correct answer" in block
+    assert "CURRENT, resolved truth" in block
+
+
 def test_build_prompt_context_renders_nothing_for_no_relevant_memory_packet():
     """M3 recall gate: a packet the gate emptied (status ok, empty_reason
     set) renders as "" -- injecting a "no relevant memory" block would

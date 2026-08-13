@@ -63,7 +63,10 @@ def build_prompt_context(packet: dict[str, Any]) -> str:
             "about HOW to respond (language of your answer, format, constraints, "
             "decisions already made), not as background trivia. If a fact states a "
             "language preference, write your entire response in that language. "
-            "Cite the source when you rely on a fact.",
+            "Cite the source when you rely on a fact. Facts already reflect the "
+            "CURRENT, resolved truth — an outdated value is removed the moment a "
+            "newer one is confirmed, so you never need to compare dates between "
+            "facts yourself; do not second-guess a fact's value.",
         )
     for fact in facts:
         value = fact.get("value")
@@ -86,7 +89,14 @@ def build_prompt_context(packet: dict[str, Any]) -> str:
             f"(valid from {valid_from}; sources: {sources}){marker}"
         )
     if episodes:
-        lines.append("Dated events from the source history (episodic memory):")
+        lines.append(
+            "Dated events from the source history (episodic memory): raw excerpts "
+            "kept for citation and narrative detail. They can mention values that "
+            "were later updated — if anything here conflicts with a fact above, "
+            "the FACT is the current, correct answer; never prefer an older "
+            "mention from here over it. If two dated items disagree and no fact "
+            "above covers it, use the one with the most recent date."
+        )
         for episode in episodes:
             occurred = episode.get("occurred_at") or "unknown date"
             lines.append(

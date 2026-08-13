@@ -61,7 +61,10 @@ export function buildPromptContext(packet: ContextPacket | null | undefined): st
         "about HOW to respond (language of your answer, format, constraints, " +
         "decisions already made), not as background trivia. If a fact states a " +
         "language preference, write your entire response in that language. " +
-        "Cite the source when you rely on a fact.",
+        "Cite the source when you rely on a fact. Facts already reflect the " +
+        "CURRENT, resolved truth — an outdated value is removed the moment a " +
+        "newer one is confirmed, so you never need to compare dates between " +
+        "facts yourself; do not second-guess a fact's value.",
     );
   }
   for (const fact of facts) {
@@ -76,7 +79,14 @@ export function buildPromptContext(packet: ContextPacket | null | undefined): st
     );
   }
   if (episodes.length > 0) {
-    lines.push("Dated events from the source history (episodic memory):");
+    lines.push(
+      "Dated events from the source history (episodic memory): raw excerpts " +
+        "kept for citation and narrative detail. They can mention values that " +
+        "were later updated — if anything here conflicts with a fact above, " +
+        "the FACT is the current, correct answer; never prefer an older " +
+        "mention from here over it. If two dated items disagree and no fact " +
+        "above covers it, use the one with the most recent date.",
+    );
     for (const episode of episodes) {
       const occurred = episode.occurred_at ?? "unknown date";
       lines.push(

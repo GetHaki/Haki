@@ -144,6 +144,38 @@ test("buildPromptContext: value, date, source and hardened instruction", () => {
   );
 });
 
+test("buildPromptContext: facts outrank episodes on conflict (Bug 3, 13 aout)", () => {
+  // Once episodes carry raw historical text alongside facts (key merging,
+  // 13 aout), an episode can mention a value since superseded. The prompt
+  // must say a fact is the already-resolved current truth and wins over a
+  // conflicting episode mention -- the guard the 11 aout oracle test showed
+  // gpt-4o-mini needs spelled out, not left implicit. Parity with the
+  // Python SDK's equivalent test.
+  const packet = {
+    facts: [
+      {
+        id: "f1",
+        predicate: "wells_fargo_pre_approval",
+        value: { amount: "$400,000" },
+        valid_from: "2023-11-30T00:00:00+00:00",
+        source_event_ids: ["evt-2"],
+      },
+    ],
+    episodes: [
+      {
+        event_id: "evt-1",
+        kind: "conversation.turn",
+        occurred_at: "2023-08-11T00:00:00+00:00",
+        excerpt: "user: I got pre-approved for $350,000 from Wells Fargo.",
+      },
+    ],
+    warnings: [],
+  };
+  const block = buildPromptContext(packet);
+  assert.ok(block.includes("the FACT is the current, correct answer"));
+  assert.ok(block.includes("CURRENT, resolved truth"));
+});
+
 test("no API key -> HakiApiError 401 unauthorized", async () => {
   const client = new HakiClient({ baseUrl: API_URL });
   await assert.rejects(

@@ -11,8 +11,20 @@ from app.consolidator import _search_text
 from app.context import episode_text
 from app.db import async_session
 from app.models import Fact
-from app.providers.fake import mock_fact
-from tests.test_consolidator import capture, make_memory_event, run_worker
+from app.providers.fake import FakeProvider, mock_fact
+from tests.test_consolidator import capture, facts_for, make_memory_event, run_worker
+
+
+async def _collide_embedding(fact: Fact, predicate: str, value: dict) -> None:
+    """Overwrite `fact`'s stored embedding with the one FakeProvider would
+    compute for (predicate, value) — simulates a real embedder finding two
+    facts' search text equally close to a query, forcing an exact score
+    tie (same pattern as test_semantic_supersession.py)."""
+    [target_embedding] = await FakeProvider().embed([_search_text(predicate, value)])
+    async with async_session() as session:
+        row = await session.get(Fact, fact.id)
+        row.embedding = target_embedding
+        await session.commit()
 
 
 @pytest.fixture
@@ -197,6 +209,51 @@ async def test_unified_pool_lets_a_highly_relevant_episode_outrank_low_relevance
     # The episode wins a slot on merit (top score), not on a reserved share.
     assert len(packet["episodes"]) == 1
     assert "Lisbon" in packet["episodes"][0]["excerpt"]
+
+
+async def test_entity_boost_prefers_the_named_person_over_a_same_scored_rival(client):
+    """13 aout, LoCoMo diagnostic: a conversation naming two people gets
+    ingested under ONE shared subject (see app.context's module docstring
+    for the analogous "Open conflicts" gap). The extraction prompt already
+    tags a fact about someone other than the tracked subject with an
+    explicit "person" key (app.providers.openai's ATTRIBUTION rules) --
+    but until this fix, retrieval never used it: a query naming "Melanie"
+    could still lose its budget slot to an equally-scored fact about
+    "Caroline". Forced score tie (embedding collision, same pattern as
+    test_semantic_supersession.py's _collide_embedding) isolates the
+    entity boost as the ONLY thing that can break the tie -- without it,
+    which of two identically-scored facts wins is arbitrary."""
+    big_melanie = {"person": "Melanie", "detail": "x" * 200}
+    big_caroline = {"person": "Caroline", "detail": "x" * 200}
+    await capture(
+        client,
+        [make_memory_event([mock_fact("hobby", big_melanie), mock_fact("hobby_b", big_caroline)])],
+    )
+    await run_worker()
+
+    [melanie_fact, caroline_fact] = await facts_for("usr_42")
+    if melanie_fact.value.get("person") != "Melanie":
+        melanie_fact, caroline_fact = caroline_fact, melanie_fact
+    # Force an exact score tie: same embedding, so similarity, full-text
+    # rank, and recency are identical between the two facts -- the entity
+    # boost is the only signal left to break it.
+    await _collide_embedding(caroline_fact, "hobby_b", big_caroline)
+    await _collide_embedding(melanie_fact, "hobby", big_melanie)
+
+    response = await client.post(
+        "/v1/context",
+        json={
+            "project_id": "prj_support",
+            "subject_id": "usr_42",
+            "query": "What activities does Melanie partake in?",
+            # ~55 estimated tokens per fact -- fits exactly one.
+            "budget_tokens": 60,
+        },
+    )
+    assert response.status_code == 200
+    served = response.json()["packet"]["facts"]
+    assert len(served) == 1
+    assert served[0]["value"]["person"] == "Melanie"
 
 
 async def test_budget_zero_or_negative_is_a_typed_error(client):

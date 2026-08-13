@@ -287,6 +287,46 @@ async def _expand_via_entities(
     return found
 
 
+# Entity-aware fact scoring (13 aout, LoCoMo diagnostic): a conversation
+# involving two named people (LoCoMo's structure — the tracked subject and
+# whoever else appears in it) gets ingested under ONE shared subject; the
+# extraction prompt already tags a fact about someone other than the
+# tracked subject with an explicit "person" key in its value (see
+# app.providers.openai's ATTRIBUTION rules), but until now nothing at
+# retrieval time used that tag. Measured effect (LoCoMo single-hop, run
+# gh-31698210575): 88% of single-hop failures, and in every sampled case
+# the served packet was either missing the named person's facts entirely
+# or dominated by facts about the OTHER named person in the conversation.
+# Reuses _ENTITY_TOKEN_RE/_ENTITY_STOPWORDS (same rule-based, no-LLM
+# detection already used for multi-hop expansion) rather than inventing a
+# second entity-detection mechanism.
+#
+# Deliberately conservative: a fact with no "person" key — Haki's typical
+# single-user product usage, where nearly every fact belongs to the
+# tracked subject by construction — is NEVER touched. This only ever
+# activates when BOTH sides identify a specific individual: the query
+# names someone, AND the fact is explicitly tagged as being about someone
+# (possibly a different someone). Magnitudes chosen to re-rank, not
+# exclude: a mismatched-person fact can still win if nothing else is
+# remotely relevant, same principle as the recall gate never forcing a
+# hard zero.
+ENTITY_MATCH_BOOST = 1.3
+ENTITY_MISMATCH_PENALTY = 0.3
+
+
+def _query_entities(query: str) -> set[str]:
+    return {t for t in _ENTITY_TOKEN_RE.findall(query) if t.lower() not in _ENTITY_STOPWORDS}
+
+
+def _entity_adjusted_score(score: float, value: Any, query_entities: set[str]) -> float:
+    if not query_entities or not isinstance(value, dict):
+        return score
+    person = value.get("person")
+    if not isinstance(person, str) or not person:
+        return score
+    return score * (ENTITY_MATCH_BOOST if person in query_entities else ENTITY_MISMATCH_PENALTY)
+
+
 # Volatility (M2): freshness horizon per class, read from config at call
 # time (env-overridable, never hardcoded). "stable" has no horizon — the
 # pre-M2 behavior every existing fact keeps.
@@ -663,6 +703,7 @@ async def build_context(
     # SINGLE pass. A fact and an episode compete on their actual merits now,
     # not on which separately-budgeted pool they happened to land in.
     recall_max_distance = settings.recall_max_distance
+    query_entities = _query_entities(query)
     pool: list[tuple[float, str, Any]] = []
     for row in eligible:
         if recall_max_distance > 0 and (
@@ -676,7 +717,7 @@ async def build_context(
                 }
             )
             continue
-        pool.append((row.score, "fact", row))
+        pool.append((_entity_adjusted_score(row.score, row.value, query_entities), "fact", row))
     for row in episode_rows:
         if recall_max_distance > 0 and (
             row.distance is None or row.distance > recall_max_distance

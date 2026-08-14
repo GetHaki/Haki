@@ -2,8 +2,8 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, Index, String, UniqueConstraint, func
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy import Computed, DateTime, Index, String, UniqueConstraint, func
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -44,9 +44,10 @@ AGENT_ACTOR_TYPES: frozenset[str] = frozenset({"agent", "tool", "system"})
 
 class Event(Base):
     """Source event (contract B.1). Append-only: business content is never
-    UPDATEd. The ONLY tolerated write after insert is the derived retrieval
-    embedding (sprint 10, episodic memory): re-computable from kind+payload,
-    set once by the consolidator.
+    UPDATEd. The only tolerated writes after insert are the derived
+    retrieval fields below (embedding, index_text) -- both re-computable
+    from kind+payload (+ extracted facts for index_text), set once by the
+    consolidator.
 
     Bitemporal: occurred_at is business time, recorded_at is system time.
     """
@@ -87,8 +88,34 @@ class Event(Base):
     idempotency_key: Mapped[str] = mapped_column(String(256))
 
     # Episodic retrieval (sprint 10): derived embedding of kind + truncated
-    # payload, set once by the consolidator. NULL until consolidated.
+    # payload, set once by the consolidator. NULL until consolidated. Once
+    # this event's own facts are known (mechanism E3, 15 aout, migration
+    # 0022), re-derived from index_text instead so the embedding also
+    # reflects what was extracted, not just the raw payload.
     embedding: Mapped[list[float] | None] = mapped_column(Vector(384))
+
+    # True key merging (mechanism E3, migration 0022): kind + truncated
+    # payload, concatenated with the predicate/value of every fact
+    # extracted from THIS event (app.consolidator, via Fact.source_event_ids)
+    # -- the compressed signal folded into the raw key at INDEX time,
+    # rather than merged with facts only at read time (the "unified pool"/
+    # key-merging-at-read mechanism already in app.context, 13 aout, which
+    # this does not replace: that fuses facts and episodes by RANK at query
+    # time; this changes what a single episode's own index CONTAINS).
+    # Indexing-only field: the packet's episode excerpt is still rendered
+    # fresh from kind+payload (app.context.episode_excerpt), never from
+    # this column, so a concatenated fact can never leak into what the
+    # agent reads as a verbatim source quote.
+    index_text: Mapped[str | None] = mapped_column(String)
+    # Precomputed tsvector of index_text (generated column, mechanism E1a,
+    # migration 0022): same pattern as facts.search_vector (migration
+    # 0004) -- an episode can now be found by an exact lexical match (a
+    # name, an identifier) even when it is not the closest embedding
+    # neighbour, the same axis facts already had and episodes did not.
+    search_vector: Mapped[str | None] = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('simple', coalesce(index_text, ''))", persisted=True),
+    )
 
     # Origin trust (M8): declared by the authenticated caller or derived
     # from actor_type at write time (ledger.write_events) — see

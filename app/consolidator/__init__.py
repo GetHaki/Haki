@@ -1096,10 +1096,17 @@ async def _process_job(
     }
 
     # Episodic memory (sprint 10): embed each processed event once, up
-    # front (derived data, re-computable — the only post-insert write
-    # allowed on events). Events already embedded (replayed job) are
+    # front (derived data, re-computable — one of the only post-insert
+    # writes allowed on events). Events already embedded (replayed job) are
     # skipped. Independent of extraction order, so done before the
-    # per-event loop below.
+    # per-event loop below. `index_text` (mechanism E1a/E3, 15 aout) starts
+    # here as the same plain kind+payload text already embedded — the
+    # per-event loop below overwrites both, for THIS SAME event only, once
+    # its own extracted facts are known, folding them into index_text (true
+    # key merging) and re-embedding from it instead of the raw payload
+    # alone. An event that ends up with no applied candidate keeps this
+    # baseline value for both — correct, since "kind+payload with no facts
+    # appended" is exactly what index_text degrades to anyway.
     unembedded = [event for event in events if event.embedding is None]
     if unembedded:
         event_embeddings = await embedder.embed(
@@ -1107,6 +1114,7 @@ async def _process_job(
         )
         for event, embedding in zip(unembedded, event_embeddings):
             event.embedding = embedding
+            event.index_text = episode_text(event.kind, event.payload)
 
     # Locks acquired up front, before any extraction — earlier than before
     # (see the loop below for why) but the lock's actual job is unchanged:
@@ -1223,6 +1231,34 @@ async def _process_job(
             await _apply_candidate(
                 session, candidate, embedding=embedding, event=event, result=result
             )
+
+        # True key merging (mechanism E3, 15 aout): now that every candidate
+        # from THIS event has been applied, fold whichever facts it actually
+        # touched (created, held, or reinforced -- read back from the source
+        # of truth, source_event_ids, rather than tracked through every
+        # _apply_candidate branch) into index_text and re-embed from it.
+        # Skipped when nothing was touched (e.g. every candidate was
+        # echo-rejected above) -- index_text/embedding already hold the
+        # correct plain-payload baseline set in the up-front pass, and
+        # re-embedding identical text would only cost an extra call for no
+        # change.
+        touched_facts = (
+            (
+                await session.execute(
+                    select(Fact).where(Fact.source_event_ids.any(event.id))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if touched_facts:
+            facts_text = "; ".join(
+                _search_text(fact.predicate, fact.value) for fact in touched_facts
+            )
+            event.index_text = (
+                f"{episode_text(event.kind, event.payload)} FACTS: {facts_text}"
+            )
+            event.embedding = (await embedder.embed([event.index_text]))[0]
     return result
 
 

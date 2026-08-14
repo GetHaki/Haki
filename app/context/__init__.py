@@ -157,28 +157,22 @@ EPISODE_EXCERPT_CHARS = EPISODE_TEXT_CHARS
 # Top-K source events retrieved per context call (cosine, hnsw).
 EPISODE_TOP_K = 8
 
-# Episode scoring (key merging, 13 aout): facts and episodes are packed
-# from ONE ranked pool, not two separate budgets — the previous fixed
-# EPISODE_MIN_BUDGET_SHARE floor (12 aout) was an honest stopgap, not the
-# real fix; this is the real fix. Episodes are scored with the SAME
-# weighted formula as facts (similarity + recency), just missing the
-# full-text term: `events` has no search_vector column yet (facts do,
-# migration 0004) — no full-text index to rank against, so that axis is
-# left at zero rather than faked. Renormalized so the two SCORED axes
-# (similarity, recency) keep facts' relative 4:1 emphasis and the score
-# stays on the same 0-1 scale as a fact's — not summed directly against
-# W_SIMILARITY/W_RECENCY, which would cap episodes at 0.75 and rank them
-# systematically below facts regardless of actual relevance. A fact can
-# still out-rank an equally-similar episode via its extra full-text axis
-# (a fact matched lexically as well as semantically SHOULD win) — that
-# asymmetry is honest, not a bug: facts are compact structured text,
-# lexical match is cheap signal for them; episodes are prose, where
-# semantic + temporal proximity carry more of the signal. Heuristic
-# renormalization, not empirically calibrated — recalibrate once episodes
-# have their own full-text axis (giving them the real 3-term formula) or
-# once enough real eval data exists to tune the ratio directly.
-EPISODE_W_SIMILARITY = W_SIMILARITY / (W_SIMILARITY + W_RECENCY)
-EPISODE_W_RECENCY = W_RECENCY / (W_SIMILARITY + W_RECENCY)
+# Episode scoring (key merging, 13 aout; full-text axis added by mechanism
+# E1a, 15 aout): facts and episodes are packed from ONE ranked pool, not
+# two separate budgets — the previous fixed EPISODE_MIN_BUDGET_SHARE floor
+# (12 aout) was an honest stopgap, not the real fix; this is the real fix.
+# Episodes now share the EXACT same weighted formula and weights as facts
+# (similarity + full-text + recency, W_SIMILARITY/W_FULLTEXT/W_RECENCY
+# above) — until 15 aout `events` had no search_vector column (facts did,
+# migration 0004), so this axis was left at zero and the other two
+# renormalized to keep the score on a comparable 0-1 scale; migration 0022
+# gives episodes their own search_vector (events.index_text), closing that
+# gap, so the renormalization this comment used to describe no longer
+# applies and episodes and facts are directly comparable on the same
+# formula.
+EPISODE_W_SIMILARITY = W_SIMILARITY
+EPISODE_W_FULLTEXT = W_FULLTEXT
+EPISODE_W_RECENCY = W_RECENCY
 
 
 def episode_text(kind: str, payload: dict | None) -> str:
@@ -688,11 +682,21 @@ async def build_context(
     episode_similarity = func.coalesce(
         1 - Event.embedding.cosine_distance(query_embedding), 0.0
     )
+    # Full-text axis (mechanism E1a, 15 aout): same ts_query already built
+    # for facts above (the same user query — one lexical query, two search_
+    # vector columns), reusing the identical websearch_to_tsquery/ts_rank_cd
+    # pattern migration 0004 established for facts. NULL-safe: an event
+    # ingested before migration 0022, or whose index_text the consolidator
+    # hasn't (re)computed yet, has search_vector NULL and just scores 0 on
+    # this axis, same as a fact with no lexical match today.
+    episode_fulltext = func.coalesce(func.ts_rank_cd(Event.search_vector, ts_query), 0.0)
     episode_recency = func.exp(
         -func.extract("epoch", now - Event.occurred_at) / RECENCY_TAU_SECONDS
     )
     episode_score = (
-        EPISODE_W_SIMILARITY * episode_similarity + EPISODE_W_RECENCY * episode_recency
+        EPISODE_W_SIMILARITY * episode_similarity
+        + EPISODE_W_FULLTEXT * episode_fulltext
+        + EPISODE_W_RECENCY * episode_recency
     ).cast(Float)
     episodes_start = time.perf_counter()
     episode_rows = (

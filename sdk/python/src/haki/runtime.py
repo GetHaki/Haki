@@ -83,10 +83,19 @@ def build_prompt_context(packet: dict[str, Any]) -> str:
             "fact, both shown so you are not left with zero information "
             "instead of a wrong one. Resolve each contested group yourself: "
             "1) find every CONTESTED fact that shares the same conflict id; "
-            "2) compare their 'valid from' dates; 3) treat ONLY the value "
-            "with the LATEST date as current, and discard the earlier one "
-            "entirely — do not mention it, do not average it in, do not "
-            "present both as still true."
+            "2) check whether the question has an EXPLICIT past-state "
+            "marker — 'before I changed/updated it', 'previously', 'used "
+            "to', 'originally', 'when I first started', 'in the first "
+            "[period]'. Ordinary past-tense phrasing alone ('what WAS X', "
+            "'how many did I have') is NOT this signal and still means the "
+            "CURRENT value — when in doubt, treat it as a CURRENT-value "
+            "question; 3) for a CURRENT-value question (the default), "
+            "treat ONLY the value with the LATEST date as current and "
+            "discard the earlier one entirely — do not mention it, do not "
+            "average it in, do not present both as still true; 4) only "
+            "when an explicit marker is present, answer with the EARLIER "
+            "dated value instead — defaulting to 'most recent' there "
+            "answers a different question than the one asked."
         )
     for fact in facts:
         value = fact.get("value")
@@ -123,7 +132,9 @@ def build_prompt_context(packet: dict[str, Any]) -> str:
             "were later updated — if anything here conflicts with a fact above, "
             "the FACT is the current, correct answer; never prefer an older "
             "mention from here over it. If two dated items disagree and no fact "
-            "above covers it, use the one with the most recent date."
+            "above covers it, use the one with the most recent date — UNLESS the "
+            "question explicitly asks about a past/previous state, in which case "
+            "use the one matching that earlier point in time instead."
         )
         for episode in episodes:
             occurred = episode.get("occurred_at") or "unknown date"

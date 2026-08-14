@@ -186,6 +186,59 @@ def test_build_prompt_context_marks_contested_facts_and_their_tie_break():
     assert "— CONTESTED (conflict" not in ordinary
 
 
+def test_build_prompt_context_carries_a_past_value_exception():
+    """13 aout, LongMemEval diagnostic (run 31705865474): the "always
+    prefer most recent" guard is wrong when the question itself asks
+    about a PAST value ("what was my goal before I changed it") -- a real
+    case (Apex Legends level goal, qid 9bbe84a2) showed gpt-4o-mini can
+    answer this correctly, but the guard text gave it no explicit
+    permission to pick the earlier date on purpose. Both the contested-
+    facts chain-of-note and the facts-vs-episodes tie-break need the same
+    carve-out, or a future prompt tightening could silently break it."""
+    contested_packet = {
+        "facts": [
+            {
+                "id": "f1",
+                "predicate": "apex_legends_level_goal",
+                "value": {"goal": 100},
+                "valid_from": "2023-06-16T00:00:00+00:00",
+                "source_event_ids": ["evt-1"],
+                "contested": True,
+                "conflict_id": "c1",
+            },
+            {
+                "id": "f2",
+                "predicate": "apex_legends_level_goal",
+                "value": {"goal": 150},
+                "valid_from": "2023-09-30T00:00:00+00:00",
+                "source_event_ids": ["evt-2"],
+                "contested": True,
+                "conflict_id": "c1",
+            },
+        ],
+        "warnings": [],
+    }
+    block = build_prompt_context(contested_packet)
+    assert "EXPLICIT past-state marker" in block
+    assert "Ordinary past-tense phrasing alone" in block
+    assert "answer with the EARLIER dated value instead" in block
+
+    episodes_packet = {
+        "facts": [],
+        "episodes": [
+            {
+                "event_id": "evt-1",
+                "kind": "conversation.turn",
+                "occurred_at": "2023-06-16T00:00:00+00:00",
+                "excerpt": "user: my Apex Legends goal is level 100.",
+            }
+        ],
+        "warnings": [],
+    }
+    block2 = build_prompt_context(episodes_packet)
+    assert "UNLESS the question explicitly asks about a past/previous state" in block2
+
+
 def test_build_prompt_context_renders_nothing_for_no_relevant_memory_packet():
     """M3 recall gate: a packet the gate emptied (status ok, empty_reason
     set) renders as "" -- injecting a "no relevant memory" block would

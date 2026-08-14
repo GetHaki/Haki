@@ -140,10 +140,28 @@ async def judge(
 ) -> tuple[dict, int, int]:
     extra = ""
     if question.qtype in metrics.LEAKAGE_TYPES:
+        # 13 aout, LongMemEval diagnostic (run 31705865474): this used to
+        # unconditionally assert "the gold answer is the LATEST value" --
+        # true for MOST knowledge-update questions, but not all: some
+        # explicitly ask about a past/previous state ("what was my goal
+        # BEFORE I updated it", "in the first three months"), where the
+        # gold answer IS the earlier value on purpose. The old wording
+        # made the judge override a correct historical answer because it
+        # contradicted the judge's own assumption rather than the actual
+        # gold text given below -- verified: gold "level 100", system
+        # answer "100" (an exact match) still got labeled incorrect.
+        # Deference to the literal {gold} value is the fix, not deleting
+        # the heuristic (it is still the right default for most cases).
         extra = (
-            "Note: this question tests a knowledge UPDATE. The history states an earlier "
-            "value and a later replacement; the gold answer is the LATEST value. An answer "
-            "with the earlier value is incorrect and relies on outdated information."
+            "Note: this question type usually tests a knowledge UPDATE, where the "
+            "history states an earlier value and a later replacement, and the gold "
+            "answer below reflects the LATEST value -- an answer using the earlier "
+            "value is then incorrect and relies on outdated information. BUT always "
+            "defer to the actual gold answer given above this note, not to this "
+            "general rule: if the gold answer itself IS the earlier/historical value "
+            "(the question explicitly asks about a past state, e.g. 'before I "
+            "changed it', 'when I started', 'in the first [period]'), then matching "
+            "that earlier value is correct and does NOT rely on outdated information."
         )
     if question.abstention_expected:
         extra += (

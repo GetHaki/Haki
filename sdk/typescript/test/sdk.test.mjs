@@ -229,6 +229,54 @@ test("buildPromptContext: contested facts are marked, with the tie-break excepti
   assert.ok(!ordinary.includes("— CONTESTED (conflict"));
 });
 
+test("buildPromptContext: carries a past-value exception (13 aout, LongMemEval)", () => {
+  // The "always prefer most recent" guard is wrong when the question
+  // itself asks about a PAST value (real case: Apex Legends level goal,
+  // qid 9bbe84a2, run 31705865474) -- parity with the Python SDK test.
+  const contestedPacket = {
+    facts: [
+      {
+        id: "f1",
+        predicate: "apex_legends_level_goal",
+        value: { goal: 100 },
+        valid_from: "2023-06-16T00:00:00+00:00",
+        source_event_ids: ["evt-1"],
+        contested: true,
+        conflict_id: "c1",
+      },
+      {
+        id: "f2",
+        predicate: "apex_legends_level_goal",
+        value: { goal: 150 },
+        valid_from: "2023-09-30T00:00:00+00:00",
+        source_event_ids: ["evt-2"],
+        contested: true,
+        conflict_id: "c1",
+      },
+    ],
+    warnings: [],
+  };
+  const block = buildPromptContext(contestedPacket);
+  assert.ok(block.includes("EXPLICIT past-state marker"));
+  assert.ok(block.includes("Ordinary past-tense phrasing alone"));
+  assert.ok(block.includes("answer with the EARLIER dated value instead"));
+
+  const episodesPacket = {
+    facts: [],
+    episodes: [
+      {
+        event_id: "evt-1",
+        kind: "conversation.turn",
+        occurred_at: "2023-06-16T00:00:00+00:00",
+        excerpt: "user: my Apex Legends goal is level 100.",
+      },
+    ],
+    warnings: [],
+  };
+  const block2 = buildPromptContext(episodesPacket);
+  assert.ok(block2.includes("UNLESS the question explicitly asks about a past/previous state"));
+});
+
 test("no API key -> HakiApiError 401 unauthorized", async () => {
   const client = new HakiClient({ baseUrl: API_URL });
   await assert.rejects(

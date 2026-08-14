@@ -5,7 +5,7 @@
 # (see [project.scripts] below) -- only what you `pip install`/`uv add`
 # changes.
 name = "gethaki"
-version = "0.1.2"
+version = "0.1.3"
 description = "Python SDK for Haki — long-term memory for AI agents, with proof"
 readme = "README.md"
 license = "Apache-2.0"

@@ -51,7 +51,7 @@ export interface PacketFact {
   fact_kind?: string | null;
   volatility?: string | null;
   last_confirmed?: string | null;
-  freshness?: "current" | "unconfirmed" | null;
+  freshness?: "current" | "unconfirmed" | "stale" | null;
   /** What authority this fact was born with (M8). Absent on older servers. */
   origin_trust?: "trusted" | "semi_trusted" | "third_party" | "untrusted";
   /** Who actually said it, when a third party did. */

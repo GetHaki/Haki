@@ -144,6 +144,50 @@ test("buildPromptContext: value, date, source and hardened instruction", () => {
   );
 });
 
+test("buildPromptContext: unconfirmed and stale freshness markers (14 aout, mecanisme D)", () => {
+  const packet = {
+    facts: [
+      {
+        id: "f1",
+        predicate: "employer",
+        value: { name: "Dicken AI" },
+        confidence: 0.9,
+        valid_from: "2024-01-01T00:00:00+00:00",
+        source_event_ids: [],
+        freshness: "unconfirmed",
+        last_confirmed: "2024-01-01T00:00:00+00:00",
+      },
+      {
+        id: "f2",
+        predicate: "current_project",
+        value: { name: "Atlas" },
+        confidence: 0.9,
+        valid_from: "2026-08-01T00:00:00+00:00",
+        source_event_ids: [],
+        freshness: "stale",
+        last_confirmed: "2026-08-01T00:00:00+00:00",
+      },
+      {
+        id: "f3",
+        predicate: "invoice_language",
+        value: { language: "fr" },
+        confidence: 0.9,
+        valid_from: "2026-08-01T00:00:00+00:00",
+        source_event_ids: [],
+        freshness: "current",
+      },
+    ],
+    warnings: [],
+  };
+  const block = buildPromptContext(packet);
+  assert.ok(block.includes("UNCONFIRMED since 2024-01-01"));
+  assert.ok(block.includes("STALE since 2026-08-01"));
+  assert.ok(block.includes("re-confirm with the subject"));
+  // A plain "current" fact carries neither marker.
+  const currentLine = block.split("\n").find((l) => l.includes("invoice_language"));
+  assert.ok(!currentLine.includes("UNCONFIRMED") && !currentLine.includes("STALE"));
+});
+
 test("buildPromptContext: facts outrank episodes on conflict (Bug 3, 13 aout)", () => {
   // Once episodes carry raw historical text alongside facts (key merging,
   // 13 aout), an episode can mention a value since superseded. The prompt

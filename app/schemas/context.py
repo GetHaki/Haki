@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -25,6 +26,13 @@ class ContextRequest(BaseModel):
     query: str = Field(min_length=1)
     purpose: str | None = Field(default=None, max_length=128)
     budget_tokens: int = Field(default=900)
+    # 14 aout, mecanisme D: what "now" means for this call's freshness/
+    # recency computations (volatility horizons, valid_to filter, recency
+    # scoring term) -- defaults to the real wall clock. For replaying a
+    # conversation dated in the past (an eval harness, a backfill), pass the
+    # point in time the conversation's own timeline is at; a real caller in
+    # normal operation should simply omit this. See app.context.build_context.
+    as_of: datetime | None = None
 
     @model_validator(mode="after")
     def exactly_one_subject(self) -> "ContextRequest":
@@ -47,7 +55,7 @@ class PacketFact(BaseModel):
     fact_kind: str | None = None
     volatility: str | None = None
     last_confirmed: str | None = None
-    freshness: str | None = None  # "current" | "unconfirmed"
+    freshness: str | None = None  # "current" | "unconfirmed" | "stale"
     # Provenance contract (M8): what authority this fact was born with, and
     # — for third_party origins — who actually said it. Defaults keep old
     # persisted traces (context_traces.packet) re-validating unchanged.

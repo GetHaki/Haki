@@ -273,6 +273,7 @@ async def run(args: argparse.Namespace) -> int:
                     subject,
                     question.question,
                     config.get("context_budget_tokens", 900),
+                    as_of=question.as_of,
                 )
                 facts = body["packet"]["facts"]
                 episodes = body["packet"].get("episodes", [])

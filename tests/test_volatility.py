@@ -1,6 +1,6 @@
 """Typologie + volatilite (M2) : extraction avec classe, horloge de
-fraicheur, exclusion des volatiles perimes, retrocompat des faits pre-M2
-(vraie base, FakeProvider)."""
+fraicheur, degradation (pas exclusion, 14 aout -- mecanisme D) des
+volatiles perimes, retrocompat des faits pre-M2 (vraie base, FakeProvider)."""
 
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -86,7 +86,13 @@ async def test_invalid_volatility_candidate_is_rejected_batch_survives(client):
     assert job.payload["result"]["created"] == 1
 
 
-async def test_expired_volatile_fact_is_never_served_as_current(client):
+async def test_expired_volatile_fact_is_served_flagged_stale(client):
+    """14 aout, mecanisme D (research/Diagnostic_Couverture_2026-08-14.md):
+    a volatile fact past its horizon used to be excluded outright -- an
+    "expired" fact is not FALSE, it is UNCERTAIN, and hiding it left the
+    agent knowing neither the value nor that a value existed. Now served,
+    same honest-degradation treatment "unconfirmed" already got for slow
+    facts, no packet-level warning (per-fact, not a packet problem)."""
     await capture(
         client,
         [
@@ -104,12 +110,15 @@ async def test_expired_volatile_fact_is_never_served_as_current(client):
             "project_id": "prj_support",
             "subject_id": "usr_42",
             "query": "current_project",
+            "purpose": "test",
         },
     )
     body = response.json()
-    assert body["packet"]["facts"] == []
-    assert body["packet"]["status"] == "degraded"
-    assert any(w.startswith("volatility_expired:") for w in body["packet"]["warnings"])
+    [fact] = body["packet"]["facts"]
+    assert fact["freshness"] == "stale"
+    assert fact["last_confirmed"] is not None
+    assert body["packet"]["status"] == "ok"
+    assert not any(w.startswith("volatility_expired:") for w in body["packet"]["warnings"])
 
     trace = await client.get(
         f"/v1/inspect/{body['trace_id']}",
@@ -117,12 +126,11 @@ async def test_expired_volatile_fact_is_never_served_as_current(client):
     )
     decisions = trace.json()["decisions"]
     assert any(
-        d.get("action") == "excluded" and d.get("reason_code") == "volatility_expired"
-        for d in decisions
+        d.get("action") == "included" and d.get("fact_id") == fact["id"] for d in decisions
     )
 
 
-async def test_expired_ephemeral_fact_is_excluded_like_volatile(client):
+async def test_expired_ephemeral_fact_is_served_stale_like_volatile(client):
     await capture(
         client,
         [
@@ -136,12 +144,61 @@ async def test_expired_ephemeral_fact_is_excluded_like_volatile(client):
 
     response = await client.post(
         "/v1/context",
-        json={"project_id": "prj_support", "subject_id": "usr_42", "query": "mood_today"},
+        json={
+            "project_id": "prj_support",
+            "subject_id": "usr_42",
+            "query": "mood_today",
+            "purpose": "test",
+        },
     )
     body = response.json()
-    assert body["packet"]["facts"] == []
-    assert body["packet"]["status"] == "degraded"
-    assert any(w.startswith("volatility_expired:") for w in body["packet"]["warnings"])
+    [fact] = body["packet"]["facts"]
+    assert fact["freshness"] == "stale"
+    assert body["packet"]["status"] == "ok"
+
+
+async def test_as_of_reads_freshness_from_the_callers_point_of_view(client):
+    """14 aout, mecanisme D: the same volatile fact, ingested "365 days ago"
+    relative to the real wall clock (so it would read "stale" by default --
+    see test_expired_volatile_fact_is_served_flagged_stale above), reads
+    "current" when the caller passes `as_of` close to when the fact was
+    actually recorded -- exactly the LoCoMo/LongMemEval case: a conversation
+    dated years in the past, queried from its OWN point in time rather than
+    today's real clock."""
+    occurred_at = _iso_days_ago(365)
+    await capture(
+        client,
+        [
+            make_memory_event(
+                [mock_fact("current_project", {"name": "Atlas"}, volatility="volatile")],
+                occurred_at=occurred_at,
+            )
+        ],
+    )
+    await run_worker()
+
+    # Without as_of: real wall clock, 365 days later -> stale.
+    default_response = await client.post(
+        "/v1/context",
+        json={"project_id": "prj_support", "subject_id": "usr_42", "query": "current_project"},
+    )
+    [default_fact] = default_response.json()["packet"]["facts"]
+    assert default_fact["freshness"] == "stale"
+
+    # With as_of a few days after occurred_at (the fact's own point of
+    # view): well within the volatility horizon -> current.
+    as_of = (datetime.fromisoformat(occurred_at) + timedelta(days=5)).isoformat()
+    as_of_response = await client.post(
+        "/v1/context",
+        json={
+            "project_id": "prj_support",
+            "subject_id": "usr_42",
+            "query": "current_project",
+            "as_of": as_of,
+        },
+    )
+    [as_of_fact] = as_of_response.json()["packet"]["facts"]
+    assert as_of_fact["freshness"] == "current"
 
 
 async def test_volatile_fact_within_horizon_is_served_current(client):

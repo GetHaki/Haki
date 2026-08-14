@@ -108,6 +108,15 @@ def build_prompt_context(packet: dict[str, Any]) -> str:
                 f" — UNCONFIRMED since {last}: past its freshness horizon, "
                 "re-confirm with the subject before relying on it"
             )
+        elif fact.get("freshness") == "stale":
+            last = fact.get("last_confirmed") or "an unknown date"
+            marker = (
+                f" — STALE since {last}: a fast-changing value past its "
+                "freshness horizon, not necessarily wrong but not "
+                "guaranteed current either — treat it as the best available "
+                "answer, not a certainty, and prefer to re-confirm with the "
+                "subject before relying on it for anything consequential"
+            )
         if fact.get("attributed_to"):
             marker += (
                 f" [reported by a third party ({fact['attributed_to']}) — "

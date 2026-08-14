@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -116,17 +117,27 @@ class HakiClient:
         subject_id: str,
         query: str,
         budget_tokens: int,
+        as_of: datetime | None = None,
     ) -> tuple[dict, float]:
-        """POST /v1/context; returns (response body, latency ms)."""
+        """POST /v1/context; returns (response body, latency ms).
+
+        `as_of` (14 aout, mecanisme D): the question's own point in time,
+        so a conversation dated in the past does not have every volatile
+        fact judged stale against today's real wall clock -- see
+        research/Diagnostic_Couverture_2026-08-14.md.
+        """
         started = time.perf_counter()
+        body: dict[str, Any] = {
+            "project_id": project_id,
+            "subject_id": subject_id,
+            "query": query,
+            "budget_tokens": budget_tokens,
+        }
+        if as_of is not None:
+            body["as_of"] = as_of.isoformat()
         response = await self._post(
             "/v1/context",
-            json={
-                "project_id": project_id,
-                "subject_id": subject_id,
-                "query": query,
-                "budget_tokens": budget_tokens,
-            },
+            json=body,
             headers=self._auth(key),
         )
         latency_ms = (time.perf_counter() - started) * 1000

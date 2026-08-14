@@ -71,6 +71,16 @@ class Question:
     # Identifies the ingested history: several questions may share one
     # history (LoCoMo: same conversation) -> ingest once, like real usage.
     history_id: str = ""
+    # 14 aout, mecanisme D (research/Diagnostic_Couverture_2026-08-14.md):
+    # the point in time to pass as `as_of` to POST /v1/context, so a
+    # question dated years in the past does not get every volatile/
+    # ephemeral fact judged stale against today's real wall clock.
+    # LongMemEval: the dataset's own question_date, parsed. LoCoMo: no
+    # per-question date exists in the source data, so the last ingested
+    # session's date stands in for "now" from the conversation's own point
+    # of view -- the natural reading of "the question is being asked right
+    # after this conversation".
+    as_of: datetime | None = None
 
 
 def estimate_tokens(text: str) -> int:
@@ -125,18 +135,23 @@ def load_longmemeval(path: str | Path) -> list[Question]:
         if isinstance(answer, list):
             answer = "; ".join(str(a) for a in answer)
         evidence_ids = set(item.get("answer_session_ids", []))
+        raw_question_date = item.get("question_date")
         questions.append(
             Question(
                 qid=str(item["question_id"]),
                 qtype=qtype,
                 question=str(item["question"]),
                 answer=str(answer),
-                question_date=item.get("question_date"),
+                question_date=raw_question_date,
                 abstention_expected=qtype in ABSTENTION_TYPES
                 or str(item["question_id"]).endswith("_abs"),
                 sessions=sessions,
                 evidence_sessions=[s for s in sessions if s.session_id in evidence_ids],
                 history_id=str(item["question_id"]),  # each question has its own haystack
+                as_of=_parse_longmemeval_date(
+                    raw_question_date or "",
+                    sessions[-1].date if sessions else FALLBACK_BASE,
+                ),
             )
         )
     return questions
@@ -190,6 +205,11 @@ def load_locomo(path: str | Path) -> list[Question]:
                         s for i, s in enumerate(sessions, start=1) if i in evidence_sessions
                     ],
                     history_id=sample_id,  # one conversation = one ingested history
+                    # No per-question date in LoCoMo's source data -- the
+                    # last session's date stands in for "now" from the
+                    # conversation's own point of view (see the Question
+                    # docstring above).
+                    as_of=sessions[-1].date if sessions else None,
                 )
             )
     return questions

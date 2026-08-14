@@ -101,7 +101,25 @@ export function buildPromptContext(packet: ContextPacket | null | undefined): st
     const value = JSON.stringify(fact.value);
     const validFrom = fact.valid_from ?? "unknown date";
     const sources = (fact.source_event_ids ?? []).join(",") || "no-source";
-    let marker = fact.attributed_to
+    let marker = "";
+    if (fact.freshness === "unconfirmed") {
+      const last = fact.last_confirmed ?? "an unknown date";
+      marker +=
+        ` — UNCONFIRMED since ${last}: past its freshness horizon, ` +
+        "re-confirm with the subject before relying on it";
+    } else if (fact.freshness === "stale") {
+      // 14 aout, mecanisme D (research/Diagnostic_Couverture_2026-08-14.md):
+      // a fast-changing fact past its horizon is served, not hidden --
+      // uncertain, not necessarily wrong.
+      const last = fact.last_confirmed ?? "an unknown date";
+      marker +=
+        ` — STALE since ${last}: a fast-changing value past its freshness ` +
+        "horizon, not necessarily wrong but not guaranteed current either " +
+        "— treat it as the best available answer, not a certainty, and " +
+        "prefer to re-confirm with the subject before relying on it for " +
+        "anything consequential";
+    }
+    marker += fact.attributed_to
       ? ` [reported by a third party (${fact.attributed_to}) — not a statement by the subject]`
       : "";
     if (fact.contested) {

@@ -20,10 +20,14 @@ untrusted origin, or the 3rd+ value once a pair is already capped, see
 CONFLICT_SET_MAX_MEMBERS) — is NOT a disagreement to show, it is a
 not-yet-trusted or not-yet-a-real-conflict value: still blocked outright,
 reason_code conflict_open, exactly as before.
-Post-retrieval, a volatility filter (M2) excludes a volatile/ephemeral fact
-past its freshness horizon from "current" (reason_code volatility_expired);
-a slow fact past its horizon is still served, flagged "unconfirmed" — see
-`_fact_freshness`.
+Post-retrieval, a volatility check (M2) degrades a fact past its freshness
+horizon rather than hiding it: a slow fact is served flagged "unconfirmed",
+a volatile/ephemeral fact is served flagged "stale" (14 aout — see
+`_fact_freshness`; hard exclusion is reserved for superseded/deleted facts
+and untrusted-origin instructions, never for "not recently reconfirmed").
+`as_of` controls what "now" means for every freshness/recency computation
+in one call — defaults to the real wall clock, unchanged for any caller
+that omits it; see `build_context`.
 
 Score = 0.6 * cosine similarity (pgvector embedding)
       + 0.25 * full-text rank (ts_rank_cd over the GENERATED search_vector
@@ -76,7 +80,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import Float, select
+from sqlalchemy import Float, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import func
 
@@ -340,15 +344,30 @@ def volatility_horizon(volatility: str) -> timedelta | None:
 
 
 def _fact_freshness(row: Any, now: datetime) -> str:
-    """"current" | "unconfirmed" | "expired" for one retrieved fact row.
+    """"current" | "unconfirmed" | "stale" for one retrieved fact row.
 
     Clock: coalesce(last_reinforced_at, valid_from, recorded_from) — a
     write-time reinforcement (migration 0015) already refreshes
     last_reinforced_at on every re-assertion of the same value, so it
-    doubles as the freshness clock without a separate column. Past its
-    horizon, a slow fact stays served but flagged ("unconfirmed" — the
-    packet says so honestly); a volatile/ephemeral fact is NEVER served
-    as current ("expired": excluded, traced as volatility_expired).
+    doubles as the freshness clock without a separate column, measured
+    against `now` (real wall-clock time, or the caller's `as_of` — see
+    `build_context`).
+
+    14 aout (mecanisme D, research/Diagnostic_Couverture_2026-08-14.md): a
+    volatile/ephemeral fact past its horizon used to be excluded outright
+    ("expired", hard gate) -- changed to served, flagged "stale", same
+    honest-degradation treatment a "slow" fact already got as "unconfirmed".
+    Exclusion was never the right contract for "we have not reconfirmed this
+    recently": the fact is not FALSE, it is UNCERTAIN, and hiding it left the
+    agent knowing neither the value nor that a value existed. Measured
+    effect on a benchmark harness that replays conversations dated years in
+    the past against the real clock: ~38% of a subject's facts hidden on
+    every single query regardless of relevance, since a 7-60 day horizon is
+    dwarfed by a multi-year gap -- not a benchmark-only artifact, the same
+    mechanism degrades any real subject who returns after a long pause.
+    Hard exclusion (never served as current) stays reserved for facts that
+    are actually gone: superseded, deleted, or an untrusted-origin
+    instruction (M8) -- see the module docstring.
     """
     horizon = volatility_horizon(getattr(row, "volatility", "stable") or "stable")
     if horizon is None:
@@ -356,7 +375,7 @@ def _fact_freshness(row: Any, now: datetime) -> str:
     reference = row.last_reinforced_at or row.valid_from or row.recorded_from
     if reference is None or now - reference <= horizon:
         return "current"
-    return "unconfirmed" if row.volatility == "slow" else "expired"
+    return "unconfirmed" if row.volatility == "slow" else "stale"
 
 
 def _packet_fact(
@@ -433,12 +452,28 @@ async def build_context(
     budget_tokens: int = 900,
     embedder: Embedder | None = None,
     extra_warnings: list[str] | None = None,
+    as_of: datetime | None = None,
 ) -> tuple[dict[str, Any], int, uuid.UUID]:
     """Assemble a ContextPacket. Returns (packet, token_count, trace_id).
 
     `extra_warnings` (e.g. policy warnings computed by the caller) are
     appended to the packet warnings BEFORE the trace is persisted, so the
     inspection trace shows exactly what the API returned.
+
+    `as_of` (14 aout, mecanisme D): the point in time "now" means for every
+    freshness computation in this call -- volatility horizons, the
+    valid_to scope filter, and the recency term of both scoring formulas.
+    Defaults to the real wall clock (`func.now()`), unchanged behavior for
+    every caller that omits it. Exists because Haki's own ledger is
+    bitemporal (occurred_at vs recorded_at) but retrieval read it against
+    the SERVER's clock regardless -- fine for a real subject whose
+    conversations track real time, silently wrong for anything replayed
+    from a fixed point in the past (an eval harness, a backfill, a subject
+    resuming after a long gap): a volatile fact from "last week" relative
+    to the conversation looked years-stale relative to whenever this
+    function happens to run. See research/Diagnostic_Couverture_2026-08-14.md
+    for the measured effect (~38% of facts hidden on every query on the
+    LoCoMo/LongMemEval harnesses before this parameter existed).
     """
     if budget_tokens <= 0:
         raise ApiError(
@@ -454,7 +489,9 @@ async def build_context(
     query_embedding = (await embedder.embed([query]))[0]
     stage_timings["embed"] = round((time.perf_counter() - embed_start) * 1000)
 
-    now = func.now()
+    # A bound literal (not just a Python datetime) so it can take part in
+    # SQL arithmetic (`now - Fact.valid_from`) exactly like func.now() does.
+    now = literal(as_of) if as_of is not None else func.now()
     similarity = func.coalesce(1 - Fact.embedding.cosine_distance(query_embedding), 0.0)
     # websearch_to_tsquery accepts arbitrary user text (plain to_tsquery would
     # raise on queries without &/| operators). search_vector is a GENERATED
@@ -592,7 +629,7 @@ async def build_context(
         )
         contested_rows_by_id = {f.id: f for f in contested_members}
 
-    now_dt = datetime.now(timezone.utc)
+    now_dt = as_of or datetime.now(timezone.utc)
     decisions: list[dict[str, Any]] = []
     eligible: list[Any] = []
     freshness_by_id: dict[uuid.UUID, str] = {}
@@ -606,17 +643,10 @@ async def build_context(
                 }
             )
             continue
-        freshness = _fact_freshness(row, now_dt)
-        if freshness == "expired":
-            decisions.append(
-                {
-                    "fact_id": str(row.id),
-                    "action": "excluded",
-                    "reason_code": "volatility_expired",
-                }
-            )
-            continue
-        freshness_by_id[row.id] = freshness
+        # 14 aout (mecanisme D): "stale" (volatile/ephemeral past horizon) is
+        # no longer excluded here -- it is served like "unconfirmed" always
+        # was, annotated in the packet via freshness_by_id/_packet_fact.
+        freshness_by_id[row.id] = _fact_freshness(row, now_dt)
         eligible.append(row)
 
     # A held/quarantined candidate is blocked too (it is not active, so it
@@ -785,15 +815,6 @@ async def build_context(
                     if sibling is None:
                         continue
                     sibling_freshness = _fact_freshness(sibling, now_dt)
-                    if sibling_freshness == "expired":
-                        decisions.append(
-                            {
-                                "fact_id": str(sibling_id),
-                                "action": "excluded",
-                                "reason_code": "volatility_expired",
-                            }
-                        )
-                        continue
                     sibling_cost = estimate_tokens(_render(sibling.predicate, sibling.value))
                     if token_count + sibling_cost > budget_tokens:
                         decisions.append(
@@ -861,15 +882,6 @@ async def build_context(
             if token_count >= budget_tokens:
                 break
             freshness = _fact_freshness(row, now_dt)
-            if freshness == "expired":
-                decisions.append(
-                    {
-                        "fact_id": str(row.id),
-                        "action": "excluded",
-                        "reason_code": "volatility_expired",
-                    }
-                )
-                continue
             cost = estimate_tokens(_render(row.predicate, row.value))
             if token_count + cost <= budget_tokens:
                 packet_facts.append(_packet_fact(row, freshness))
@@ -931,12 +943,11 @@ async def build_context(
             "conflicting value alongside them — apply the most recent "
             "'valid from' date to determine which is current"
         )
-    n_expired = sum(1 for d in decisions if d["reason_code"] == "volatility_expired")
-    if n_expired:
-        warnings.append(
-            f"volatility_expired: {n_expired} fact(s) past their volatility "
-            "horizon hidden from current facts"
-        )
+    # 14 aout (mecanisme D): volatility no longer hides anything -- past its
+    # horizon a fact is served flagged "stale" (see _fact_freshness), same
+    # silent-in-warnings treatment "unconfirmed" already got. No aggregate
+    # warning here on purpose, for the same reason: it is per-fact honest
+    # degradation, not a packet-level problem worth surfacing as a warning.
     warnings.extend(extra_warnings or [])
 
     # Noisy-failure contract (ContextStatus): "degraded" whenever there is

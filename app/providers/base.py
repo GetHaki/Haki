@@ -19,7 +19,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.models import FACT_KINDS, VOLATILITY_CLASSES, Event
+from app.models import FACT_KINDS, MEMORY_FORMS, VOLATILITY_CLASSES, Event
 
 # Embedding dimension of the `facts.embedding` column (vector(384), migration
 # 0003). Every embedder selected by config MUST produce vectors of this size.
@@ -112,6 +112,18 @@ class ExtractedFact(BaseModel):
     )
     volatility: str | None = Field(
         default=None, pattern="^(" + "|".join(VOLATILITY_CLASSES) + ")$"
+    )
+    # Memory form (mechanism C, 15 aout): "state" (a scalar attribute that
+    # changes over time -- the default, unchanged behavior) or "event" (an
+    # accumulating occurrence -- volunteered somewhere, tried a restaurant,
+    # attended an event -- where a new mention is a NEW fact, never a
+    # replacement or a contradiction of the previous ones). None = server
+    # default ("state" for a brand new identity; inherited from the
+    # matched existing fact otherwise, see app.consolidator._apply_
+    # candidate) -- a provider that never heard of this field keeps
+    # working unchanged, exactly like fact_kind/volatility above.
+    memory_form: str | None = Field(
+        default=None, pattern="^(" + "|".join(MEMORY_FORMS) + ")$"
     )
 
     @model_validator(mode="after")

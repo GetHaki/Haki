@@ -34,6 +34,19 @@ FACT_KINDS: tuple[str, ...] = ("attribute", "preference", "instruction")
 # the pre-M2 behavior every existing fact keeps.
 VOLATILITY_CLASSES: tuple[str, ...] = ("stable", "slow", "volatile", "ephemeral")
 
+# Memory form (mechanism C, 15 aout -- migration 0018): whether a
+# (subject, predicate, qualifiers) identity holds ONE current scalar value
+# ("state" -- the only behavior that existed before this field: create/
+# supersede/conflict against the single active fact) or ACCUMULATES
+# independent occurrences ("event" -- every create is its own permanently
+# active row, never fused/superseded/put in conflict with the others under
+# the same identity). See app.consolidator._apply_candidate for where the
+# form is decided/inherited, and the module docstring there for the
+# deterministic "conflict overflow -> reclassify as event" mechanism that
+# is the only sanctioned way an identity moves from state to event once it
+# already has an active fact -- never a single candidate's own say-so.
+MEMORY_FORMS: tuple[str, ...] = ("state", "event")
+
 
 class Fact(Base):
     """Versioned, bitemporal memory fact (contract B.2)."""
@@ -92,6 +105,11 @@ class Fact(Base):
     # column is needed.
     fact_kind: Mapped[str] = mapped_column(String(32), default="attribute")
     volatility: Mapped[str] = mapped_column(String(16), default="stable")
+
+    # Memory form (mechanism C, migration 0018) -- see MEMORY_FORMS above.
+    memory_form: Mapped[str] = mapped_column(
+        String(16), default="state", server_default="state"
+    )
 
     # Origin trust inherited from the source event (M8) — what authority
     # this fact was born with. Drives the consolidator's supersession

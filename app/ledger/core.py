@@ -179,6 +179,7 @@ async def create_fact(
     fact_kind: str = "attribute",
     volatility: str = "stable",
     origin_trust: str = "trusted",
+    memory_form: str = "state",
 ) -> Fact:
     fact = Fact(
         org_id=org_id,
@@ -198,13 +199,14 @@ async def create_fact(
         fact_kind=fact_kind,
         volatility=volatility,
         origin_trust=origin_trust,
+        memory_form=memory_form,
     )
     session.add(fact)
     await session.flush()
     return fact
 
 
-# Explicit status lifecycle (PRD — "Modèle de mémoire et règles de cycle de vie").
+# Explicit status lifecycle (PRD -- "Memory model and lifecycle rules").
 # candidate -> superseded exists for conflict resolution (sprint 6): the
 # losing fact of a conflict set is typically still a candidate, and
 # resolving the set supersedes it (with supersedes_id on the kept fact).

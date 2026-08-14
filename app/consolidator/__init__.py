@@ -9,12 +9,17 @@ configured LLM provider, validates them, and applies the fact lifecycle:
 - action "supersede" -> the current active fact becomes `superseded` (Ledger
   transition), the new fact becomes `active` with `supersedes_id`;
 - action "create" with a different value than an active fact of the same
-  identity -> both facts enter an OPEN conflict set; the new fact stays
-  `candidate` and is never served while the conflict is open. A conflict
-  set holds at most CONFLICT_SET_MAX_MEMBERS facts: a third competing
-  value is held in its own single-member open set rather than joining, so
-  one bad match cannot turn a set into a magnet that swallows every later
-  candidate;
+  identity, memory_form "state" -> both facts enter an OPEN conflict set;
+  the new fact stays `candidate` and is never served while the conflict is
+  open. A conflict set holds at most CONFLICT_SET_MAX_MEMBERS facts: a
+  third competing value no longer joins or gets held apart -- it
+  reclassifies the WHOLE identity to memory_form "event" (mechanism C,
+  15 aout), dissolves the conflict, and activates every member, since a
+  predicate that keeps producing new competing values was never a scalar
+  to begin with;
+- action "create" on an identity whose memory_form is "event" -> never a
+  contradiction, whatever else is already active under it; goes straight
+  to `active`, exactly like a brand-new identity would;
 - action "reject" -> the candidate is counted (`rejected`,
   `rejected_with_reason`) and logged, NEVER becomes a Fact;
 - otherwise -> candidate promoted to `active`.
@@ -794,6 +799,19 @@ async def _apply_candidate(
     fact_kind = candidate.fact_kind or (existing.fact_kind if inherit else "attribute")
     volatility = candidate.volatility or (existing.volatility if inherit else "stable")
 
+    # Memory form (mechanism C, 15 aout): unlike fact_kind/volatility above,
+    # ALWAYS inherited whenever an existing identity was matched -- on
+    # "create" too, not just "supersede". This is deliberate: once an
+    # identity (subject, predicate, qualifiers) has an active fact, its
+    # form is settled, and a single later candidate's own guess must never
+    # flip it back and forth between runs (extraction is non-deterministic
+    # -- observed directly this session). The ONLY sanctioned way an
+    # identity moves from "state" to "event" is the conflict-overflow
+    # reclassification below -- a structural, one-way, loud transition,
+    # never a silent per-candidate toggle. A brand-new identity (existing
+    # is None) takes the candidate's own declared form, default "state".
+    memory_form = existing.memory_form if existing is not None else (candidate.memory_form or "state")
+
     # Provenance authority (M8). Attribution first: a fact born from a
     # third party is stamped with who actually said it — deterministic,
     # not prompt-dependent (the prompt also asks for a named value, but
@@ -842,6 +860,7 @@ async def _apply_candidate(
             fact_kind=fact_kind,
             volatility=volatility,
             origin_trust=event.origin_trust or "trusted",
+            memory_form=memory_form,
         )
         held_fact.embedding = embedding
         held_fact.search_text = _search_text(candidate.predicate, candidate.value)
@@ -864,6 +883,7 @@ async def _apply_candidate(
                 subject_id=event.subject_id,
                 fact_ids=[held_fact.id],
                 status="open",
+                kind="quarantine",
                 reason=reason,
             )
         )
@@ -903,6 +923,7 @@ async def _apply_candidate(
         fact_kind=fact_kind,
         volatility=volatility,
         origin_trust=event.origin_trust or "trusted",
+        memory_form=memory_form,
     )
     fact.embedding = embedding
     fact.search_text = _search_text(candidate.predicate, value)
@@ -920,6 +941,19 @@ async def _apply_candidate(
         return
 
     # action == "create"
+    if memory_form == "event":
+        # Mechanism C (15 aout): an accumulating occurrence is never a
+        # contradiction of the others under the same identity, however
+        # many are already active -- go straight to active, exactly like
+        # a brand-new identity (existing is None) would. This is the
+        # entire fix for the diagnosed failure (research/Diagnostic_
+        # Couverture_2026-08-14.md, cas Maria): 5 genuinely different
+        # volunteering occurrences no longer compete for one "current"
+        # slot or get capped into invisible quarantine.
+        await transition_fact_status(session, fact.id, FactStatus.active)
+        result["created"] += 1
+        return
+
     if existing is not None and _canonical(existing.value) != _canonical(candidate.value):
         # Contradiction: both facts enter an open conflict set; the new fact
         # stays `candidate` until resolution (PRD lifecycle rule).
@@ -935,6 +969,7 @@ async def _apply_candidate(
                 subject_id=event.subject_id,
                 fact_ids=[existing.id, fact.id],
                 status="open",
+                kind="contradiction",
                 reason=(
                     f"predicate '{candidate.predicate}': "
                     f"{_canonical(existing.value)} vs {_canonical(candidate.value)}"
@@ -942,46 +977,51 @@ async def _apply_candidate(
             )
             session.add(conflict)
         elif len(conflict.fact_ids) >= CONFLICT_SET_MAX_MEMBERS:
-            # Cap reached. A conflict is a disagreement between two
-            # competing values of one fact; a third member is accumulation,
-            # not a three-way disagreement — the eval run found 3+ member
-            # sets in ~24% of cases and they were almost always an artefact
-            # of one bad match acting as a magnet, every later candidate
-            # joining and being blocked along with the rest.
+            # Cap reached with memory_form still "state" (an "event"
+            # candidate never reaches this branch at all -- see the early
+            # return above). Mechanism C (15 aout): a 3rd competing value
+            # under one identity is not "one bad match" to quarantine, it
+            # is PROOF this predicate was never a scalar in the first
+            # place -- the eval run that motivated the original cap found
+            # 3+ member sets in ~24% of cases, and the real diagnostic
+            # case (research/Diagnostic_Couverture_2026-08-14.md, Maria)
+            # showed exactly this: 5 genuinely distinct volunteering
+            # occurrences, capped into invisible quarantine one by one.
             #
-            # The candidate is held in its OWN single-member open set
-            # instead of joining: same mechanics as the M8 quarantine
-            # above, so it stays unserved, visible on the Conflicts page
-            # and resolvable, while the original pair stays a readable
-            # pair. Adding it to a SECOND set alongside the active fact
-            # would put that fact in two open sets at once and make
-            # `_open_conflict_set` pick between them arbitrarily.
-            session.add(
-                ConflictSet(
-                    project_id=event.project_id,
-                    subject_id=event.subject_id,
-                    fact_ids=[fact.id],
-                    status="open",
-                    reason=(
-                        f"predicate '{candidate.predicate}': "
-                        f"{_canonical(candidate.value)} held — the conflict on "
-                        f"this fact already has {len(conflict.fact_ids)} members"
-                    ),
-                )
-            )
+            # Reclassify the WHOLE identity as memory_form "event",
+            # dissolve the conflict, activate every member -- zero LLM
+            # calls, zero new threshold, reversible by an operator later
+            # if this really was a bad match (flip memory_form back to
+            # "state" and the ordinary conflict path resumes). A genuine
+            # scalar never reaches a 3rd competing value in the first
+            # place (its updates go through "supersede", not "create"),
+            # so this never fires on a real scalar.
+            other_id = next(fid for fid in conflict.fact_ids if fid != existing.id)
+            other = await session.get(Fact, other_id)
+            existing.memory_form = "event"
+            fact.memory_form = "event"
+            await transition_fact_status(session, fact.id, FactStatus.active)
+            if other is not None:
+                other.memory_form = "event"
+                if other.status is not FactStatus.active:
+                    await transition_fact_status(session, other.id, FactStatus.active)
+            conflict.status = "reclassified_event"
+            conflict.resolved_at = datetime.now(timezone.utc)
             await session.flush()
-            result["conflicts"] += 1
-            result["conflict_capped"] += 1
-            # Loud on purpose: repeated capping on one subject is the
-            # signature of a bad match upstream, and it is the counter to
-            # watch after any change to the matching rules.
+            result["created"] += 1
+            result["reclassified_event"] += 1
+            # Loud on purpose, like the capping it replaces: this is a
+            # structural change to how a predicate behaves for this
+            # subject from now on, worth watching after any change to the
+            # matching rules.
             logger.warning(
-                "consolidator: conflict set %s for subject %s is at capacity; "
-                "candidate fact %s (predicate '%s') held separately",
+                "consolidator: conflict set %s for subject %s reclassified as "
+                "memory_form=event (predicate '%s') -- %d fact(s) activated, "
+                "conflict dissolved",
                 conflict.id,
                 event.subject_id,
-                fact.id,
                 candidate.predicate,
+                len([f for f in (existing, other, fact) if f is not None]),
             )
             return
         else:
@@ -1040,6 +1080,14 @@ async def _process_job(
         # on their fact was already full. Worth its own counter — it is the
         # number to watch after any change to the matching rules.
         "conflict_capped": 0,
+        # Mechanism C (15 aout): a capped conflict automatically
+        # reclassified as memory_form="event" instead of held apart --
+        # counted separately from "created" (also incremented) because it
+        # is a structural signal worth watching, like conflict_capped was
+        # before it (this replaces most, not all, of what conflict_capped
+        # used to count -- only whichever candidate happens to still be
+        # memory_form "state" at cap time goes this way instead now).
+        "reclassified_event": 0,
         "duplicates": 0,
         "reinforced": 0,
         "quarantined": 0,

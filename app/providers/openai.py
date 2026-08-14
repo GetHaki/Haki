@@ -84,6 +84,16 @@ ORDER (reasoning always first — see why below):
 - volatility ("stable" | "slow" | "volatile" | "ephemeral", optional,
   default "stable"): how fast this fact goes stale WITHOUT any event
   saying so — see VOLATILITY below.
+- memory_form ("state" | "event", optional, default "state"): "state" = a
+  single current value for this measure, replaced by "supersede" when it
+  changes (employer, relationship status, a running total where only the
+  latest number matters). "event" = an ACCUMULATING occurrence where each
+  mention has its own details worth keeping individually and none of them
+  replaces the others (volunteered at a shelter, tried a restaurant,
+  attended a workshop) — every one of these is action "create", never
+  "supersede", and they coexist as separate facts under the SAME
+  predicate. See MEMORY FORM below for the full distinction and worked
+  examples.
 
 You receive the subject's currently ACTIVE facts in "existing_facts".
 
@@ -103,12 +113,21 @@ PREDICATE STABILITY: predicates are the identity of a fact.
   resolves near-matches downstream. When genuinely unsure whether something
   is a brand-new topic or an update to an existing one, prefer "supersede"
   over silently creating a parallel predicate for the same concept.
-- Incremental/cumulative attributes (a count, a running total, a list that
-  grows over time: bikes owned, books read, restaurants tried) are ALWAYS
-  an update to the SAME predicate via "supersede" with the new total/list —
-  never a new predicate for the latest item or the latest count.
+- A single running total where only the latest number matters (current
+  bike count, current weight) is memory_form "state": an update to the
+  SAME predicate via "supersede" with the new total — never a new
+  predicate for the latest count. But when each occurrence has its OWN
+  details worth keeping (which restaurant, which shelter, what happened),
+  use memory_form "event" instead (see MEMORY FORM below) — do not try to
+  hand-maintain a growing list inside a single supersede-d value; that
+  asks you to correctly merge old-list-plus-new-item from memory on every
+  single mention, and a single missed merge silently drops the earlier
+  items forever. Prefer letting the system accumulate independent event
+  facts and count/list them at read time.
 A brand-new topic is "create". Do NOT emit "create" for a predicate that
-already has an active fact — that would create a contradiction.
+already has an active fact of memory_form "state" — that would create a
+contradiction (memory_form "event" is the deliberate exception: repeated
+"create" under the same predicate is exactly what it is for).
 
 COMPLETENESS — do not extract only from one speaker's point of view:
 - An event's payload can contain statements from MULTIPLE people. Extract
@@ -211,6 +230,35 @@ later. Reject reasons, each with a worked example:
   prefere qu'on lui reponde en francais" describe a stable trait of the
   subject in the third person — extract them normally (e.g. predicate
   "preferred_address_form", value {"form": "tu"}).
+
+MEMORY FORM — is this ONE fact that changes, or MANY facts that add up?
+- "state": the predicate names a single measure that has exactly ONE
+  current true value at a time — relationship status, employer, home
+  city, current project. A new mention REPLACES the old value
+  ("supersede"); two different values under the same predicate+qualifiers
+  are a genuine contradiction, not a list.
+- "event": the predicate names something the subject DOES repeatedly,
+  where each occurrence is its own fact and none of them replaces the
+  others — volunteering at a place, trying a restaurant, attending a
+  workshop, a notable conversation or realization on a given date. Emit
+  EVERY occurrence as its own candidate, action "create", same predicate,
+  memory_form "event" — never "supersede" between them, and never invent
+  a fresh predicate per occurrence just to avoid them "colliding" (that
+  defeats being able to count/list them together later).
+- Worked example (the case this field exists for): a user mentions
+  volunteering at a homeless shelter in one session, then weeks later
+  mentions organizing a fundraiser for the same shelter, then later still
+  meeting someone memorable while volunteering there. These are THREE
+  separate memory_form "event" facts under one predicate (e.g.
+  "volunteering_experience"), each with its own value/date — not three
+  competing values of "what does the subject currently volunteer for",
+  and not three different predicates invented to dodge the identity
+  match. A later question like "what volunteering has the subject done?"
+  is answered by listing all of them, not by picking a "winner".
+- If genuinely unsure whether a predicate is state or event, ask: "if the
+  subject mentions this again next week with different details, does
+  that CONTRADICT what I already know, or ADD to it?" Contradicts ->
+  state. Adds to it -> event.
 
 VOLATILITY — most facts expire in silence; classify how fast:
 - stable: essentially never changes on its own (birthplace, native

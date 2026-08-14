@@ -469,28 +469,36 @@ async def _assert_value(client, subject: str, value: dict, at: str) -> None:
     await run_worker()
 
 
-async def test_a_third_value_never_joins_an_existing_conflict(client):
-    """A conflict is a disagreement between TWO competing values of one
-    fact. Letting a third join turns the set into a magnet: the eval run
-    found 3+ member sets in ~24% of conflicts, almost always accumulation
-    behind one bad match, with every member blocked from the packet
-    together. The third candidate is held in its own set instead — still
-    unserved, still visible and resolvable, but the original pair stays
-    readable as a pair."""
+async def test_a_third_value_reclassifies_the_identity_as_event(client):
+    """Mechanism C (15 aout): a conflict is a disagreement between TWO
+    competing values of one fact. A third candidate no longer joins the set
+    or gets held apart in a single-member quarantine — the eval run found
+    3+ member sets in ~24% of conflicts, and the real diagnostic case
+    (Maria, research/Diagnostic_Couverture_2026-08-14.md) showed this was
+    almost always proof the predicate was never a scalar in the first
+    place (5 genuinely distinct volunteering occurrences, capped one by
+    one). The whole identity is reclassified `memory_form="event"`, the
+    conflict is dissolved, and every member — old pair and newcomer alike —
+    is activated."""
     subject = "usr_conflict_cap_1"
     await _assert_value(client, subject, {"city": "Dakar"}, "2026-07-28T10:00:00Z")
     await _assert_value(client, subject, {"city": "Abidjan"}, "2026-07-28T11:00:00Z")
     await _assert_value(client, subject, {"city": "Lome"}, "2026-07-28T12:00:00Z")
 
-    conflicts = await _open_conflicts(subject)
-    assert [len(conflict.fact_ids) for conflict in conflicts] == [2, 1]
-    assert "held" in conflicts[1].reason
+    assert await _open_conflicts(subject) == []
+
+    facts = await _facts(subject, "office_city")
+    assert len(facts) == 3
+    assert all(fact.status is FactStatus.active for fact in facts)
+    assert all(fact.memory_form == "event" for fact in facts)
 
 
-async def test_capping_is_counted_separately_from_ordinary_conflicts(client):
-    """`conflict_capped` is the number to watch after any change to the
-    matching rules — repeated capping on one subject is the signature of a
-    bad match upstream, and it must not hide inside the conflicts total."""
+async def test_reclassification_is_counted_separately_from_ordinary_conflicts(client):
+    """`reclassified_event` is the number to watch after any change to the
+    matching rules — repeated reclassification on one subject is the
+    signature of a predicate that should never have been extracted as a
+    scalar in the first place, and it must not hide inside the conflicts
+    total."""
     subject = "usr_conflict_cap_2"
     await _assert_value(client, subject, {"city": "Dakar"}, "2026-07-28T10:00:00Z")
 
@@ -507,23 +515,21 @@ async def test_capping_is_counted_separately_from_ordinary_conflicts(client):
     await run_worker()
     pair_result = await _last_job_result()
     assert pair_result["conflicts"] == 1
-    assert pair_result["conflict_capped"] == 0
+    assert pair_result["reclassified_event"] == 0
 
     await _assert_value(client, subject, {"city": "Lome"}, "2026-07-28T12:00:00Z")
-    capped_result = await _last_job_result()
-    assert capped_result["conflicts"] == 1
-    assert capped_result["conflict_capped"] == 1
+    reclassified_result = await _last_job_result()
+    assert reclassified_result["conflicts"] == 0
+    assert reclassified_result["reclassified_event"] == 1
 
 
-async def test_a_held_third_value_is_still_kept_out_of_the_packet(client):
-    """Held apart must not mean quietly dropped OR quietly served: the
-    third value is a real row in its OWN single-member open conflict (a
-    held/quarantined candidate, not a two-sided disagreement), and that
-    stays hard-blocked (context reason_code 'conflict_open') even after
-    13 aout's "stop hiding real conflicts" change — only a genuine 2-member
-    conflict is now served, contested. The original pair (Dakar vs Abidjan)
-    IS one, so it's served, both sides marked contested; Lome never joined
-    a pair (capped), so it stays hidden."""
+async def test_a_reclassified_third_value_is_served_alongside_the_others(client):
+    """Once reclassified to `event`, none of the three values is a
+    contradiction of the others any more — all three are ordinary active
+    facts and all three are SERVED, uncontested (no open conflict remains
+    to mark them as such). This is the entire point of mechanism C: the
+    old capped-and-hidden Lome never reached the packet; the reclassified
+    one does."""
     subject = "usr_conflict_cap_3"
     await _assert_value(client, subject, {"city": "Dakar"}, "2026-07-28T10:00:00Z")
     await _assert_value(client, subject, {"city": "Abidjan"}, "2026-07-28T11:00:00Z")
@@ -546,6 +552,5 @@ async def test_a_held_third_value_is_still_kept_out_of_the_packet(client):
     )
     assert response.status_code == 200
     served = response.json()["packet"]["facts"]
-    assert {f["value"]["city"] for f in served} == {"Dakar", "Abidjan"}
-    assert all(f["contested"] for f in served)
-    assert "Lome" not in {f["value"]["city"] for f in served}
+    assert {f["value"]["city"] for f in served} == {"Dakar", "Abidjan", "Lome"}
+    assert not any(f["contested"] for f in served)

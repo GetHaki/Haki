@@ -57,6 +57,16 @@ pairing `lower_quartile` with `upper_quartile`. The extraction prompt is
 the other half of the same fix: a qualifier belongs in the `qualifiers`
 field, never buried in the predicate name.
 
+That guard's blind spot (13 aout, LongMemEval `ba61f0b9`): it also hides a
+genuine disagreement between an UNCONDITIONAL fact (empty qualifiers) and a
+QUALIFIED one under the same predicate — an empty qualifier set is not a
+third condition to keep apart from the others, so `_resolve_existing_fact`
+returning None there left two contradicting active facts with nobody ever
+comparing them. `_find_qualifier_ambiguous_active_fact` is the narrow,
+exact-predicate-only second net for exactly that shape, feeding its match
+into the ordinary create/contradiction path so it becomes a normal, served
+`contested` conflict instead of two silently-coexisting active facts.
+
 Guarantees:
 - a provider/DB exception fails the job (`failed`, error in payload) and
   NEVER deletes or alters the source events; the job stays replayable —
@@ -468,6 +478,66 @@ async def _resolve_existing_fact(
     return matched
 
 
+async def _find_qualifier_ambiguous_active_fact(
+    session: AsyncSession,
+    *,
+    project_id: str,
+    subject_id: str,
+    predicate: str,
+    qualifiers: dict[str, Any] | None,
+    value: dict[str, Any],
+) -> Fact | None:
+    """13 aout, fix 2 (LongMemEval ba61f0b9): a narrow second net for the one
+    case `_resolve_existing_fact`'s hard qualifier guard is not meant to
+    catch by design -- an UNCONDITIONAL fact (empty qualifiers, "this holds
+    for the subject in general") and a QUALIFIED fact under the exact same
+    predicate (a specific condition), asserting a DIFFERENT value. The hard
+    guard is right to keep "wake up time weekday" and "wake up time weekend"
+    apart -- two non-empty, genuinely different conditions -- but an empty
+    qualifier set is not a third condition to keep apart from the others; it
+    is the extractor's documented way of saying "no condition narrows this"
+    (see app.providers.openai's qualifier guidance). Two active facts, one
+    unconditional and one narrowed to a specific case, disagreeing on the
+    SAME predicate, is exactly the shape a conflict is for -- and today it
+    was invisible to `_apply_candidate`'s conflict logic, because that logic
+    only runs when `_resolve_existing_fact` returns a match, and that
+    function returns None the moment identity qualifiers differ at all
+    (real case: `women_representation_on_team` 5 vs 6, `{}` vs {"team_name":
+    "Rachel's team"} -- both stayed active side by side, neither ever
+    flagged).
+
+    Deliberately narrower than loosening the hard guard itself: exact
+    predicate match only (no alias chase, no semantic fallback -- widening
+    the pool is not needed here since the predicate string already matches
+    verbatim), exactly one side empty, values must actually differ. The
+    caller feeds the result into the ordinary create/contradiction path in
+    `_apply_candidate`, which opens a ConflictSet exactly as it already does
+    for a same-qualifier contradiction -- held for human review, served as
+    `contested`, never silently trusted either way.
+    """
+    candidate_identity = _identity_qualifiers(qualifiers)
+    stmt = select(Fact).where(
+        Fact.project_id == project_id,
+        Fact.subject_id == subject_id,
+        Fact.predicate == predicate,
+        Fact.status == FactStatus.active,
+    )
+    for fact in (await session.execute(stmt)).scalars().all():
+        fact_identity = _identity_qualifiers(fact.qualifiers)
+        if bool(fact_identity) == bool(candidate_identity):
+            # Both empty (the exact-match path above already catches this)
+            # or both non-empty (the hard guard's actual, still-intact
+            # target) -- not this narrow case.
+            continue
+        if _canonical(fact.value) == _canonical(value):
+            # Same value: not a contradiction, e.g. a general statement
+            # later reaffirmed with more specific context. Leave it to the
+            # ordinary duplicate/reinforcement paths, unchanged by this fix.
+            continue
+        return fact
+    return None
+
+
 async def _relevant_existing_facts(
     session: AsyncSession,
     *,
@@ -690,6 +760,15 @@ async def _apply_candidate(
         qualifiers=candidate.qualifiers,
         embedding=embedding,
     )
+    if existing is None and candidate.action == "create":
+        existing = await _find_qualifier_ambiguous_active_fact(
+            session,
+            project_id=event.project_id,
+            subject_id=event.subject_id,
+            predicate=target_predicate,
+            qualifiers=candidate.qualifiers,
+            value=candidate.value,
+        )
 
     if (
         candidate.action == "create"

@@ -98,6 +98,101 @@ async def test_same_predicate_different_qualifiers_are_two_facts(client):
     assert await _conflicts(subject) == []
 
 
+async def test_unqualified_and_qualified_disagreement_opens_a_conflict(client):
+    """13 aout, fix 2 (LongMemEval `ba61f0b9`): the guard above is right to
+    keep two non-empty, genuinely distinct conditions apart — but an empty
+    qualifier set is not a third condition, it is "no condition narrows
+    this". An unconditional fact and a qualified one under the SAME
+    predicate, disagreeing on the value, must not silently coexist as two
+    active facts the way weekday/weekend correctly does above — this is the
+    real case the LongMemEval run missed: "5 women on the team" (no
+    qualifier) followed by "6 women on Rachel's team" (team_name
+    qualifier), never flagged, both served as if uncontested."""
+    subject = "usr_qualifiers_conflict"
+    await capture(
+        client,
+        [
+            make_memory_event(
+                [
+                    mock_fact(
+                        "women_on_team",
+                        {"count": 5},
+                        subject_id=subject,
+                    )
+                ],
+                subject_id=subject,
+            )
+        ],
+    )
+    await run_worker()
+    await capture(
+        client,
+        [
+            make_memory_event(
+                [
+                    mock_fact(
+                        "women_on_team",
+                        {"count": 6},
+                        subject_id=subject,
+                        qualifiers={"team_name": "Rachel's team"},
+                    )
+                ],
+                subject_id=subject,
+                occurred_at="2026-07-28T11:00:00Z",
+            )
+        ],
+    )
+    await run_worker()
+
+    facts = await _facts(subject, "women_on_team")
+    assert len(facts) == 2
+    new = next(f for f in facts if f.value == {"count": 6})
+    assert new.status is FactStatus.candidate
+
+    conflicts = await _conflicts(subject)
+    assert len(conflicts) == 1
+    assert conflicts[0].status == "open"
+    assert set(conflicts[0].fact_ids) == {f.id for f in facts}
+
+
+async def test_unqualified_and_qualified_same_value_is_not_a_conflict(client):
+    """The narrow fix must not fire when the values actually agree — a
+    general statement later reaffirmed with more specific context is not a
+    disagreement, and stays out of scope for this fix (falls through to the
+    ordinary duplicate/reinforcement paths, unaffected by it)."""
+    subject = "usr_qualifiers_agree"
+    await capture(
+        client,
+        [
+            make_memory_event(
+                [mock_fact("women_on_team", {"count": 5}, subject_id=subject)],
+                subject_id=subject,
+            )
+        ],
+    )
+    await run_worker()
+    await capture(
+        client,
+        [
+            make_memory_event(
+                [
+                    mock_fact(
+                        "women_on_team",
+                        {"count": 5},
+                        subject_id=subject,
+                        qualifiers={"team_name": "Rachel's team"},
+                    )
+                ],
+                subject_id=subject,
+                occurred_at="2026-07-28T11:00:00Z",
+            )
+        ],
+    )
+    await run_worker()
+
+    assert await _conflicts(subject) == []
+
+
 async def test_an_update_lands_on_the_matching_qualifier_only(client):
     """Two conditions on file, then a new value for ONE of them. It must
     supersede its own reading and leave the other untouched — the whole

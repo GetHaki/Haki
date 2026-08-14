@@ -12,7 +12,15 @@ import sys
 import pytest
 
 from eval import datasets, metrics
-from eval.run import ROOT, parse_judge_output, parse_mem0_judge_output
+from eval.run import (
+    ROOT,
+    merge_packets,
+    mirror_subject,
+    parse_judge_output,
+    parse_mem0_judge_output,
+    question_events_mirrored,
+    target_speakers,
+)
 
 
 # --------------------------------------------------------------------------
@@ -136,7 +144,10 @@ def test_longmemeval_parsing(longmemeval_file):
 
 def test_locomo_parsing(locomo_file):
     questions = datasets.load_locomo(locomo_file)
-    assert [q.qtype for q in questions] == ["single-hop", "temporal", "adversarial", "open-domain"]
+    # 15 aout: category numbers -> names corrected against the official
+    # LoCoMo eval script (category 1 = multi-hop, 4 = single-hop -- see
+    # LOCOMO_CATEGORIES in eval/datasets.py).
+    assert [q.qtype for q in questions] == ["multi-hop", "temporal", "adversarial", "single-hop"]
     assert [q.abstention_expected for q in questions] == [False, False, True, False]
 
     adversarial = questions[2]
@@ -752,3 +763,90 @@ def test_merge_shards_refuses_different_datasets(tmp_path):
     result = _run_merge(tmp_path, shard0, shard1, run_id="test-merge-mismatch")
     assert result.returncode != 0
     assert "different datasets" in result.stdout
+
+
+# --------------------------------------------------------------------------
+# Mechanism E4 (15 aout, Sprint 1): mirrored per-speaker stores
+# --------------------------------------------------------------------------
+
+def _speaker_question(question="what did Caroline say?", speakers=("Caroline", "Melanie")):
+    return datasets.Question(
+        qid="conv1_q0",
+        qtype="single-hop",
+        question=question,
+        answer="a",
+        question_date=None,
+        abstention_expected=False,
+        sessions=[
+            datasets.Session(
+                session_id="conv1_s1",
+                date=datasets.FALLBACK_BASE,
+                messages=[
+                    datasets.Message(speaker="Caroline", content="I moved from Sweden."),
+                    datasets.Message(speaker="Melanie", content="I went camping."),
+                ],
+            )
+        ],
+        history_id="conv1",
+        speakers=list(speakers),
+    )
+
+
+def test_mirror_subject_is_scoped_per_speaker():
+    assert mirror_subject("conv1", "Caroline") == "conv1__Caroline"
+    assert mirror_subject("conv1", "Melanie") == "conv1__Melanie"
+
+
+def test_question_events_mirrored_normalizes_role_and_keeps_the_real_speaker_in_text():
+    question = _speaker_question()
+    events = question_events_mirrored(question, "Caroline", "org", "prj", "run1")
+    assert len(events) == 1
+    assert events[0]["subject_id"] == "conv1__Caroline"
+    messages = events[0]["payload"]["messages"]
+    caroline_msg = next(m for m in messages if m["content"].startswith("Caroline:"))
+    melanie_msg = next(m for m in messages if m["content"].startswith("Melanie:"))
+    assert caroline_msg["role"] == "user"
+    assert caroline_msg["content"] == "Caroline: I moved from Sweden."
+    assert melanie_msg["role"] == "assistant"
+    assert melanie_msg["content"] == "Melanie: I went camping."
+
+
+def test_target_speakers_routes_to_the_one_named_in_the_question():
+    question = _speaker_question(question="Where did Caroline move from?")
+    assert target_speakers(question) == ["Caroline"]
+
+
+def test_target_speakers_queries_both_when_neither_or_both_are_named():
+    both_named = _speaker_question(question="Did Caroline or Melanie go camping?")
+    assert target_speakers(both_named) == ["Caroline", "Melanie"]
+    neither_named = _speaker_question(question="Who went camping?")
+    assert target_speakers(neither_named) == ["Caroline", "Melanie"]
+
+
+def test_merge_packets_passes_a_single_body_through_untouched():
+    body = {"packet": {"facts": [{"id": "f1"}], "episodes": []}, "token_count": 10}
+    assert merge_packets([body]) is body
+
+
+def test_merge_packets_dedupes_and_sums_tokens_across_mirror_stores():
+    body_a = {
+        "packet": {
+            "facts": [{"id": "f1", "predicate": "born_in", "value": {"place": "Sweden"}}],
+            "episodes": [{"event_id": "e1", "excerpt": "..."}],
+        },
+        "token_count": 30,
+        "trace_id": "trace-a",
+    }
+    body_b = {
+        "packet": {
+            "facts": [{"id": "f2", "predicate": "hobby", "value": {"name": "camping"}}],
+            "episodes": [{"event_id": "e1", "excerpt": "..."}],  # same event, both stores
+        },
+        "token_count": 25,
+        "trace_id": "trace-b",
+    }
+    merged = merge_packets([body_a, body_b])
+    assert {f["id"] for f in merged["packet"]["facts"]} == {"f1", "f2"}
+    assert [e["event_id"] for e in merged["packet"]["episodes"]] == ["e1"]
+    assert merged["token_count"] == 55
+    assert merged["trace_ids"] == ["trace-a", "trace-b"]

@@ -11,7 +11,7 @@ Two formats are supported:
 - LoCoMo (https://github.com/snap-research/locomo, data/locomo10.json): one
   JSON list of conversations; each conversation has `session_N` /
   `session_N_date_time` ("1:56 pm on 8 May, 2023") keys and a `qa` list with
-  `category` 1..5 (1 single-hop, 2 temporal, 3 multi-hop, 4 open-domain,
+  `category` 1..5 (1 multi-hop, 2 temporal, 3 open-domain, 4 single-hop,
   5 adversarial/abstention).
 
 Both loaders return a uniform list of `Question`. Selection (`select`) is
@@ -31,11 +31,23 @@ from pathlib import Path
 # sees updates in the right order.
 FALLBACK_BASE = datetime(2023, 1, 1, tzinfo=timezone.utc)
 
+# 15 aout: corrected against the OFFICIAL LoCoMo eval script
+# (snap-research/locomo, task_eval/evaluation.py) -- category 1 gets
+# multi-hop-style partial-answer F1 splitting there, category 3 gets the
+# `answer.split(';')[0]` pre-processing distinctive of open-domain/
+# commonsense questions (13 questions/conversation, speculative framing --
+# cross-checked directly against eval/data/locomo10.json). The previous
+# mapping here (1: single-hop, 3: multi-hop, 4: open-domain) had these
+# three swapped -- only 2 (temporal) and 5 (adversarial) were ever correct.
+# This silently mislabeled every per-category breakdown in every LoCoMo
+# run and diagnostic before this fix; overall accuracy figures are
+# unaffected (they never depended on category naming), only the
+# per-qtype attribution.
 LOCOMO_CATEGORIES = {
-    1: "single-hop",
+    1: "multi-hop",
     2: "temporal",
-    3: "multi-hop",
-    4: "open-domain",
+    3: "open-domain",
+    4: "single-hop",
     5: "adversarial",
 }
 
@@ -81,6 +93,15 @@ class Question:
     # of view -- the natural reading of "the question is being asked right
     # after this conversation".
     as_of: datetime | None = None
+    # Mechanism E4 (15 aout, Sprint 1): the real named speakers of this
+    # history, in source order (LoCoMo: conversation["speaker_a"/"speaker_b"]
+    # -- always exactly 2, both real names, never "user"/"assistant").
+    # Empty for LongMemEval, whose "speaker" is already the normalized
+    # "user"/"assistant" role -- the shared-store attribution problem this
+    # mechanism targets does not exist there. Populated regardless of
+    # whether the speaker-mirror protocol is enabled for this run; it is
+    # only ACTED on when `config["speaker_mirror"]` is set (see eval/run.py).
+    speakers: list[str] = field(default_factory=list)
 
 
 def estimate_tokens(text: str) -> int:
@@ -163,6 +184,12 @@ def load_locomo(path: str | Path) -> list[Question]:
     for conv in raw:
         sample_id = str(conv.get("sample_id", f"conv{len(questions)}"))
         conversation = conv["conversation"]
+        # Mechanism E4: the two real speaker names, straight from the
+        # source (not inferred from message text) -- present on every
+        # LoCoMo conversation in the official dataset shape.
+        speakers = [
+            s for s in (conversation.get("speaker_a"), conversation.get("speaker_b")) if s
+        ]
         sessions: list[Session] = []
         index = 1
         while f"session_{index}" in conversation:
@@ -210,6 +237,7 @@ def load_locomo(path: str | Path) -> list[Question]:
                     # conversation's own point of view (see the Question
                     # docstring above).
                     as_of=sessions[-1].date if sessions else None,
+                    speakers=speakers,
                 )
             )
     return questions

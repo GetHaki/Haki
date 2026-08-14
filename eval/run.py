@@ -98,6 +98,107 @@ def question_events(question: datasets.Question, org_id: str, project_id: str, r
     return events
 
 
+# Mechanism E4 (15 aout, Sprint 1): mirrored per-speaker stores. Real
+# effect measured (AFA paper, cited in research/Haki_Livre_Construction_
+# 2026-08-15.md): named-entity attribution in a store SHARED between two
+# speakers falls to 35.7% (below chance -- the system actively drifts
+# to the wrong person); with one store per speaker, 61.3% (+25 points).
+# The convention read from the official harness code (mem0, OmniMemEval):
+# two mirror stores per conversation -- for speaker A's store, A's own
+# turns are role "user" and B's are "assistant" (and the reverse for B's
+# store); the real speaker name is kept as an explicit prefix in the
+# TEXT of every turn, so "who said what" survives the role normalization.
+#
+# Opt-in (config["speaker_mirror"]): the default (unset) ingestion path
+# above is untouched, so every existing config/run stays reproducible
+# exactly as before. Only acts on questions carrying `speakers` (LoCoMo;
+# LongMemEval's "speaker" is already the normalized user/assistant role,
+# no shared-store ambiguity to fix there -- see the Question docstring).
+def mirror_subject(history_id: str, speaker: str) -> str:
+    return f"{history_id}__{speaker}"[:128]
+
+
+def question_events_mirrored(
+    question: datasets.Question,
+    speaker: str,
+    org_id: str,
+    project_id: str,
+    run_id: str,
+) -> list[dict]:
+    subject = mirror_subject(question.history_id or question.qid, speaker)
+    events = []
+    for i, session in enumerate(question.sessions):
+        events.append(
+            {
+                "org_id": org_id,
+                "project_id": project_id,
+                "subject_type": "user",
+                "subject_id": subject,
+                "kind": "chat_session",
+                "occurred_at": session.date.astimezone(timezone.utc).isoformat(),
+                "payload": {
+                    "session_id": session.session_id,
+                    "date": session.date.astimezone(timezone.utc).isoformat(),
+                    "messages": [
+                        {
+                            "role": "user" if m.speaker == speaker else "assistant",
+                            "content": f"{m.speaker}: {m.content}",
+                        }
+                        for m in session.messages
+                    ],
+                },
+                "idempotency_key": f"{run_id}:{subject}:{i}",
+            }
+        )
+    return events
+
+
+def target_speakers(question: datasets.Question) -> list[str]:
+    """Which mirror store(s) to query for this question: the ONE speaker
+    explicitly named in the question text (whole-word, case-insensitive),
+    or every speaker if zero or both are named -- "route to the subject
+    the question names, both otherwise" (the book's own phrasing)."""
+    named = [
+        speaker
+        for speaker in question.speakers
+        if re.search(rf"\b{re.escape(speaker)}\b", question.question, re.IGNORECASE)
+    ]
+    return named if len(named) == 1 else question.speakers
+
+
+def merge_packets(bodies: list[dict]) -> dict:
+    """Merge several /v1/context response bodies (one per queried mirror
+    store) into one packet: facts and episodes deduplicated by id (mirror
+    stores are disjoint by construction, but a defensive dedup costs
+    nothing), token_count summed, warnings/status of the LAST body kept
+    (informational only, never affects scoring)."""
+    if len(bodies) == 1:
+        return bodies[0]
+    seen_fact_ids: set[str] = set()
+    seen_episode_ids: set[str] = set()
+    facts: list[dict] = []
+    episodes: list[dict] = []
+    token_count = 0
+    trace_ids = []
+    for body in bodies:
+        packet = body["packet"]
+        for fact in packet.get("facts", []):
+            if fact["id"] not in seen_fact_ids:
+                seen_fact_ids.add(fact["id"])
+                facts.append(fact)
+        for episode in packet.get("episodes", []):
+            if episode["event_id"] not in seen_episode_ids:
+                seen_episode_ids.add(episode["event_id"])
+                episodes.append(episode)
+        token_count += body.get("token_count", 0)
+        trace_ids.append(body.get("trace_id"))
+    merged = dict(bodies[-1])
+    merged["packet"] = {**bodies[-1]["packet"], "facts": facts, "episodes": episodes}
+    merged["token_count"] = token_count
+    merged["trace_ids"] = trace_ids
+    return merged
+
+
 def parse_judge_output(text: str) -> dict:
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if not match:
@@ -475,22 +576,57 @@ async def run(args: argparse.Namespace) -> int:
                 t0 = time.perf_counter()
                 ingest_s = 0.0
                 ingested_now = False
-                if subject not in ingested and not args.reuse_project:
-                    events = question_events(question, org_id, project_id, run_id)
-                    await haki.capture(api_key, events)
-                    await haki.consolidate_until_idle(api_key, project_id)
-                    ingested.add(subject)
+                # Mechanism E4: mirrored per-speaker stores, opt-in and only
+                # for a question that actually carries named speakers
+                # (LoCoMo). Every existing config/run keeps the single
+                # shared-store path below unchanged.
+                mirrored = bool(config.get("speaker_mirror")) and bool(question.speakers)
+                if mirrored:
+                    for speaker in question.speakers:
+                        mirror = mirror_subject(question.history_id or question.qid, speaker)
+                        if mirror not in ingested and not args.reuse_project:
+                            events = question_events_mirrored(
+                                question, speaker, org_id, project_id, run_id
+                            )
+                            await haki.capture(api_key, events)
+                            await haki.consolidate_until_idle(api_key, project_id)
+                            ingested.add(mirror)
+                            ingested_now = True
                     ingest_s = time.perf_counter() - t0
-                    ingested_now = True
 
-                body, latency_ms = await haki.context(
-                    api_key,
-                    project_id,
-                    subject,
-                    question.question,
-                    config.get("context_budget_tokens", 900),
-                    as_of=question.as_of,
-                )
+                    bodies = []
+                    latencies = []
+                    for speaker in target_speakers(question):
+                        mirror = mirror_subject(question.history_id or question.qid, speaker)
+                        one_body, one_latency = await haki.context(
+                            api_key,
+                            project_id,
+                            mirror,
+                            question.question,
+                            config.get("context_budget_tokens", 900),
+                            as_of=question.as_of,
+                        )
+                        bodies.append(one_body)
+                        latencies.append(one_latency)
+                    body = merge_packets(bodies)
+                    latency_ms = sum(latencies)
+                else:
+                    if subject not in ingested and not args.reuse_project:
+                        events = question_events(question, org_id, project_id, run_id)
+                        await haki.capture(api_key, events)
+                        await haki.consolidate_until_idle(api_key, project_id)
+                        ingested.add(subject)
+                        ingest_s = time.perf_counter() - t0
+                        ingested_now = True
+
+                    body, latency_ms = await haki.context(
+                        api_key,
+                        project_id,
+                        subject,
+                        question.question,
+                        config.get("context_budget_tokens", 900),
+                        as_of=question.as_of,
+                    )
                 facts = body["packet"]["facts"]
                 episodes = body["packet"].get("episodes", [])
                 memory = (

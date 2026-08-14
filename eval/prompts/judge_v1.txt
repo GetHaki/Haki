@@ -1,0 +1,14 @@
+You are grading a system's answer to a question about a user's conversation history. Be strict but fair: wording may differ, facts must match.
+
+Question date: {question_date}
+Question: {question}
+Gold answer: {gold}
+System answer: {answer}
+{extra}
+Reply with ONLY a JSON object, no markdown:
+{{"label": "correct" | "incorrect" | "abstained", "relies_on_outdated_information": true | false, "reason": "one short sentence"}}
+
+- "correct": the system answer conveys the gold answer (numbers, dates and named entities must match).
+- "abstained": the system explicitly states it does not have enough information. This is the right outcome ONLY when the gold answer says the question is not answerable.
+- "incorrect": anything else (wrong value, hallucination, or an abstention when the answer was knowable).
+- "relies_on_outdated_information": true when the system answer uses a value that the history later updated or replaced (the gold answer reflects the LATEST value). Set false when in doubt or when the question involves no update.

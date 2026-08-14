@@ -1,0 +1,28 @@
+You answer a question about a user's past conversations, using only the memory provided below.
+
+Question date: {question_date}
+
+{memory}
+
+Question: {question}
+
+Before answering, resolve outdated values:
+1. Group the facts above by what they are actually about (the same real-world attribute can appear under different wordings or predicate names — e.g. "personal_best_5k" and "goal_personal_best_time" can both be the user's 5K personal best).
+2. Check whether the question contains an EXPLICIT contrast or reference-point marker naming a past state: "before I changed/updated it", "previously", "used to", "originally", "when I first started", "in the first [period]". Ordinary past-tense phrasing alone ("what WAS the amount...", "what WAS my score...", "how many did I have...") is NOT this signal — most questions about a single, final, settled fact are naturally phrased in the past tense too (the whole conversation already happened), and still want the CURRENT (most recent) value. Only step 4 below applies when one of the explicit markers is present; when in doubt, treat it as a CURRENT-value question (step 3).
+3. If the question asks for the CURRENT value (the default — see step 2): within each group, compare the "valid from" dates and keep ONLY the value with the LATEST date — that is the current truth. Discard the earlier value(s) in that group entirely; do not mention them and do not average or combine them with the latest one.
+4. If the question has an explicit past-state marker (step 2): keep the value whose date matches what the question is asking about — usually the EARLIER dated value in the group, not the latest. Never default to "most recent" for these questions; that would answer a different question than the one asked.
+5. Now answer the question using only the value(s) selected in step 3 or step 4.
+
+Worked example (current value, no explicit marker — the common case) — do not copy the numbers, they are illustrative only:
+  Memory contains: "account_balance: $350 (valid from 2024-01-10)" and "account_balance: $400 (valid from 2024-03-02)".
+  Question: "What WAS my account balance?" — past tense, but no "before"/"previously"/"originally" marker, so this still asks for the CURRENT value (the single settled fact, described after the fact). 2024-03-02 is later than 2024-01-10, so the balance is $400. The $350 value is outdated and must be ignored. Do NOT treat "was" alone as a request for the earlier value — that is the single most common mistake to avoid here.
+
+Worked example (past value, explicit marker) — do not copy the numbers, they are illustrative only:
+  Same memory as above. Question: "What was my account balance BEFORE it changed?" — the word "before" is the explicit marker, asking for the PREVIOUS value on purpose. The answer is $350 (the earlier dated value), not $400 — even though $400 is more recent, it is not what was asked.
+
+Rules:
+- Base your answer ONLY on the memory above, after resolving outdated values as instructed. Never use outside knowledge.
+- Answer concisely (one short sentence or phrase).
+- For date/duration questions, reason from the dates given in the memory and the question date.
+- An older value that was later replaced is outdated for a CURRENT-value question — never answer with it there, even if it appears first in the memory, seems more prominent, or the question happens to be phrased in the past tense without an explicit marker. Only an explicit past-state marker (step 2) makes the earlier value the correct answer.
+- If, after resolving outdated values, the memory does not contain the information needed, reply exactly: "I don't have enough information to answer."

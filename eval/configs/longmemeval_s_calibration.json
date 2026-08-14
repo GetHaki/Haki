@@ -1,0 +1,30 @@
+{
+  "name": "longmemeval_s_calibration",
+  "created": "2026-08-15",
+  "protocol": "mem0_calibration",
+  "dataset": {
+    "loader": "longmemeval",
+    "file": "eval/data/longmemeval_s_cleaned.json",
+    "url": "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json",
+    "sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+    "size_bytes": 277383467,
+    "questions": 500
+  },
+  "answer_model": "openai/gpt-4o-mini",
+  "judge_model": "openai/gpt-4o-2024-08-06",
+  "temperature": 0,
+  "context_budget_tokens": 900,
+  "baseline_max_context_tokens": null,
+  "prompts": {
+    "answer": "eval/prompts/answer_v3.txt",
+    "judge": "eval/prompts/judge_v1.txt"
+  },
+  "prices_per_mtok": {
+    "openai/gpt-4o-mini": { "input": 0.15, "output": 0.60 },
+    "openai/gpt-4o-2024-08-06": { "input": 2.50, "output": 10.00 }
+  },
+  "haki_project_prefix": "prj_eval_lme_calib",
+  "haki_org": "org_eval",
+  "selection": { "subset": null, "types": null },
+  "notes": "Sprint 0 (15 aout, research/Haki_Livre_Construction_2026-08-15.md): porte le protocole officiel LongMemEval (xiaowu0162/LongMemEval) pour un chiffre-titre comparable a la cible publiee 0.606 (lecture directe). `judge_model` DOIT rester gpt-4o-2024-08-06 -- le harnais officiel l'ASSERTE (print_qa_metrics.py: `assert entry['autoeval_label']['model'] == 'gpt-4o-2024-08-06'`), un autre modele produit un chiffre non conforme (confirme dans le code officiel, voir Verification_Livre_Construction_2026-08-15.md). Baseline = full-context, retriever_type=orig-session (toutes les sessions, aucune troncature), history_format=json, useronly=false, temperature 0, pas de chain-of-note (la variante CoN, cible 0.640, est une mesure separee, pas le gate M0). Juge: 5 templates par qtype + template d'abstention si '_abs' dans le qid, verbatim depuis evaluate_qa.py::get_anscheck_prompt (voir LME_JUDGE_TEMPLATES/LME_JUDGE_ABSTENTION_TEMPLATE dans eval/run.py), max_tokens=10, label = 'yes' in reponse.lower(). answer_prompt/judge_prompt de la config (answer_v3/judge_v1) ne servent qu'au systeme haki (produit inchange), jamais au systeme baseline en mode calibration. Gate M0: baseline directe dans [0.576, 0.640]. Types non filtres (selection.types=null) -- le protocole officiel ne distingue pas les 6 qtypes pour le score global (micro-moyenne sur tout, comme LoCoMo)."
+}

@@ -1,0 +1,28 @@
+{
+  "name": "locomo_bigcontext",
+  "created": "2026-08-12",
+  "dataset": {
+    "loader": "locomo",
+    "file": "eval/data/locomo10.json",
+    "url": "https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json",
+    "sha256": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+    "size_bytes": 2805274,
+    "questions": 1986
+  },
+  "answer_model": "openai/gpt-4o-mini",
+  "judge_model": "openai/gpt-4o-mini",
+  "temperature": 0,
+  "context_budget_tokens": 4000,
+  "baseline_max_context_tokens": 100000,
+  "prompts": {
+    "answer": "eval/prompts/answer_v3.txt",
+    "judge": "eval/prompts/judge_v1.txt"
+  },
+  "prices_per_mtok": {
+    "openai/gpt-4o-mini": { "input": 0.15, "output": 0.60 }
+  },
+  "haki_project_prefix": "prj_eval_locomo_bigctx",
+  "haki_org": "org_eval",
+  "selection": { "subset": null, "types": null },
+  "notes": "Variante figee de locomo.json, seul context_budget_tokens change (900 -> 4000), apres le chantier de reservation de budget episodes (12 aout) qui a donne +40 points sur l'echantillon LongMemEval de reference. But de ce run : mesurer l'effet a l'echelle sur les 1986 questions LoCoMo (1540 non-adversariales pour le score standard) -- le run precedent (locomo_locomo_full_run1, budget 900, avant ce chantier) donnait Haki a 7.4% en single-hop contre 30.5% pour la baseline, un ecart massif attribue en partie a un budget de contexte insuffisant pour la nuance narrative. Premiere mesure a grande echelle du chantier du 12 aout, au-dela de l'echantillon de 15 questions LongMemEval deja mesure."
+}

@@ -1,0 +1,29 @@
+{
+  "name": "locomo_calibration",
+  "created": "2026-08-15",
+  "protocol": "mem0_calibration",
+  "dataset": {
+    "loader": "locomo",
+    "file": "eval/data/locomo10.json",
+    "url": "https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json",
+    "sha256": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+    "size_bytes": 2805274,
+    "questions": 1986
+  },
+  "answer_model": "openai/gpt-4o-mini",
+  "judge_model": "openai/gpt-4o-mini",
+  "temperature": 0,
+  "context_budget_tokens": 900,
+  "baseline_max_context_tokens": null,
+  "prompts": {
+    "answer": "eval/prompts/answer_v3.txt",
+    "judge": "eval/prompts/judge_v1.txt"
+  },
+  "prices_per_mtok": {
+    "openai/gpt-4o-mini": { "input": 0.15, "output": 0.60 }
+  },
+  "haki_project_prefix": "prj_eval_locomo_calib",
+  "haki_org": "org_eval",
+  "selection": { "subset": null, "types": ["multi-hop", "temporal", "open-domain", "single-hop"] },
+  "notes": "Sprint 0 (15 aout, research/Haki_Livre_Construction_2026-08-15.md): porte le protocole standard mem0 (arXiv 2504.19413) pour que le chiffre-titre Haki soit directement comparable aux chiffres publies (full-context 72.90+-0.19%, Mem0 66.88%, Mem0-graph 68.44%) plutot qu'a un instrument maison decale. `protocol: mem0_calibration` active dans eval/run.py: le systeme baseline utilise le prompt exact de mem0 (evaluation/src/rag.py, question AVANT contexte, transcript plat '{ts} | {speaker}: {text}', AUCUNE troncature -- baseline_max_context_tokens ignore en mode calibration), et les DEUX systemes (haki + baseline) sont juges par ACCURACY_PROMPT de mem0 verbatim (eval/prompts/mem0_judge.txt) au lieu du juge maison -- generous grading, pas d'abstention, gpt-4o-mini, response_format json_object. `answer_prompt`/`judge_prompt` de la config (answer_v3/judge_v1) restent charges mais NE SERVENT PAS au systeme baseline en mode calibration (uniquement au systeme haki, dont le prompt de reponse reste inchange -- le produit, pas l'instrument). types = les 4 categories LoCoMo non-adversariales (mapping corrige le 15 aout, voir LOCOMO_CATEGORIES dans eval/datasets.py) = les 1540 questions standard. Gate M0: baseline dans [69.9, 75.9]. Lancer d'abord --systems baseline seul (rapide, ~3-4$, verifie le portage) avant d'ajouter haki."
+}

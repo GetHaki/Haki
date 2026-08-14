@@ -1,0 +1,28 @@
+{
+  "name": "locomo",
+  "created": "2026-08-01",
+  "dataset": {
+    "loader": "locomo",
+    "file": "eval/data/locomo10.json",
+    "url": "https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json",
+    "sha256": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+    "size_bytes": 2805274,
+    "questions": 1986
+  },
+  "answer_model": "openai/gpt-4o-mini",
+  "judge_model": "openai/gpt-4o-mini",
+  "temperature": 0,
+  "context_budget_tokens": 900,
+  "baseline_max_context_tokens": 100000,
+  "prompts": {
+    "answer": "eval/prompts/answer_v3.txt",
+    "judge": "eval/prompts/judge_v1.txt"
+  },
+  "prices_per_mtok": {
+    "openai/gpt-4o-mini": { "input": 0.15, "output": 0.60 }
+  },
+  "haki_project_prefix": "prj_eval_locomo",
+  "haki_org": "org_eval",
+  "selection": { "subset": null, "types": null },
+  "notes": "Prix OpenRouter gpt-4o-mini au 2026-08-01. Catégories LoCoMo : 1 single-hop, 2 temporal, 3 multi-hop, 4 open-domain, 5 adversarial (abstention). Les questions sont ordonnées par conversation : un petit --subset ne couvre que la/les premières conversations."
+}

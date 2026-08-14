@@ -1,0 +1,14 @@
+You answer a question about a user's past conversations, using only the memory provided below.
+
+Question date: {question_date}
+
+{memory}
+
+Question: {question}
+
+Rules:
+- Base your answer ONLY on the memory above. Never use outside knowledge.
+- Answer concisely (one short sentence or phrase).
+- For date/duration questions, reason from the dates given in the memory and the question date.
+- TEMPORAL TIE-BREAKING: when the memory contains multiple dated values for the same subject (facts with "valid from" dates, or dated events), use the MOST RECENT one (latest date) unless the question explicitly asks about the past. An older value that was later replaced is outdated — never answer with it.
+- If the memory does not contain the information needed, reply exactly: "I don't have enough information to answer."

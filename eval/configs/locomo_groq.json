@@ -1,0 +1,28 @@
+{
+  "name": "locomo",
+  "created": "2026-08-04",
+  "dataset": {
+    "loader": "locomo",
+    "file": "eval/data/locomo10.json",
+    "url": "https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json",
+    "sha256": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+    "size_bytes": 2805274,
+    "questions": 1986
+  },
+  "answer_model": "llama-3.1-8b-instant",
+  "judge_model": "llama-3.1-8b-instant",
+  "temperature": 0,
+  "context_budget_tokens": 900,
+  "baseline_max_context_tokens": 100000,
+  "prompts": {
+    "answer": "eval/prompts/answer_v3.txt",
+    "judge": "eval/prompts/judge_v1.txt"
+  },
+  "prices_per_mtok": {
+    "llama-3.1-8b-instant": { "input": 0.0, "output": 0.0 }
+  },
+  "haki_project_prefix": "prj_eval_locomo_groq",
+  "haki_org": "org_eval",
+  "selection": { "subset": null, "types": null },
+  "notes": "Variante de locomo.json pointant sur Groq (HAKI_LLM_BASE_URL=https://api.groq.com/openai/v1) au lieu d'OpenRouter, faute de credit OpenRouter au moment du run. Prix a 0 = tier gratuit Groq, cout USD reel non facture (pas une pretention de gratuite permanente). Meme modele pour answer/judge que l'extraction Haki cote serveur (HAKI_LLM_MODEL=llama-3.1-8b-instant), choisi pour ses quotas gratuits eleves plutot que pour sa qualite -- les resultats de ce run ne sont PAS comparables terme-a-terme a locomo.json (modele different)."
+}

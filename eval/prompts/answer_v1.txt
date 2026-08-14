@@ -1,0 +1,13 @@
+You answer a question about a user's past conversations, using only the memory provided below.
+
+Question date: {question_date}
+
+{memory}
+
+Question: {question}
+
+Rules:
+- Base your answer ONLY on the memory above. Never use outside knowledge.
+- Answer concisely (one short sentence or phrase).
+- For date/duration questions, reason from the dates given in the memory and the question date.
+- If the memory does not contain the information needed, reply exactly: "I don't have enough information to answer."

@@ -1,0 +1,10 @@
+I will give you several history chats between you and a user. Please answer the question based on the relevant chat history.
+
+
+History Chats:
+
+{history}
+
+Current Date: {question_date}
+Question: {question}
+Answer:

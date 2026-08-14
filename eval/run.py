@@ -116,6 +116,197 @@ def parse_judge_output(text: str) -> dict:
     }
 
 
+def parse_mem0_judge_output(text: str) -> dict:
+    """15 aout, Sprint 0 calibration: mirrors mem0's own judge parsing
+    (evaluation/metrics/llm_judge.py -- `json.loads(extract_json(...))["label"]`,
+    label in {"CORRECT", "WRONG"}). Deliberately simpler than
+    `parse_judge_output` above: mem0's judge has no "abstained" concept and
+    no `relies_on_outdated_information` field -- forcing either through
+    this parser would silently invent signal mem0's own protocol never
+    produces, defeating the point of calibrating against it."""
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        return {"label": "incorrect", "judge_reason": f"unparseable: {text[:120]}"}
+    try:
+        data = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return {"label": "incorrect", "judge_reason": f"unparseable: {text[:120]}"}
+    label = str(data.get("label", "WRONG")).strip().upper()
+    return {
+        "label": "correct" if label == "CORRECT" else "incorrect",
+        "judge_reason": text[:300],
+    }
+
+
+async def answer_mem0_baseline(
+    client: ChatClient, system_prompt: str, user_template: str, question: str, context: str
+) -> tuple[str, int, int]:
+    """15 aout, Sprint 0 calibration: mirrors mem0's own
+    `RAGManager.generate_response` (evaluation/src/rag.py) exactly -- a
+    system message plus a user message with question BEFORE context (kept
+    even though it reads backwards, because that is the calibration
+    target's actual protocol), temperature 0."""
+    prompt = user_template.format(question=question, context=context)
+    result = await client.chat(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.0,
+    )
+    return result.content, result.prompt_tokens, result.completion_tokens
+
+
+# 15 aout, Sprint 0 calibration: verbatim from the OFFICIAL LongMemEval repo
+# (xiaowu0162/LongMemEval, src/evaluation/evaluate_qa.py::get_anscheck_prompt)
+# -- five distinct judge templates dispatched by question type, plus a
+# SEPARATE abstention template used whenever the qid carries "_abs"
+# regardless of type (mirrors `abstention='_abs' in entry['question_id']`
+# in the source). Deliberately five templates, not one generic judge: the
+# temporal-reasoning one explicitly forgives off-by-one day errors, the
+# knowledge-update one explicitly accepts an answer that also restates the
+# superseded value alongside the correct one, the preference one grades
+# against a rubric instead of an exact answer -- collapsing these into one
+# prompt would stop this from being the calibration target's own
+# instrument.
+_LME_JUDGE_STANDARD = (
+    "I will give you a question, a correct answer, and a response from a model. "
+    "Please answer yes if the response contains the correct answer. Otherwise, "
+    "answer no. If the response is equivalent to the correct answer or contains "
+    "all the intermediate steps to get the correct answer, you should also answer "
+    "yes. If the response only contains a subset of the information required by "
+    "the answer, answer no. \n\nQuestion: {question}\n\nCorrect Answer: {answer}"
+    "\n\nModel Response: {response}\n\nIs the model response correct? Answer yes "
+    "or no only."
+)
+LME_JUDGE_TEMPLATES: dict[str, str] = {
+    "single-session-user": _LME_JUDGE_STANDARD,
+    "single-session-assistant": _LME_JUDGE_STANDARD,
+    "multi-session": _LME_JUDGE_STANDARD,
+    "temporal-reasoning": (
+        "I will give you a question, a correct answer, and a response from a "
+        "model. Please answer yes if the response contains the correct answer. "
+        "Otherwise, answer no. If the response is equivalent to the correct "
+        "answer or contains all the intermediate steps to get the correct "
+        "answer, you should also answer yes. If the response only contains a "
+        "subset of the information required by the answer, answer no. In "
+        "addition, do not penalize off-by-one errors for the number of days. If "
+        "the question asks for the number of days/weeks/months, etc., and the "
+        "model makes off-by-one errors (e.g., predicting 19 days when the answer "
+        "is 18), the model's response is still correct. \n\nQuestion: {question}"
+        "\n\nCorrect Answer: {answer}\n\nModel Response: {response}\n\nIs the "
+        "model response correct? Answer yes or no only."
+    ),
+    "knowledge-update": (
+        "I will give you a question, a correct answer, and a response from a "
+        "model. Please answer yes if the response contains the correct answer. "
+        "Otherwise, answer no. If the response contains some previous "
+        "information along with an updated answer, the response should be "
+        "considered as correct as long as the updated answer is the required "
+        "answer.\n\nQuestion: {question}\n\nCorrect Answer: {answer}\n\nModel "
+        "Response: {response}\n\nIs the model response correct? Answer yes or "
+        "no only."
+    ),
+    "single-session-preference": (
+        "I will give you a question, a rubric for desired personalized "
+        "response, and a response from a model. Please answer yes if the "
+        "response satisfies the desired response. Otherwise, answer no. The "
+        "model does not need to reflect all the points in the rubric. The "
+        "response is correct as long as it recalls and utilizes the user's "
+        "personal information correctly.\n\nQuestion: {question}\n\nRubric: "
+        "{answer}\n\nModel Response: {response}\n\nIs the model response "
+        "correct? Answer yes or no only."
+    ),
+}
+LME_JUDGE_ABSTENTION_TEMPLATE = (
+    "I will give you an unanswerable question, an explanation, and a response "
+    "from a model. Please answer yes if the model correctly identifies the "
+    "question as unanswerable. The model could say that the information is "
+    "incomplete, or some other information is given but the asked information "
+    "is not.\n\nQuestion: {question}\n\nExplanation: {answer}\n\nModel Response: "
+    "{response}\n\nDoes the model correctly identify the question as "
+    "unanswerable? Answer yes or no only."
+)
+
+
+# 15 aout: run_generation.py computes `max_retrieval_length = model_max_
+# length - gen_length - 1000` and truncates the RENDERED history string to
+# that many tokens, keeping the FIRST N (tokens[:max_retrieval_length] --
+# the earliest sessions, not the most recent ones; an odd choice but
+# faithfully reproduced since fidelity to the calibration target is the
+# point, not second-guessing it). model2maxlength['gpt-4o-mini-2024-07-06']
+# = 128000, gen_length defaults to 500 (non-CoT) -- both mirrored below.
+# Estimated in chars/4 (datasets.estimate_tokens), consistent with the rest
+# of this harness's token accounting, not a real tokenizer -- close enough
+# to keep every real LongMemEval-S haystack (~115K tokens) under the limit
+# without a new dependency; only matters when a haystack is unusually long.
+LME_MODEL_MAX_TOKENS = 128_000
+LME_GEN_LENGTH = 500
+LME_MAX_RETRIEVAL_TOKENS = LME_MODEL_MAX_TOKENS - LME_GEN_LENGTH - 1000
+
+
+async def answer_lme_baseline(
+    client: ChatClient, user_template: str, history: str, question_date: str, question: str
+) -> tuple[str, int, int]:
+    """15 aout, Sprint 0 calibration: mirrors the official LongMemEval
+    full-context baseline (src/generation/run_generation.py,
+    `retriever_type="orig-session"`, `history_format="json"`,
+    `useronly=false`, no chain-of-note) -- single user message, no system
+    message (the official script never sends one), temperature 0."""
+    max_chars = LME_MAX_RETRIEVAL_TOKENS * datasets.CHARS_PER_TOKEN
+    if len(history) > max_chars:
+        history = history[:max_chars]
+    prompt = user_template.format(history=history, question_date=question_date, question=question)
+    result = await client.chat(
+        [{"role": "user", "content": prompt}], temperature=0.0, max_tokens=LME_GEN_LENGTH
+    )
+    return result.content, result.prompt_tokens, result.completion_tokens
+
+
+async def judge_lme(
+    client: ChatClient, question: datasets.Question, answer: str
+) -> tuple[dict, int, int]:
+    """15 aout, Sprint 0 calibration: mirrors `get_anscheck_prompt` +
+    the official call site (evaluate_qa.py) exactly -- template dispatch by
+    qtype, `_abs` in the qid overrides to the abstention template
+    regardless of qtype (matching `abstention='_abs' in entry['question_id']`
+    verbatim), gpt-4o-2024-08-06 model REQUIRED by the harness (see
+    print_qa_metrics.py's own assertion -- config must set judge_model to
+    it in mem0_calibration mode for LongMemEval, not gpt-4o-mini), single
+    user message, max_tokens=10, label = 'yes' in response.lower()."""
+    if question.abstention_expected and "_abs" in question.qid:
+        template = LME_JUDGE_ABSTENTION_TEMPLATE
+    else:
+        template = LME_JUDGE_TEMPLATES.get(question.qtype, _LME_JUDGE_STANDARD)
+    prompt = template.format(question=question.question, answer=question.answer, response=answer)
+    result = await client.chat([{"role": "user", "content": prompt}], temperature=0.0, max_tokens=10)
+    label = "correct" if "yes" in result.content.strip().lower() else "incorrect"
+    return {"label": label, "judge_reason": result.content.strip()[:120]}, result.prompt_tokens, result.completion_tokens
+
+
+async def judge_mem0(
+    client: ChatClient, judge_prompt: str, question: datasets.Question, answer: str
+) -> tuple[dict, int, int]:
+    """15 aout, Sprint 0 calibration: mirrors mem0's own
+    `evaluate_llm_judge` (evaluation/metrics/llm_judge.py) exactly -- a
+    single user message (no system message, unlike Haki's own `judge()`
+    above), no per-qtype `extra` injection (mem0's ACCURACY_PROMPT has none
+    -- inventing one would stop this from being the same instrument),
+    `response_format=json_object`."""
+    prompt = judge_prompt.format(
+        question=question.question,
+        gold_answer=question.answer,
+        generated_answer=answer,
+    )
+    result = await client.chat(
+        [{"role": "user", "content": prompt}],
+        temperature=0.0,
+        response_format={"type": "json_object"},
+    )
+    verdict = parse_mem0_judge_output(result.content)
+    return verdict, result.prompt_tokens, result.completion_tokens
+
+
 def cost_usd(prompt_tokens: int, completion_tokens: int, prices: dict) -> float:
     return (
         prompt_tokens * prices.get("input", 0.0) / 1_000_000
@@ -210,6 +401,31 @@ async def run(args: argparse.Namespace) -> int:
     answer_prompt = (ROOT / config["prompts"]["answer"]).read_text(encoding="utf-8")
     judge_prompt = (ROOT / config["prompts"]["judge"]).read_text(encoding="utf-8")
 
+    # 15 aout, Sprint 0 -- "mem0_calibration" protocol: reproduces the exact
+    # published mem0 LoCoMo/LongMemEval protocol (system+user baseline
+    # prompt with question BEFORE context, flat "{ts} | {speaker}: {text}"
+    # transcript, no truncation, ACCURACY_PROMPT judge on BOTH systems) so
+    # a run against THIS harness is directly comparable to the published
+    # numbers (Mem0 66.88%, full-context 72.90%, etc. -- see
+    # research/Haki_Livre_Construction_2026-08-15.md Partie 2). Every
+    # other config is completely unaffected: this only activates when the
+    # config explicitly opts in.
+    calibration = config.get("protocol") == "mem0_calibration"
+    # Two distinct calibration targets share the same protocol flag: LoCoMo
+    # (mem0's own harness, ACCURACY_PROMPT judge) and LongMemEval (the
+    # dataset's OWN official harness, 5 qtype-dispatched judge templates --
+    # see judge_lme). Which one applies is entirely determined by the
+    # dataset loader already selected in the config; no separate flag to
+    # keep in sync.
+    calibration_dataset = config["dataset"]["loader"] if calibration else None
+    mem0_system_prompt = mem0_user_prompt = mem0_judge_prompt = lme_baseline_prompt = None
+    if calibration_dataset == "locomo":
+        mem0_system_prompt = (ROOT / "eval/prompts/mem0_baseline_system.txt").read_text(encoding="utf-8")
+        mem0_user_prompt = (ROOT / "eval/prompts/mem0_baseline_user.txt").read_text(encoding="utf-8")
+        mem0_judge_prompt = (ROOT / "eval/prompts/mem0_judge.txt").read_text(encoding="utf-8")
+    elif calibration_dataset == "longmemeval":
+        lme_baseline_prompt = (ROOT / "eval/prompts/lme_baseline_user.txt").read_text(encoding="utf-8")
+
     systems = set(args.systems.split(","))
     project_id = args.reuse_project or f"{config.get('haki_project_prefix', 'prj_eval')}_{run_id}"
     org_id = config.get("haki_org", "org_eval")
@@ -286,7 +502,14 @@ async def run(args: argparse.Namespace) -> int:
                 answer, ptok, ctok = await answer_with_memory(
                     answer_client, answer_prompt, question, memory
                 )
-                verdict, jptok, jctok = await judge(judge_client, judge_prompt, question, answer)
+                if calibration_dataset == "locomo":
+                    verdict, jptok, jctok = await judge_mem0(
+                        judge_client, mem0_judge_prompt, question, answer
+                    )
+                elif calibration_dataset == "longmemeval":
+                    verdict, jptok, jctok = await judge_lme(judge_client, question, answer)
+                else:
+                    verdict, jptok, jctok = await judge(judge_client, judge_prompt, question, answer)
                 record["systems"]["haki"] = {
                     "answer": answer,
                     **verdict,
@@ -337,21 +560,48 @@ async def run(args: argparse.Namespace) -> int:
                 )
                 print(
                     f"  haki: {verdict['label']}"
-                    f"{' OUTDATED' if verdict['outdated'] else ''} "
+                    f"{' OUTDATED' if verdict.get('outdated') else ''} "
                     f"(packet {body.get('token_count')} tok, {len(facts)} faits, "
                     f"context {latency_ms:.0f} ms, ingest {ingest_s:.0f} s)"
                 )
 
             if "baseline" in systems:
-                kept, truncated = datasets.truncate_sessions(
-                    question.sessions, config.get("baseline_max_context_tokens", 100_000)
-                )
-                transcript = datasets.render_transcript(kept)
-                memory = "Conversation history (most recent sessions first kept, chronological order):\n" + transcript
-                answer, ptok, ctok = await answer_with_memory(
-                    answer_client, answer_prompt, question, memory
-                )
-                verdict, jptok, jctok = await judge(judge_client, judge_prompt, question, answer)
+                if calibration_dataset == "locomo":
+                    # No truncation: the mem0 full-context baseline this
+                    # calibrates against never truncates (chunk_size=-1 in
+                    # RAGManager) -- see Sprint 0 in
+                    # research/Haki_Livre_Construction_2026-08-15.md.
+                    kept, truncated = question.sessions, False
+                    transcript = datasets.render_mem0_transcript(kept)
+                    answer, ptok, ctok = await answer_mem0_baseline(
+                        answer_client, mem0_system_prompt, mem0_user_prompt,
+                        question.question, transcript,
+                    )
+                    verdict, jptok, jctok = await judge_mem0(
+                        judge_client, mem0_judge_prompt, question, answer
+                    )
+                elif calibration_dataset == "longmemeval":
+                    # "orig-session", topk effectively unbounded (the
+                    # official baseline's own topk_context=1000 config
+                    # exceeds any real haystack session count) -- no
+                    # truncation here either.
+                    kept, truncated = question.sessions, False
+                    history = datasets.render_lme_session_history(kept)
+                    answer, ptok, ctok = await answer_lme_baseline(
+                        answer_client, lme_baseline_prompt, history,
+                        question.question_date or "unknown", question.question,
+                    )
+                    verdict, jptok, jctok = await judge_lme(judge_client, question, answer)
+                else:
+                    kept, truncated = datasets.truncate_sessions(
+                        question.sessions, config.get("baseline_max_context_tokens", 100_000)
+                    )
+                    transcript = datasets.render_transcript(kept)
+                    memory = "Conversation history (most recent sessions first kept, chronological order):\n" + transcript
+                    answer, ptok, ctok = await answer_with_memory(
+                        answer_client, answer_prompt, question, memory
+                    )
+                    verdict, jptok, jctok = await judge(judge_client, judge_prompt, question, answer)
                 record["systems"]["baseline"] = {
                     "answer": answer,
                     **verdict,
@@ -367,7 +617,7 @@ async def run(args: argparse.Namespace) -> int:
                 }
                 print(
                     f"  base: {verdict['label']}"
-                    f"{' OUTDATED' if verdict['outdated'] else ''} "
+                    f"{' OUTDATED' if verdict.get('outdated') else ''} "
                     f"({len(kept)}/{len(question.sessions)} sessions, {ptok} tok)"
                 )
 

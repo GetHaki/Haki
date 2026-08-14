@@ -48,6 +48,7 @@ class ChatClient:
         messages: list[dict[str, str]],
         temperature: float = 0.0,
         max_tokens: int | None = None,
+        response_format: dict | None = None,
     ) -> ChatResult:
         payload: dict = {
             "model": self.model,
@@ -56,6 +57,11 @@ class ChatClient:
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
+        # 15 aout, calibration mem0 (Sprint 0): mem0's own judge call passes
+        # response_format={"type": "json_object"} -- optional, off by default,
+        # every existing caller is unaffected.
+        if response_format is not None:
+            payload["response_format"] = response_format
         delay = 2.0
         for attempt in range(self.max_retries + 1):
             try:

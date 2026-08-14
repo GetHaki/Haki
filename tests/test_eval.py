@@ -12,7 +12,7 @@ import sys
 import pytest
 
 from eval import datasets, metrics
-from eval.run import parse_judge_output
+from eval.run import ROOT, parse_judge_output, parse_mem0_judge_output
 
 
 # --------------------------------------------------------------------------
@@ -429,6 +429,244 @@ def test_parse_judge_output_garbage_is_incorrect():
 
 def test_render_facts_empty():
     assert datasets.render_facts([]) == "(no facts in memory)"
+
+
+# --------------------------------------------------------------------------
+# Sprint 0 calibration (15 aout): mem0 protocol port
+# --------------------------------------------------------------------------
+
+def test_parse_mem0_judge_output_correct():
+    verdict = parse_mem0_judge_output('{"label": "CORRECT"}')
+    assert verdict["label"] == "correct"
+
+
+def test_parse_mem0_judge_output_wrong():
+    verdict = parse_mem0_judge_output(
+        'The answer misses the date entirely.\n{"label": "WRONG"}'
+    )
+    assert verdict["label"] == "incorrect"
+
+
+def test_parse_mem0_judge_output_garbage_is_incorrect():
+    """Mirrors parse_judge_output's own fail-closed behavior -- an
+    unparseable judge response must never silently count as a pass."""
+    verdict = parse_mem0_judge_output("I cannot decide.")
+    assert verdict["label"] == "incorrect"
+    assert "unparseable" in verdict["judge_reason"]
+
+
+def test_parse_mem0_judge_output_never_returns_abstained():
+    """mem0's own protocol has no abstention concept (label is CORRECT or
+    WRONG only) -- must never invent a third label calibration mode never
+    actually produces."""
+    for raw in ['{"label": "CORRECT"}', '{"label": "WRONG"}', "garbage"]:
+        assert parse_mem0_judge_output(raw)["label"] in {"correct", "incorrect"}
+
+
+def test_render_mem0_transcript_matches_mem0s_own_format():
+    """Mirrors mem0's RAGManager.clean_chat_history exactly: one flat
+    "{timestamp} | {speaker}: {text}" line per message, no session-boundary
+    markers -- distinct from Haki's own render_transcript (used for every
+    non-calibration baseline run), which keeps "--- session ... ---"
+    headers."""
+    sessions = [
+        datasets.Session(
+            session_id="s1",
+            date=datasets.FALLBACK_BASE,
+            messages=[
+                datasets.Message(speaker="Alice", content="I adopted a cat."),
+                datasets.Message(speaker="Bob", content="What's its name?"),
+            ],
+        )
+    ]
+    rendered = datasets.render_mem0_transcript(sessions)
+    lines = rendered.split("\n")
+    assert lines == [
+        f"{datasets.FALLBACK_BASE.isoformat()} | Alice: I adopted a cat.",
+        f"{datasets.FALLBACK_BASE.isoformat()} | Bob: What's its name?",
+    ]
+    # No session-boundary marker anywhere, unlike render_transcript.
+    assert "---" not in rendered
+
+
+async def test_answer_mem0_baseline_puts_question_before_context():
+    """The mem0 protocol's own prompt is question-before-context -- kept
+    even though it reads backwards, because reproducing the calibration
+    target exactly is the entire point (research/
+    Haki_Livre_Construction_2026-08-15.md, Sprint 0 step 2)."""
+    from eval.llm import ChatResult
+    from eval.run import answer_mem0_baseline
+
+    class _FakeClient:
+        def __init__(self):
+            self.messages = None
+
+        async def chat(self, messages, temperature=0.0, max_tokens=None, response_format=None):
+            self.messages = messages
+            return ChatResult(content="A cat", prompt_tokens=10, completion_tokens=2)
+
+    system_prompt = (ROOT / "eval/prompts/mem0_baseline_system.txt").read_text(encoding="utf-8")
+    user_template = (ROOT / "eval/prompts/mem0_baseline_user.txt").read_text(encoding="utf-8")
+    client = _FakeClient()
+    answer, ptok, ctok = await answer_mem0_baseline(
+        client, system_prompt, user_template, "What pet did Alice adopt?", "Alice: I adopted a cat."
+    )
+    assert answer == "A cat"
+    assert client.messages[0]["role"] == "system"
+    assert client.messages[1]["role"] == "user"
+    body = client.messages[1]["content"]
+    assert body.index("What pet did Alice adopt?") < body.index("I adopted a cat.")
+    assert "# Question:" in body and "# Context:" in body and "# Short answer:" in body
+
+
+async def test_judge_mem0_uses_json_response_format_and_no_extra_injection():
+    """mem0's ACCURACY_PROMPT is a single user message with no per-qtype
+    extra text -- distinct from Haki's own judge(), which injects
+    knowledge-update/abstention notes (13-14 aout fixes). Injecting those
+    here would stop this from being the same instrument as the calibration
+    target."""
+    from eval.llm import ChatResult
+    from eval.run import judge_mem0
+
+    class _FakeClient:
+        def __init__(self):
+            self.messages = None
+            self.response_format = None
+
+        async def chat(self, messages, temperature=0.0, max_tokens=None, response_format=None):
+            self.messages = messages
+            self.response_format = response_format
+            return ChatResult(content='{"label": "CORRECT"}', prompt_tokens=20, completion_tokens=3)
+
+    judge_prompt = (ROOT / "eval/prompts/mem0_judge.txt").read_text(encoding="utf-8")
+    question = datasets.Question(
+        qid="q1", qtype="knowledge-update", question="What car do I drive?",
+        answer="Honda Civic", question_date=None, abstention_expected=False, sessions=[],
+    )
+    client = _FakeClient()
+    verdict, ptok, ctok = await judge_mem0(client, judge_prompt, question, "A Honda Civic")
+    assert verdict["label"] == "correct"
+    assert client.response_format == {"type": "json_object"}
+    assert len(client.messages) == 1 and client.messages[0]["role"] == "user"
+    body = client.messages[0]["content"]
+    assert "What car do I drive?" in body
+    assert "Honda Civic" in body
+    # No qtype-specific note injected (unlike Haki's own judge()).
+    assert "knowledge UPDATE" not in body
+
+
+# --------------------------------------------------------------------------
+# Sprint 0 calibration (15 aout): LongMemEval official protocol port
+# --------------------------------------------------------------------------
+
+def test_render_lme_session_history_matches_official_format():
+    """Mirrors run_generation.py's prepare_prompt exactly for
+    retriever_type="orig-session", history_format="json": one
+    '### Session N:' block per session with a JSON-dumped [{"role",
+    "content"}, ...] turn list, sessions in chronological order."""
+    sessions = [
+        datasets.Session(
+            session_id="s1",
+            date=datasets.FALLBACK_BASE,
+            messages=[datasets.Message(speaker="user", content="I adopted a cat.")],
+        )
+    ]
+    rendered = datasets.render_lme_session_history(sessions)
+    assert "### Session 1:" in rendered
+    assert f"Session Date: {datasets.FALLBACK_BASE.isoformat()}" in rendered
+    assert json.dumps([{"role": "user", "content": "I adopted a cat."}]) in rendered
+
+
+def test_judge_lme_templates_cover_every_real_qtype():
+    """Every qtype Haki's own LongMemEval loader actually produces must
+    have a dispatch entry, or judge_lme silently falls back to the
+    "standard" template for a type that needs different grading (e.g.
+    temporal-reasoning's off-by-one forgiveness)."""
+    from eval.run import LME_JUDGE_TEMPLATES
+
+    real_qtypes = {
+        "single-session-user", "single-session-assistant", "single-session-preference",
+        "multi-session", "temporal-reasoning", "knowledge-update",
+    }
+    assert real_qtypes <= LME_JUDGE_TEMPLATES.keys()
+
+
+async def test_judge_lme_dispatches_temporal_template_and_forgives_off_by_one():
+    """The temporal-reasoning template is the one place the official
+    protocol explicitly forgives off-by-one day errors -- picking the
+    wrong template here would silently make Haki's temporal accuracy look
+    worse than the calibration target intends."""
+    from eval.llm import ChatResult
+    from eval.run import judge_lme
+
+    class _FakeClient:
+        def __init__(self):
+            self.messages = None
+
+        async def chat(self, messages, temperature=0.0, max_tokens=None, response_format=None):
+            self.messages = messages
+            return ChatResult(content="yes", prompt_tokens=15, completion_tokens=1)
+
+    question = datasets.Question(
+        qid="tr_1", qtype="temporal-reasoning", question="How many days ago?",
+        answer="18 days", question_date=None, abstention_expected=False, sessions=[],
+    )
+    client = _FakeClient()
+    verdict, ptok, ctok = await judge_lme(client, question, "19 days")
+    assert verdict["label"] == "correct"
+    assert "off-by-one" in client.messages[0]["content"]
+
+
+async def test_answer_lme_baseline_truncates_oversized_history():
+    """15 aout: a real LongMemEval-S haystack that overflows gpt-4o-mini's
+    context window must be truncated BEFORE the API call, not left to fail
+    as a 400 -- mirrors run_generation.py's own
+    `max_retrieval_length = model_max_length - gen_length - 1000` truncation
+    (kept even though it keeps the EARLIEST tokens and drops the most
+    recent ones, an odd choice in the source -- fidelity to the
+    calibration target, not a "fix")."""
+    from eval.llm import ChatResult
+    from eval.run import LME_MAX_RETRIEVAL_TOKENS, answer_lme_baseline
+
+    class _FakeClient:
+        def __init__(self):
+            self.messages = None
+
+        async def chat(self, messages, temperature=0.0, max_tokens=None, response_format=None):
+            self.messages = messages
+            return ChatResult(content="answer", prompt_tokens=10, completion_tokens=1)
+
+    oversized_history = "x" * (LME_MAX_RETRIEVAL_TOKENS * datasets.CHARS_PER_TOKEN * 2)
+    client = _FakeClient()
+    await answer_lme_baseline(client, "{history}", oversized_history, "2023/01/01", "q?")
+    sent_history_len = len(client.messages[0]["content"])
+    assert sent_history_len <= LME_MAX_RETRIEVAL_TOKENS * datasets.CHARS_PER_TOKEN
+
+
+async def test_judge_lme_dispatches_abstention_template_on_abs_suffix():
+    """Mirrors the official harness's own dispatch rule verbatim:
+    `abstention='_abs' in entry['question_id']` -- overrides the qtype
+    template regardless of what qtype the question otherwise carries."""
+    from eval.llm import ChatResult
+    from eval.run import judge_lme
+
+    class _FakeClient:
+        def __init__(self):
+            self.messages = None
+
+        async def chat(self, messages, temperature=0.0, max_tokens=None, response_format=None):
+            self.messages = messages
+            return ChatResult(content="yes", prompt_tokens=15, completion_tokens=1)
+
+    question = datasets.Question(
+        qid="abs_1_abs", qtype="abstention", question="What is my favorite opera?",
+        answer="This was never discussed.", question_date=None,
+        abstention_expected=True, sessions=[],
+    )
+    client = _FakeClient()
+    verdict, ptok, ctok = await judge_lme(client, question, "I don't have that information.")
+    assert verdict["label"] == "correct"
+    assert "unanswerable" in client.messages[0]["content"]
 
 
 # --------------------------------------------------------------------------

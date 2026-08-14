@@ -274,6 +274,48 @@ def render_transcript(sessions: list[Session]) -> str:
     return "\n".join(lines)
 
 
+def render_mem0_transcript(sessions: list[Session]) -> str:
+    """15 aout, Sprint 0 calibration: mirrors mem0's own
+    `RAGManager.clean_chat_history` (evaluation/src/rag.py) exactly --
+    `f"{timestamp} | {speaker}: {text}\\n"` per message, no session-boundary
+    markers (unlike `render_transcript` above, which is Haki's own baseline
+    rendering and stays untouched for every non-calibration run).
+
+    mem0's source dataset carries a timestamp per MESSAGE; Haki's Session
+    model only carries one date per SESSION (see the `Session` dataclass),
+    so every message in a session is stamped with that session's date --
+    a documented approximation, not a divergence in structure (order and
+    granularity of information shown to the model are unchanged, only the
+    finest-grained per-message timestamp is unavailable in our own ingested
+    data model)."""
+    lines: list[str] = []
+    for session in sessions:
+        for message in session.messages:
+            lines.append(f"{session.date.isoformat()} | {message.speaker}: {message.content}")
+    return "\n".join(lines)
+
+
+def render_lme_session_history(sessions: list[Session]) -> str:
+    """15 aout, Sprint 0 calibration: mirrors the official LongMemEval
+    full-context baseline's history rendering exactly
+    (src/generation/run_generation.py, `retriever_type="orig-session"`,
+    `history_format="json"`, `useronly=false`) -- one block per session:
+    '\\n### Session {i}:\\nSession Date: {date}\\nSession Content:\\n{json}\\n',
+    where the JSON is the session's raw [{"role", "content"}, ...] turns
+    (`useronly=false` keeps both roles). Sessions are already chronological
+    in Haki's own loaded data (see load_longmemeval), matching the source
+    script's own `retrieved_chunks.sort(key=lambda x: x[0])`."""
+    blocks: list[str] = []
+    for i, session in enumerate(sessions, start=1):
+        turns = [{"role": m.speaker, "content": m.content} for m in session.messages]
+        sess_string = "\n" + json.dumps(turns, ensure_ascii=False)
+        blocks.append(
+            f"\n### Session {i}:\nSession Date: {session.date.isoformat()}\n"
+            f"Session Content:\n{sess_string}\n"
+        )
+    return "".join(blocks)
+
+
 def truncate_sessions(
     sessions: list[Session], max_tokens: int
 ) -> tuple[list[Session], bool]:

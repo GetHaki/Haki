@@ -147,9 +147,16 @@ def build_prompt_context(packet: dict[str, Any]) -> str:
         )
         for episode in episodes:
             occurred = episode.get("occurred_at") or "unknown date"
+            marker = (
+                " [surrounding context — not independently matched to the "
+                "query, included for the conversational moment around a "
+                "result above]"
+                if episode.get("context_neighbor")
+                else ""
+            )
             lines.append(
                 f"- [{occurred}] {episode.get('kind')}: {episode.get('excerpt')} "
-                f"(event: {episode.get('event_id')})"
+                f"(event: {episode.get('event_id')}){marker}"
             )
     for warning in warnings:
         lines.append(f"! {warning}")

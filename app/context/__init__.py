@@ -770,6 +770,12 @@ async def build_context(
     packet_facts: list[dict[str, Any]] = []
     packet_episodes: list[dict[str, Any]] = []
     packed_fact_ids: set[uuid.UUID] = set()
+    # Context window (mechanism F2, 15 aout): raw (id, occurred_at) of every
+    # episode packed by score in the loop below, kept here rather than
+    # re-parsed from packet_episodes' ISO strings afterwards -- the
+    # neighbor pass right after this loop needs the real datetime to query
+    # against, not its string rendering.
+    packed_episode_meta: list[tuple[uuid.UUID, datetime]] = []
     token_count = 0
     for _score, kind, row in pool:
         if kind == "fact":
@@ -848,8 +854,11 @@ async def build_context(
                     "kind": row.kind,
                     "occurred_at": row.occurred_at.isoformat() if row.occurred_at else None,
                     "excerpt": excerpt,
+                    "context_neighbor": False,
                 }
             )
+            if row.occurred_at is not None:
+                packed_episode_meta.append((row.id, row.occurred_at))
             decisions.append(
                 {"episode_id": str(row.id), "action": "included", "reason_code": "top_score"}
             )
@@ -897,6 +906,127 @@ async def build_context(
                         "reason_code": "multi_hop_expansion",
                     }
                 )
+
+    # Context window (mechanism F2, 15 aout): a packed slot never stands
+    # alone. An episode packed by score carries its immediate temporal
+    # neighbor (radius 1 -- one event right before and one right after, in
+    # the same scope) so the agent gets the surrounding turn, not just an
+    # isolated slice; a packed FACT additionally carries the episode it was
+    # actually extracted from (its "source turn", the first entry of
+    # source_event_ids -- the concrete conversational moment the compact
+    # fact was condensed from). Bolt-on OUTSIDE the unified pool, same
+    # shape as multi-hop expansion above: these rows never compete on
+    # score, they add context to an ALREADY-won slot rather than new
+    # evidence, so they are appended against whatever budget remains
+    # instead of being re-merged into the ranked pool.
+    if token_count < budget_tokens and (packed_episode_meta or packet_facts):
+        context_window_start = time.perf_counter()
+        packed_episode_ids = {event_id for event_id, _ in packed_episode_meta}
+        neighbor_reason: dict[uuid.UUID, str] = {}
+
+        for event_id, occurred_at in packed_episode_meta:
+            before_id = (
+                await session.execute(
+                    select(Event.id)
+                    .where(
+                        Event.project_id == project_id,
+                        Event.subject_id == subject_id,
+                        Event.origin_trust != "untrusted",
+                        Event.occurred_at < occurred_at,
+                    )
+                    .order_by(Event.occurred_at.desc(), Event.id.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            after_id = (
+                await session.execute(
+                    select(Event.id)
+                    .where(
+                        Event.project_id == project_id,
+                        Event.subject_id == subject_id,
+                        Event.origin_trust != "untrusted",
+                        Event.occurred_at > occurred_at,
+                    )
+                    .order_by(Event.occurred_at.asc(), Event.id.asc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            for neighbor_id in (before_id, after_id):
+                if (
+                    neighbor_id is not None
+                    and neighbor_id not in packed_episode_ids
+                    and neighbor_id not in neighbor_reason
+                ):
+                    neighbor_reason[neighbor_id] = "episode_neighbor"
+
+        for fact in packet_facts:
+            if not fact["source_event_ids"]:
+                continue
+            source_id = uuid.UUID(fact["source_event_ids"][0])
+            if source_id not in packed_episode_ids and source_id not in neighbor_reason:
+                neighbor_reason[source_id] = "fact_source_turn"
+
+        if neighbor_reason:
+            neighbor_rows = (
+                (
+                    await session.execute(
+                        select(Event)
+                        .where(
+                            Event.id.in_(neighbor_reason.keys()),
+                            # M8 guard, same as the primary episode query
+                            # above: a fact's source turn can be an
+                            # untrusted-origin event (the fact itself went
+                            # through quarantine) -- its raw payload must
+                            # never be served as an episode either.
+                            Event.origin_trust != "untrusted",
+                        )
+                        .order_by(Event.occurred_at, Event.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for row in neighbor_rows:
+                if token_count >= budget_tokens:
+                    decisions.append(
+                        {
+                            "episode_id": str(row.id),
+                            "action": "excluded",
+                            "reason_code": "over_budget",
+                        }
+                    )
+                    continue
+                excerpt = episode_excerpt(row.kind, row.payload)
+                cost = estimate_tokens(f"{row.occurred_at:%Y-%m-%d %H:%M} {row.kind} {excerpt}")
+                if token_count + cost > budget_tokens:
+                    decisions.append(
+                        {
+                            "episode_id": str(row.id),
+                            "action": "excluded",
+                            "reason_code": "over_budget",
+                        }
+                    )
+                    continue
+                token_count += cost
+                packet_episodes.append(
+                    {
+                        "event_id": str(row.id),
+                        "kind": row.kind,
+                        "occurred_at": row.occurred_at.isoformat() if row.occurred_at else None,
+                        "excerpt": excerpt,
+                        "context_neighbor": True,
+                    }
+                )
+                decisions.append(
+                    {
+                        "episode_id": str(row.id),
+                        "action": "included",
+                        "reason_code": neighbor_reason[row.id],
+                    }
+                )
+        stage_timings["context_window"] = round(
+            (time.perf_counter() - context_window_start) * 1000
+        )
 
     # Fragmentation detector (M4): a subject with ZERO memory that is
     # registered as an alias of another subject is NOT a cold start — the

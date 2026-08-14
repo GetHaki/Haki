@@ -146,8 +146,12 @@ export function buildPromptContext(packet: ContextPacket | null | undefined): st
     );
     for (const episode of episodes) {
       const occurred = episode.occurred_at ?? "unknown date";
+      const marker = episode.context_neighbor
+        ? " [surrounding context — not independently matched to the query, " +
+          "included for the conversational moment around a result above]"
+        : "";
       lines.push(
-        `- [${occurred}] ${episode.kind}: ${episode.excerpt} (event: ${episode.event_id})`,
+        `- [${occurred}] ${episode.kind}: ${episode.excerpt} (event: ${episode.event_id})${marker}`,
       );
     }
   }

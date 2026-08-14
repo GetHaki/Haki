@@ -78,6 +78,11 @@ class PacketEpisode(BaseModel):
     kind: str
     occurred_at: str | None
     excerpt: str
+    # Context window (mechanism F2, 15 aout): True when this episode was
+    # added as the temporal neighbor of an episode packed by score, or as
+    # the source turn of a packed fact -- never a scored/ranked inclusion
+    # of its own. False for an ordinary, score-packed episode.
+    context_neighbor: bool = False
 
 
 class ContextPacket(BaseModel):

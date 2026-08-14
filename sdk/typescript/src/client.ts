@@ -69,6 +69,10 @@ export interface PacketEpisode {
   kind: string;
   occurred_at: string | null;
   excerpt: string;
+  /** Context window (mechanism F2, 15 aout): true when this episode was
+   * added as the temporal neighbor of a score-packed episode, or as the
+   * source turn of a packed fact -- not itself a scored/ranked inclusion. */
+  context_neighbor?: boolean;
 }
 
 /** Noisy-failure contract, parity with app.schemas.context.ContextStatus:

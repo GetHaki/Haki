@@ -220,6 +220,37 @@ test("buildPromptContext: facts outrank episodes on conflict (Bug 3, 13 aout)", 
   assert.ok(block.includes("CURRENT, resolved truth"));
 });
 
+test("buildPromptContext: marks context window neighbors (F2, 15 aout)", () => {
+  // A `context_neighbor` episode (added for surrounding context, not
+  // independently matched to the query) is marked as such in the
+  // rendered prompt. Parity with the Python SDK's equivalent test.
+  const packet = {
+    facts: [],
+    episodes: [
+      {
+        event_id: "evt-1",
+        kind: "chat_session",
+        occurred_at: "2023-05-07T12:00:00+00:00",
+        excerpt: "user: Zolgorvex mentioned a favorite pastime.",
+        context_neighbor: false,
+      },
+      {
+        event_id: "evt-2",
+        kind: "chat_session",
+        occurred_at: "2023-05-07T13:00:00+00:00",
+        excerpt: "user: Unrelated later chat.",
+        context_neighbor: true,
+      },
+    ],
+    warnings: [],
+  };
+  const block = buildPromptContext(packet);
+  const ordinaryLine = block.split("\n").find((line) => line.includes("evt-1"));
+  const neighborLine = block.split("\n").find((line) => line.includes("evt-2"));
+  assert.ok(!ordinaryLine.includes("surrounding context"));
+  assert.ok(neighborLine.includes("surrounding context"));
+});
+
 test("buildPromptContext: contested facts are marked, with the tie-break exception (13 aout)", () => {
   // "Stop hiding real conflicts": a genuine two-sided disagreement is now
   // served (app.context), both facts sharing a conflict_id, instead of an

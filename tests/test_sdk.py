@@ -126,6 +126,40 @@ def test_build_prompt_context_states_facts_outrank_episodes_on_conflict():
     assert "CURRENT, resolved truth" in block
 
 
+def test_build_prompt_context_marks_context_window_neighbors():
+    """Mechanism F2 (15 aout): a `context_neighbor` episode (added for
+    surrounding context, not independently matched to the query) is
+    marked as such in the rendered prompt, so the agent does not treat it
+    as an equally strong retrieval match to the ordinary episode above
+    it."""
+    packet = {
+        "facts": [],
+        "episodes": [
+            {
+                "event_id": "evt-1",
+                "kind": "chat_session",
+                "occurred_at": "2023-05-07T12:00:00+00:00",
+                "excerpt": "user: Zolgorvex mentioned a favorite pastime.",
+                "context_neighbor": False,
+            },
+            {
+                "event_id": "evt-2",
+                "kind": "chat_session",
+                "occurred_at": "2023-05-07T13:00:00+00:00",
+                "excerpt": "user: Unrelated later chat.",
+                "context_neighbor": True,
+            },
+        ],
+        "warnings": [],
+    }
+    block = build_prompt_context(packet)
+    lines = block.splitlines()
+    ordinary_line = next(line for line in lines if "evt-1" in line)
+    neighbor_line = next(line for line in lines if "evt-2" in line)
+    assert "surrounding context" not in ordinary_line
+    assert "surrounding context" in neighbor_line
+
+
 def test_build_prompt_context_marks_contested_facts_and_their_tie_break():
     """13 aout, "stop hiding real conflicts": a genuine two-sided
     disagreement is now served (app.context), both facts sharing a

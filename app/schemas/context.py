@@ -25,7 +25,15 @@ class ContextRequest(BaseModel):
     subject_alias: SubjectAliasIn | None = None
     query: str = Field(min_length=1)
     purpose: str | None = Field(default=None, max_length=128)
-    budget_tokens: int = Field(default=900)
+    # 2000 (was 900, Sprint 2): published accuracy-vs-budget curves (Zep/
+    # LoCoMo, LazyMem, EMem) agree the gain from more context flattens well
+    # before 4000 tokens with a gpt-4o-mini-class reader (Zep/LoCoMo: +10.4pp
+    # from 347->1997 tok, then +0.26 for the rest; LazyMem: top-50 actually
+    # WORSE than top-20) -- the working point is ~1500-2500, not "more is
+    # free". Not independently re-validated against Haki's own harness yet
+    # (that curve, 900/1400/2000/3000 on n=50, is still open) -- this is the
+    # literature-backed default, callers can still override per call.
+    budget_tokens: int = Field(default=2000)
     # 14 aout, mecanisme D: what "now" means for this call's freshness/
     # recency computations (volatility horizons, valid_to filter, recency
     # scoring term) -- defaults to the real wall clock. For replaying a

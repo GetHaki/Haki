@@ -455,7 +455,7 @@ async def build_context(
     subject_id: str,
     query: str,
     purpose: str | None = None,
-    budget_tokens: int = 900,
+    budget_tokens: int = 2000,
     embedder: Embedder | None = None,
     reranker: Reranker | None = None,
     extra_warnings: list[str] | None = None,

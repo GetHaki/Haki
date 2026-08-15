@@ -75,7 +75,7 @@ donc en deux temps :
 
 ## Budget de tokens
 
-`budget_tokens` (défaut **900**, doit être un entier positif — sinon
+`budget_tokens` (défaut **2000**, doit être un entier positif — sinon
 `budget_exceeded`). L'estimation d'un texte : `max(1, len(texte) // 4)`.
 Les faits sont empaquetés **par score décroissant** jusqu'à épuisement du
 budget ; le reste est exclu avec `reason_code = over_budget`. Chaque

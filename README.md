@@ -178,7 +178,7 @@ capture_turn(client, "usr_42", "prj", user_msg, answer)
 
 - `capture(events, idempotency_key)` — ingestion idempotente : un retry
   réseau ne crée jamais de doublon ;
-- `context(subject_id, query, project_id, budget_tokens=900)` — le
+- `context(subject_id, query, project_id, budget_tokens=2000)` — le
   ContextPacket, avec `trace_id` ;
 - `inspect(trace_id)` — pourquoi ces mémoires ont été choisies ;
 - `timeline(subject_id, project_id)`, `consolidate_subject(...)`,
@@ -534,7 +534,7 @@ curl -X POST http://localhost:8100/v1/context \
   -d '{
     "project_id": "prj_support", "subject_id": "usr_42",
     "query": "dans quelle langue envoyer la facture ?",
-    "budget_tokens": 900
+    "budget_tokens": 2000
   }'
 ```
 

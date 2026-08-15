@@ -18,7 +18,7 @@ POST /v1/context
   ajoute un `warning` `missing_purpose` au packet (Policy Engine règle 3),
   jamais une erreur.
 </ParamField>
-<ParamField body="budget_tokens" type="integer" default="900">
+<ParamField body="budget_tokens" type="integer" default="2000">
   Doit être un entier positif — sinon `budget_exceeded` (422).
 </ParamField>
 
@@ -75,7 +75,7 @@ curl -X POST http://localhost:8100/v1/context \
   -d '{
     "project_id": "prj_support", "subject_id": "usr_42",
     "query": "dans quelle langue envoyer la facture ?",
-    "budget_tokens": 900
+    "budget_tokens": 2000
   }'
 ```
 
@@ -84,7 +84,7 @@ response = client.context(
     subject_id="usr_42",
     query="dans quelle langue envoyer la facture ?",
     project_id="prj_support",
-    budget_tokens=900,
+    budget_tokens=2000,
 )
 ```
 

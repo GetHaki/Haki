@@ -38,7 +38,7 @@ client = HakiClient("http://localhost:8100", api_key="hk_...", timeout=10.0)
 <ResponseField name="capture(events, idempotency_key=None)" type="dict">
   `POST /v1/capture`. `events` : liste de dicts au format `EventIn`.
 </ResponseField>
-<ResponseField name="context(subject_id, query, project_id, *, purpose=None, budget_tokens=900)" type="dict">
+<ResponseField name="context(subject_id, query, project_id, *, purpose=None, budget_tokens=2000)" type="dict">
   `POST /v1/context` → `{packet, token_count, trace_id}`.
 </ResponseField>
 <ResponseField name="inspect(trace_id, *, project_id, subject_id)" type="dict">`GET /v1/inspect/{trace_id}` (scope obligatoire).</ResponseField>

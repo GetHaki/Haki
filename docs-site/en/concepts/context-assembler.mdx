@@ -74,7 +74,7 @@ therefore happens in two steps:
 
 ## Token budget
 
-`budget_tokens` (default **900**, must be a positive integer — otherwise
+`budget_tokens` (default **2000**, must be a positive integer — otherwise
 `budget_exceeded`). Text is estimated as `max(1, len(text) // 4)`. Facts
 are packed **by decreasing score** until the budget is exhausted; the
 rest is excluded with `reason_code = over_budget`. Every decision

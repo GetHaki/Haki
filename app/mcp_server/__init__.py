@@ -180,13 +180,12 @@ async def _resolve_scope(ctx: Context) -> _Scope:
 
 
 @mcp.tool()
-async def haki_context(ctx: Context, query: str, budget_tokens: int = 900) -> dict[str, Any]:
-    """Rappelle la memoire du projet (decisions, conventions, preferences)
-    pertinente pour une tache. A appeler AVANT de planifier ou modifier du
-    code. Retourne un bloc pret a injecter, avec dates et sources, le
-    trace_id (inspectable via haki_inspect), et un `status` explicite
-    ("ok"/"degraded"/"failed") — ne jamais traiter une reponse degradee ou
-    en echec comme "aucun fait connu"."""
+async def haki_context(ctx: Context, query: str, budget_tokens: int = 2000) -> dict[str, Any]:
+    """Recalls project memory (decisions, conventions, preferences) relevant
+    to a task. Call this BEFORE planning or editing code. Returns a block
+    ready to inject, with dates and sources, the trace_id (inspectable via
+    haki_inspect), and an explicit `status` ("ok"/"degraded"/"failed") —
+    never treat a degraded or failed response as "no known facts"."""
     scope = await _resolve_scope(ctx)
     try:
         async with async_session() as session:
@@ -231,11 +230,10 @@ async def haki_context(ctx: Context, query: str, budget_tokens: int = 900) -> di
 
 @mcp.tool()
 async def haki_capture(ctx: Context, content: str, kind: str = "agent.observation") -> dict[str, Any]:
-    """Memorise un fait durable du projet : decision technique, convention,
-    erreur resolue. A appeler en FIN de tache. Ne jamais memoriser de
-    secrets, tokens ou donnees ephemeres. La consolidation est synchrone en
-    dev (HAKI_MCP_AUTOCONSOLIDATE), donc le fait est rappelable
-    immediatement."""
+    """Stores a durable project fact: technical decision, convention,
+    resolved bug. Call this at the END of a task. Never store secrets,
+    tokens, or ephemeral data. Consolidation is synchronous in dev
+    (HAKI_MCP_AUTOCONSOLIDATE), so the fact is recallable immediately."""
     scope = await _resolve_scope(ctx)
     subject_id = scope.subject_id
     # Content-based idempotency key (no timestamp): an agent calling the
@@ -286,9 +284,9 @@ async def haki_capture(ctx: Context, content: str, kind: str = "agent.observatio
 
 @mcp.tool()
 async def haki_inspect(ctx: Context, trace_id: str) -> dict[str, Any]:
-    """Inspecte la trace d'un appel haki_context : quels faits ont ete
-    inclus, exclus ou bloques, et pourquoi (reason_code). Preuve de
-    provenance de la memoire servie."""
+    """Inspects the trace of a haki_context call: which facts were
+    included, excluded, or blocked, and why (reason_code). Provenance
+    proof of the memory served."""
     scope = await _resolve_scope(ctx)
     async with async_session() as session:
         trace = await get_trace(
@@ -312,10 +310,10 @@ async def haki_inspect(ctx: Context, trace_id: str) -> dict[str, Any]:
 
 @mcp.tool()
 async def haki_forget(ctx: Context, mode: str = "disable") -> dict[str, Any]:
-    """Oublie la memoire du sujet configure pour ce serveur, dans ce projet.
-    mode='disable' (reversible, les faits passent a disabled) ou 'delete'
-    (effacement reel : faits, embeddings, evenements, traces). Retourne le
-    recu d'effacement (forget_id) et les compteurs de ce qui a ete fait."""
+    """Forgets the memory of the subject configured for this server, in
+    this project. mode='disable' (reversible, facts move to disabled) or
+    'delete' (real erasure: facts, embeddings, events, traces). Returns
+    the erasure receipt (forget_id) and counters of what was done."""
     scope = await _resolve_scope(ctx)
     async with async_session() as session:
         receipt, counters = await ledger.forget(
@@ -343,15 +341,16 @@ async def haki_correct(
     trace_id: str | None = None,
     comment: str | None = None,
 ) -> dict[str, Any]:
-    """Corrige la memoire depuis la conversation (M10). rating='incorrect'
-    avec un fact_id fait passer ce fait a 'disputed' : haki_context ne le
-    rappellera plus jamais. rating='useful'/'irrelevant' journalise un avis
-    sur un rappel sans changer le fait. Exactement une cible requise :
-    fact_id (un fait precis, generalement vu via haki_context/haki_inspect)
-    OU trace_id (un appel haki_context entier). Meme mecanisme que
-    POST /v1/feedback (app.ledger.submit_feedback) : effet identique quel
-    que soit le chemin d'appel. Scope resolu par cle API (voir
-    _resolve_scope) ou, en self-hosted sans cle, par HAKI_MCP_PROJECT_ID."""
+    """Corrects memory from the conversation (M10). rating='incorrect'
+    with a fact_id moves that fact to 'disputed': haki_context will never
+    recall it again. rating='useful'/'irrelevant' logs an opinion on a
+    recall without changing the fact. Exactly one target required: fact_id
+    (a specific fact, usually seen via haki_context/haki_inspect) OR
+    trace_id (an entire haki_context call). Same mechanism as
+    POST /v1/feedback (app.ledger.submit_feedback): identical effect
+    regardless of the call path. Scope resolved by API key (see
+    _resolve_scope) or, self-hosted without a key, by
+    HAKI_MCP_PROJECT_ID."""
     scope = await _resolve_scope(ctx)
     async with async_session() as session:
         row, fact_status = await ledger.submit_feedback(

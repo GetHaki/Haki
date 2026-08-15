@@ -311,7 +311,7 @@ export class HakiClient {
         subject_id: options.subjectId,
         query: options.query,
         purpose: options.purpose ?? null,
-        budget_tokens: options.budgetTokens ?? 900,
+        budget_tokens: options.budgetTokens ?? 2000,
       },
     });
   }

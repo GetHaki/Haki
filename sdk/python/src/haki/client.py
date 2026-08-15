@@ -96,7 +96,7 @@ class HakiClient:
         project_id: str,
         *,
         purpose: str | None = None,
-        budget_tokens: int = 900,
+        budget_tokens: int = 2000,
     ) -> dict[str, Any]:
         """Assemble a ContextPacket. Returns {packet, token_count, trace_id}."""
         return self._request(
@@ -318,7 +318,7 @@ class AsyncHakiClient:
         project_id: str,
         *,
         purpose: str | None = None,
-        budget_tokens: int = 900,
+        budget_tokens: int = 2000,
     ) -> dict[str, Any]:
         return await self._request(
             "POST",

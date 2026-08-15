@@ -115,6 +115,8 @@ change of mind in the **same** conversation, then a **new** conversation that
 queries memory. It must serve the current value, keep the old one at status
 `superseded` instead of erasing it, and tie the whole thing to a trace.
 
+![haki verify: capture a preference, change it in the same thread, then recall the current value from a new conversation with the old one marked superseded](docs-site/en/images/haki-verify-demo.gif)
+
 ```
 haki verify — subject usr_verify_91d952a5e06f
 

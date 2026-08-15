@@ -243,6 +243,45 @@ def _candidate_entities(texts: list[str], exclude: set[str], limit: int) -> list
     return [token for token, _ in ranked[:limit]]
 
 
+# Pseudo-relevance feedback (PRF, mechanism "expansion", 15 aout Sprint 2 --
+# livre de construction, Partie 3.2, pipeline step 3): "noms presents dans
+# >= 2 des 10 premiers passages" -- a name recurring across SEVERAL of the
+# top-ranked candidates is itself a signal the query's real subject hasn't
+# been isolated yet, even when NONE of those individual candidates score
+# high enough to survive into the packed set. Distinct from the multi-hop
+# seeds in build_context (which come only from what got PACKED): PRF looks
+# at the pool BEFORE packing/reranking commits to a selection, so it can
+# surface a name central to the topic even when budget forced its own
+# mentions out entirely. Cited gain: +9.2pts on long corpora, neutral (not
+# harmful) on short ones -- no corpus-size gate applied here, that would
+# need its own calibration data to set a threshold safely; "neutral" means
+# always running it costs nothing observed, not that it is untested.
+PRF_TOP_K = 10
+PRF_MIN_OCCURRENCES = 2
+
+
+def _prf_seed_texts(pool_head: list[tuple[float, str, Any]]) -> list[str]:
+    """Entity tokens appearing in at least PRF_MIN_OCCURRENCES of the top
+    PRF_TOP_K scored pool items (regardless of whether any of those items
+    end up packed). Each returned as its own single-word "text" so the
+    caller can simply append them to a `seed_texts` list already destined
+    for `_candidate_entities`, which re-extracts capitalized tokens from
+    free text -- no separate merge path needed."""
+    counts: dict[str, int] = {}
+    for _score, kind, row in pool_head[:PRF_TOP_K]:
+        text = (
+            _render(row.predicate, row.value)
+            if kind == "fact"
+            else episode_excerpt(row.kind, row.payload)
+        )
+        seen_in_this_item = {
+            t for t in _ENTITY_TOKEN_RE.findall(text) if t.lower() not in _ENTITY_STOPWORDS
+        }
+        for token in seen_in_this_item:
+            counts[token] = counts.get(token, 0) + 1
+    return [token for token, count in counts.items() if count >= PRF_MIN_OCCURRENCES]
+
+
 async def _expand_via_entities(
     session: AsyncSession,
     *,
@@ -841,6 +880,11 @@ async def build_context(
         pool.append((row.score, "episode", row))
     pool.sort(key=lambda item: item[0], reverse=True)
 
+    # PRF (mechanism "expansion", 15 aout Sprint 2): computed on the pool
+    # BEFORE reranking/packing commit to a selection -- see _prf_seed_texts.
+    # Consumed below, once the multi-hop expansion pass runs.
+    prf_seed_texts = _prf_seed_texts(pool)
+
     # Reranker (mechanism F-R, 15 aout): re-order only the top RERANK_TOP_K
     # candidates (already sorted by the hybrid score above) with a
     # cross-encoder pass, then keep that block strictly ahead of the
@@ -989,7 +1033,10 @@ async def build_context(
     if packet_facts and token_count < budget_tokens:
         multi_hop_start = time.perf_counter()
         query_words = {t.lower() for t in _ENTITY_TOKEN_RE.findall(query)}
-        seed_texts = [_render(f["predicate"], f["value"]) for f in packet_facts]
+        # PRF seeds (names recurring in the pre-packing pool) ride alongside
+        # the packed-fact seeds -- same downstream entity-frequency ranking
+        # in _candidate_entities, just a second source of raw material.
+        seed_texts = [_render(f["predicate"], f["value"]) for f in packet_facts] + prf_seed_texts
         included_fact_ids = {uuid.UUID(f["id"]) for f in packet_facts}
         extra_rows = await _expand_via_entities(
             session,

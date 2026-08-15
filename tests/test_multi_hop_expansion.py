@@ -1,4 +1,5 @@
-"""Multi-hop expansion in the Context Assembler (sprint 10).
+"""Multi-hop expansion in the Context Assembler (sprint 10; PRF seeds
+added mechanism "expansion", 15 aout Sprint 2).
 
 A second, deterministic full-text pass seeded by entities found in the
 facts already packed — no LLM call, no extra embedding, bounded and one hop
@@ -6,13 +7,28 @@ deep. Targets evidence that never matches the ORIGINAL query's wording but
 becomes relevant once a first fact names a shared entity (e.g. two facts
 about "Michael" linked only by that name, not by similarity to the
 question).
+
+PRF (pseudo-relevance feedback) rides alongside as a second, earlier
+source of seeds: a name recurring across several of the top-ranked
+candidates -- BEFORE packing/reranking commits to a selection -- is
+itself a signal, even when none of those individual candidates scores
+high enough to survive into the packed set (see `_prf_seed_texts`).
 """
 
 import uuid
+from types import SimpleNamespace
 
 from sqlalchemy import func
 
-from app.context import _candidate_entities, _expand_via_entities
+from app.context import (
+    PRF_MIN_OCCURRENCES,
+    PRF_TOP_K,
+    _candidate_entities,
+    _expand_via_entities,
+    _prf_seed_texts,
+    _render,
+    estimate_tokens,
+)
 from app.db import async_session
 from app.providers.fake import mock_fact
 from tests.test_consolidator import capture, facts_for, make_memory_event, run_worker
@@ -33,6 +49,102 @@ def test_candidate_entities_extracts_capitalized_tokens_excluding_query_and_stop
 def test_candidate_entities_respects_the_limit():
     texts = ['a {"x": "Alice"} b {"y": "Bob"} c {"z": "Carla"} d {"w": "Diane"}']
     assert len(_candidate_entities(texts, exclude=set(), limit=2)) == 2
+
+
+def _pool_fact(score: float, predicate: str, value: dict) -> tuple:
+    return (score, "fact", SimpleNamespace(predicate=predicate, value=value))
+
+
+def test_prf_seed_texts_returns_names_recurring_across_top_candidates():
+    """PRF (mechanism "expansion", Sprint 2): a name mentioned in >= 2 of
+    the top-ranked candidates is a seed, EVEN THOUGH none of these
+    candidates has itself been packed yet -- PRF runs on the pool before
+    packing/reranking commits to anything."""
+    pool = [
+        _pool_fact(0.9, "project_meeting_1", {"note": "sync call, Fenwick joined"}),
+        _pool_fact(0.8, "project_meeting_2", {"note": "touchpoint, Fenwick present again"}),
+        _pool_fact(0.7, "project_status", {"status": "on track, no names mentioned"}),
+    ]
+    seeds = _prf_seed_texts(pool)
+    assert "Fenwick" in seeds
+
+
+def test_prf_seed_texts_excludes_names_mentioned_only_once():
+    pool = [_pool_fact(0.9, "trip_note", {"note": "Solo mention of Amara here"})]
+    seeds = _prf_seed_texts(pool)
+    assert "Amara" not in seeds
+
+
+def test_prf_seed_texts_only_looks_at_the_top_prf_top_k_window():
+    """A name recurring once inside the top PRF_TOP_K window and once far
+    below it must NOT count as "recurring" -- PRF is deliberately scoped
+    to the pre-packing pool's own top slice, not the whole pool."""
+    assert PRF_MIN_OCCURRENCES == 2  # this test's construction assumes it
+    filler = [
+        _pool_fact(0.5 - i * 0.01, f"filler_{i}", {"note": "nothing notable here"})
+        for i in range(PRF_TOP_K - 1)
+    ]
+    pool = [
+        _pool_fact(0.99, "project_meeting_1", {"note": "Fenwick joined the call"}),
+        *filler,
+        _pool_fact(0.01, "far_below_top_k", {"note": "Fenwick mentioned again, way down here"}),
+    ]
+    assert len(pool) == PRF_TOP_K + 1
+    assert "Fenwick" not in _prf_seed_texts(pool)
+
+
+async def test_prf_seed_texts_feed_expand_via_entities_to_find_an_unrelated_fact(client):
+    """Integration of the two functions PRF actually wires together: a
+    pool of two candidates that both mention "Fenwick" (neither one
+    itself packed -- irrelevant here, PRF reads the pool, not the packed
+    set) produces "Fenwick" as a seed via `_prf_seed_texts`, and that seed
+    alone -- with NO packed-fact seed at all -- is enough for
+    `_expand_via_entities` to find a fact that shares zero words with the
+    original query. Complements the small-scope caveat already documented
+    on `test_build_context_wires_expansion_end_to_end` below: with too
+    few facts in play, `build_context`'s own primary candidate pool
+    trivially includes everything regardless of relevance (confirmed
+    directly while writing this test), so isolating PRF's distinct
+    contribution end-to-end needs more scale than a hermetic test can
+    cheaply guarantee -- this proves the same mechanism at the boundary
+    that actually matters: pool -> PRF seeds -> expansion query."""
+    await capture(
+        client,
+        [
+            make_memory_event(
+                [
+                    mock_fact("project_meeting_1", {"note": "sync call, Fenwick joined"}),
+                    mock_fact("project_meeting_2", {"note": "touchpoint, Fenwick present again"}),
+                    mock_fact("fenwick_favorite_lunch_spot", {"place": "Fenwick's deli"}),
+                ]
+            )
+        ],
+    )
+    await run_worker()
+
+    [meeting_1] = await facts_for("usr_42", "project_meeting_1")
+    [meeting_2] = await facts_for("usr_42", "project_meeting_2")
+    [lunch] = await facts_for("usr_42", "fenwick_favorite_lunch_spot")
+
+    pool = [
+        _pool_fact(0.9, "project_meeting_1", meeting_1.value),
+        _pool_fact(0.8, "project_meeting_2", meeting_2.value),
+    ]
+    prf_seeds = _prf_seed_texts(pool)
+    assert prf_seeds == ["Fenwick"]
+
+    async with async_session() as session:
+        extra = await _expand_via_entities(
+            session,
+            project_id="prj_support",
+            subject_id="usr_42",
+            seed_texts=prf_seeds,  # PRF seeds alone -- no packed-fact seed at all
+            query_words={"quarterly", "budget", "review"},
+            exclude_ids={meeting_1.id, meeting_2.id},
+            now=func.now(),
+        )
+
+    assert [row.id for row in extra] == [lunch.id]
 
 
 async def test_expand_via_entities_finds_fact_absent_from_original_query(client):

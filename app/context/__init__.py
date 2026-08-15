@@ -278,6 +278,7 @@ async def _expand_via_entities(
                 Fact.volatility,
                 Fact.origin_trust,
                 Fact.qualifiers,
+                Fact.temporal_range,
             )
             .where(
                 Fact.project_id == project_id,
@@ -384,8 +385,35 @@ def _fact_freshness(row: Any, now: datetime) -> str:
     return "unconfirmed" if row.volatility == "slow" else "stale"
 
 
+def _relative_to_now(dt: datetime, now: datetime) -> str:
+    """Render `dt` as an exact, precomputed offset from `now` (mechanism
+    F1, 15 aout): "N days/weeks before/after the question". Deterministic
+    Python arithmetic, not left for the reader to derive — the point of
+    dual-date rendering (Partie 3.6): the reader VERIFIES a number that is
+    already in the text instead of calculating one from two ISO dates,
+    which a gpt-4o-mini-class reader gets right only 13.5-16% of the time
+    (Test-of-Time Arithmetic). Exact day count always shown; grouped into
+    weeks/months too when that reads better, but never in place of the
+    exact count.
+    """
+    days = round((now - dt).total_seconds() / 86400)
+    if days == 0:
+        return "the day of the question"
+    direction = "before" if days > 0 else "after"
+    n = abs(days)
+    if n >= 60:
+        return f"{n} days (~{round(n / 30)} months) {direction} the question"
+    if n >= 14 and n % 7 == 0:
+        return f"{n} days ({n // 7} weeks) {direction} the question"
+    return f"{n} day{'s' if n != 1 else ''} {direction} the question"
+
+
 def _packet_fact(
-    row: Any, freshness: str = "current", *, conflict_id: str | None = None
+    row: Any,
+    freshness: str = "current",
+    *,
+    conflict_id: str | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     reference = row.last_reinforced_at or row.valid_from or row.recorded_from
     return {
@@ -394,6 +422,19 @@ def _packet_fact(
         "value": row.value,
         "confidence": row.confidence,
         "valid_from": row.valid_from.isoformat() if row.valid_from else None,
+        # Dual-date rendering (mechanism F1, 15 aout): exact offset from the
+        # temporal point of view (`as_of`, defaulting to real "now" -- see
+        # `now_dt` in build_context), so the reader reads a number instead
+        # of computing one. None only when valid_from itself is None.
+        "valid_from_relative": (
+            _relative_to_now(row.valid_from, now) if row.valid_from and now else None
+        ),
+        # When this fact's source text used a relative time expression
+        # ("last week"), the ISO range the extractor resolved it to,
+        # anchored on the source event's occurred_at -- distinct from
+        # valid_from (always the MESSAGE's own timestamp). See
+        # app.providers.base.ExtractedFact.temporal_range.
+        "temporal_range": getattr(row, "temporal_range", None),
         "source_event_ids": [str(e) for e in row.source_event_ids],
         "fact_kind": row.fact_kind,
         "volatility": row.volatility,
@@ -487,6 +528,14 @@ async def build_context(
     unset flag means the cross-encoder pass never runs and every candidate
     keeps its hybrid-formula score exactly as before this mechanism
     existed. See RERANK_TOP_K below for what actually gets reranked.
+
+    `budget_tokens` default (2000, was 900, 15 aout Sprint 2): external
+    accuracy-vs-budget curves cited in research/Haki_Livre_Construction_
+    2026-08-15.md agree the gain from more served context flattens well
+    before 4000 tokens with a gpt-4o-mini-class reader -- ~1500-2500 is
+    the cited working point, not "more is free" (one curve even shows
+    MORE context making an already-weak reader WORSE). Not independently
+    re-validated against Haki's own harness yet.
     """
     if budget_tokens <= 0:
         raise ApiError(
@@ -600,6 +649,7 @@ async def build_context(
             Fact.volatility,
             Fact.origin_trust,
             Fact.qualifiers,
+            Fact.temporal_range,
             Fact.embedding.cosine_distance(query_embedding).label("distance"),
             score.label("score"),
         )
@@ -854,6 +904,7 @@ async def build_context(
                     row,
                     freshness_by_id.get(row.id, "current"),
                     conflict_id=str(conflict.id) if conflict else None,
+                    now=now_dt,
                 )
             )
             packed_fact_ids.add(row.id)
@@ -890,7 +941,12 @@ async def build_context(
                         continue
                     token_count += sibling_cost
                     packet_facts.append(
-                        _packet_fact(sibling, sibling_freshness, conflict_id=str(conflict.id))
+                        _packet_fact(
+                            sibling,
+                            sibling_freshness,
+                            conflict_id=str(conflict.id),
+                            now=now_dt,
+                        )
                     )
                     packed_fact_ids.add(sibling_id)
                     decisions.append(
@@ -906,6 +962,11 @@ async def build_context(
                     "event_id": str(row.id),
                     "kind": row.kind,
                     "occurred_at": row.occurred_at.isoformat() if row.occurred_at else None,
+                    # Dual-date rendering (mechanism F1, 15 aout) -- see
+                    # _relative_to_now / PacketFact.valid_from_relative.
+                    "occurred_at_relative": (
+                        _relative_to_now(row.occurred_at, now_dt) if row.occurred_at else None
+                    ),
                     "excerpt": excerpt,
                     "context_neighbor": False,
                 }
@@ -950,7 +1011,7 @@ async def build_context(
             freshness = _fact_freshness(row, now_dt)
             cost = estimate_tokens(_render(row.predicate, row.value))
             if token_count + cost <= budget_tokens:
-                packet_facts.append(_packet_fact(row, freshness))
+                packet_facts.append(_packet_fact(row, freshness, now=now_dt))
                 token_count += cost
                 decisions.append(
                     {
@@ -1066,6 +1127,11 @@ async def build_context(
                         "event_id": str(row.id),
                         "kind": row.kind,
                         "occurred_at": row.occurred_at.isoformat() if row.occurred_at else None,
+                        "occurred_at_relative": (
+                            _relative_to_now(row.occurred_at, now_dt)
+                            if row.occurred_at
+                            else None
+                        ),
                         "excerpt": excerpt,
                         "context_neighbor": True,
                     }

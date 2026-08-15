@@ -100,6 +100,20 @@ def build_prompt_context(packet: dict[str, Any]) -> str:
     for fact in facts:
         value = fact.get("value")
         valid_from = fact.get("valid_from") or "unknown date"
+        # Dual-date rendering (mechanism F1, 15 aout): an exact, precomputed
+        # offset ("N days before the question") next to the ISO date, so
+        # the reader VERIFIES a number instead of computing one from two
+        # ISO dates -- a gpt-4o-mini-class reader gets that arithmetic
+        # right only 13.5-16% of the time (Test-of-Time Arithmetic).
+        relative = fact.get("valid_from_relative")
+        if relative:
+            valid_from = f"{valid_from} — {relative}"
+        temporal_range = fact.get("temporal_range")
+        if temporal_range:
+            valid_from += (
+                f"; described event dated {temporal_range.get('start')} to "
+                f"{temporal_range.get('end')}"
+            )
         sources = ",".join(fact.get("source_event_ids") or []) or "no-source"
         marker = ""
         if fact.get("freshness") == "unconfirmed":
@@ -147,6 +161,9 @@ def build_prompt_context(packet: dict[str, Any]) -> str:
         )
         for episode in episodes:
             occurred = episode.get("occurred_at") or "unknown date"
+            occurred_relative = episode.get("occurred_at_relative")
+            if occurred_relative:
+                occurred = f"{occurred} — {occurred_relative}"
             marker = (
                 " [surrounding context — not independently matched to the "
                 "query, included for the conversational moment around a "

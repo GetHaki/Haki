@@ -94,6 +94,14 @@ ORDER (reasoning always first — see why below):
   "supersede", and they coexist as separate facts under the SAME
   predicate. See MEMORY FORM below for the full distinction and worked
   examples.
+- temporal_range (object, optional): {"start": ISO date/datetime, "end":
+  ISO date/datetime} — ONLY when the text describes this fact with a
+  RELATIVE time expression ("last week", "il y a trois jours", "hier
+  soir", "a few months ago") rather than an absolute date. Resolve it
+  into a range anchored on this event's "occurred_at" (given to you with
+  each event) — see TEMPORAL GROUNDING below. Omit entirely when the text
+  already states an absolute date (put that date in `value` instead, as
+  today) or states no time reference at all — never invent one.
 
 You receive the subject's currently ACTIVE facts in "existing_facts".
 
@@ -259,6 +267,35 @@ MEMORY FORM — is this ONE fact that changes, or MANY facts that add up?
   subject mentions this again next week with different details, does
   that CONTRADICT what I already know, or ADD to it?" Contradicts ->
   state. Adds to it -> event.
+
+TEMPORAL GROUNDING — resolve relative time before it is destroyed:
+- Every event you receive carries its own "occurred_at" (when the message
+  was SENT). A RELATIVE time expression in the text — "last week", "il y a
+  trois jours", "hier soir", "a couple months back", "this past Friday" —
+  describes something that happened at a DIFFERENT point in time than
+  occurred_at, and that difference is lost forever the moment you either
+  (a) store the raw expression as text with no resolution, or (b) silently
+  treat it as if it happened AT occurred_at. Both are documented failure
+  modes. Resolve it instead: emit `temporal_range` as an ISO range anchored
+  on occurred_at.
+- Worked example: occurred_at is 2023-06-25T13:22:00Z, the message says "I
+  went hiking last week". "Last week" is not one instant — anchor it as
+  the 7 days immediately before occurred_at: temporal_range {"start":
+  "2023-06-18", "end": "2023-06-25"}. Do NOT invent a specific day (e.g.
+  "2023-06-20") — you were not told which day, only the week.
+- Worked example: occurred_at is 2023-11-30T00:36:00Z, the message says
+  "I got pre-approved for my mortgage back in August". Anchor the named
+  month: temporal_range {"start": "2023-08-01", "end": "2023-08-31"}.
+- An ABSOLUTE date in the text ("on June 2nd", "le 15 mars 2023") needs no
+  temporal_range — put it directly in `value` (e.g. {"date": "2023-06-02"})
+  as today, and leave temporal_range unset.
+- No time expression at all ("I have a dog") — leave temporal_range unset,
+  valid_from (occurred_at) already anchors when this was SAID, which is
+  all that applies.
+- This is independent of memory_form: a "state" fact can carry a
+  temporal_range (a status that took effect "last week"), and an "event"
+  fact commonly does (each occurrence dated by when it actually happened,
+  not by when it was mentioned).
 
 VOLATILITY — most facts expire in silence; classify how fast:
 - stable: essentially never changes on its own (birthplace, native

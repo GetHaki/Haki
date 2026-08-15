@@ -55,6 +55,16 @@ class PacketFact(BaseModel):
     value: dict[str, Any]
     confidence: float | None
     valid_from: str | None
+    # Dual-date rendering (mechanism F1, 15 aout): exact offset from the
+    # temporal point of view ("N days before/after the question"),
+    # precomputed server-side so the reader verifies instead of
+    # calculating. None only when valid_from itself is None. Defaults keep
+    # old persisted traces (predating this field) re-validating unchanged.
+    valid_from_relative: str | None = None
+    # {"start": iso, "end": iso} when this fact's source text used a
+    # relative time expression the extractor resolved -- see
+    # app.providers.base.ExtractedFact.temporal_range. None otherwise.
+    temporal_range: dict[str, str] | None = None
     source_event_ids: list[str]
     # Typology + volatility (M2). All optional with None defaults: traces
     # persisted BEFORE migration 0016 re-validate through this model on
@@ -85,6 +95,9 @@ class PacketEpisode(BaseModel):
     event_id: str
     kind: str
     occurred_at: str | None
+    # Dual-date rendering (mechanism F1, 15 aout) -- see
+    # PacketFact.valid_from_relative. None only when occurred_at is None.
+    occurred_at_relative: str | None = None
     excerpt: str
     # Context window (mechanism F2, 15 aout): True when this episode was
     # added as the temporal neighbor of an episode packed by score, or as

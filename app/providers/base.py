@@ -15,6 +15,7 @@ The consolidator ALWAYS re-validates every candidate with Pydantic before
 touching the ledger, so a provider can never crash a batch with bad output.
 """
 
+from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field, model_validator
@@ -125,11 +126,37 @@ class ExtractedFact(BaseModel):
     memory_form: str | None = Field(
         default=None, pattern="^(" + "|".join(MEMORY_FORMS) + ")$"
     )
+    # Temporal grounding (mechanism F1, 15 aout): when the source text uses
+    # a RELATIVE time expression for what this fact describes ("last week",
+    # "il y a trois jours", "hier soir") -- as opposed to `valid_from`,
+    # which is always the event's own `occurred_at` (when the message was
+    # sent) -- this resolves that expression into an ISO range anchored on
+    # `occurred_at`, {"start": ..., "end": ...}. Both keys required together
+    # (a single invented point in time is worse than an honest range: "last
+    # week" said on a Wednesday is a 7-day window, never a fabricated exact
+    # day). None when the source text already carries an absolute date, or
+    # states no time reference at all -- never guessed. The Chronos pattern
+    # (current LongMemEval SOTA, 95.6%, precisely because it resolves this
+    # at write time instead of leaving it for the reader to re-derive).
+    temporal_range: dict[str, str] | None = Field(default=None)
 
     @model_validator(mode="after")
     def _reject_action_requires_reason(self) -> "ExtractedFact":
         if self.action == "reject" and self.reject_reason is None:
             raise ValueError("action 'reject' requires a reject_reason")
+        return self
+
+    @model_validator(mode="after")
+    def _temporal_range_requires_both_bounds(self) -> "ExtractedFact":
+        if self.temporal_range is None:
+            return self
+        if set(self.temporal_range) != {"start", "end"}:
+            raise ValueError("temporal_range requires exactly 'start' and 'end'")
+        for key in ("start", "end"):
+            try:
+                datetime.fromisoformat(self.temporal_range[key])
+            except ValueError as exc:
+                raise ValueError(f"temporal_range.{key} must be ISO 8601") from exc
         return self
 
 

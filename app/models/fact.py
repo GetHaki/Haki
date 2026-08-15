@@ -118,6 +118,17 @@ class Fact(Base):
         String(16), default="trusted", server_default="trusted"
     )
 
+    # Temporal grounding (mechanism F1, migration 0020): {"start": iso,
+    # "end": iso} when the source text described this fact with a RELATIVE
+    # time expression ("last week", "il y a trois jours") that the
+    # extractor resolved into a range anchored on the source event's
+    # occurred_at -- see app.providers.base.ExtractedFact.temporal_range.
+    # None for a fact carrying no such expression (an absolute date already
+    # in `value`, or no time reference at all) -- deliberately NOT the same
+    # as valid_from, which is always the MESSAGE's timestamp, not the
+    # DESCRIBED event's.
+    temporal_range: Mapped[dict | None] = mapped_column(JSONB)
+
     # Retrieval (sprint 2): dense embedding + pre-rendered full-text column.
     # vector(384) since migration 0003 (default embedder: local fastembed,
     # paraphrase-multilingual-MiniLM-L12-v2).

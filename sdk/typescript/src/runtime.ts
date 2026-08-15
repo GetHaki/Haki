@@ -99,7 +99,18 @@ export function buildPromptContext(packet: ContextPacket | null | undefined): st
   }
   for (const fact of facts) {
     const value = JSON.stringify(fact.value);
-    const validFrom = fact.valid_from ?? "unknown date";
+    // Dual-date rendering (mechanism F1, 15 aout): an exact, precomputed
+    // offset ("N days before the question") next to the ISO date, so the
+    // reader VERIFIES a number instead of computing one from two ISO
+    // dates -- a gpt-4o-mini-class reader gets that arithmetic right only
+    // 13.5-16% of the time (Test-of-Time Arithmetic).
+    let validFrom = fact.valid_from ?? "unknown date";
+    if (fact.valid_from_relative) {
+      validFrom = `${validFrom} — ${fact.valid_from_relative}`;
+    }
+    if (fact.temporal_range) {
+      validFrom += `; described event dated ${fact.temporal_range.start} to ${fact.temporal_range.end}`;
+    }
     const sources = (fact.source_event_ids ?? []).join(",") || "no-source";
     let marker = "";
     if (fact.freshness === "unconfirmed") {
@@ -145,7 +156,10 @@ export function buildPromptContext(packet: ContextPacket | null | undefined): st
         "use the one matching that earlier point in time instead.",
     );
     for (const episode of episodes) {
-      const occurred = episode.occurred_at ?? "unknown date";
+      let occurred = episode.occurred_at ?? "unknown date";
+      if (episode.occurred_at_relative) {
+        occurred = `${occurred} — ${episode.occurred_at_relative}`;
+      }
       const marker = episode.context_neighbor
         ? " [surrounding context — not independently matched to the query, " +
           "included for the conversational moment around a result above]"

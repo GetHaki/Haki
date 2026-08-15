@@ -251,6 +251,39 @@ test("buildPromptContext: marks context window neighbors (F2, 15 aout)", () => {
   assert.ok(neighborLine.includes("surrounding context"));
 });
 
+test("buildPromptContext: renders dual dates and temporal_range (F1, 15 aout)", () => {
+  // Every dated packet item carries its ISO date AND an exact,
+  // precomputed offset from the question ("N days before the question").
+  // Parity with the Python SDK's equivalent test.
+  const packet = {
+    facts: [
+      {
+        id: "f1",
+        predicate: "hiking_trip",
+        value: { trail: "Congress Trail" },
+        valid_from: "2023-06-04T00:00:00+00:00",
+        valid_from_relative: "21 days (3 weeks) before the question",
+        temporal_range: { start: "2023-06-18", end: "2023-06-25" },
+        source_event_ids: ["evt-1"],
+      },
+    ],
+    episodes: [
+      {
+        event_id: "evt-2",
+        kind: "chat_session",
+        occurred_at: "2023-06-04T00:00:00+00:00",
+        occurred_at_relative: "21 days (3 weeks) before the question",
+        excerpt: "user: went hiking last week",
+        context_neighbor: false,
+      },
+    ],
+    warnings: [],
+  };
+  const block = buildPromptContext(packet);
+  assert.ok(block.includes("21 days (3 weeks) before the question"));
+  assert.ok(block.includes("2023-06-18 to 2023-06-25"));
+});
+
 test("buildPromptContext: contested facts are marked, with the tie-break exception (13 aout)", () => {
   // "Stop hiding real conflicts": a genuine two-sided disagreement is now
   // served (app.context), both facts sharing a conflict_id, instead of an

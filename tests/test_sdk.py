@@ -160,6 +160,43 @@ def test_build_prompt_context_marks_context_window_neighbors():
     assert "surrounding context" in neighbor_line
 
 
+def test_build_prompt_context_renders_dual_dates_and_temporal_range():
+    """Mechanism F1 (15 aout): every dated packet item carries its ISO date
+    AND an exact, precomputed offset from the question ("N days before the
+    question") — the reader verifies a number already in the text instead
+    of computing one from two ISO dates. A fact whose source text used a
+    relative time expression ("last week") also carries the resolved
+    temporal_range."""
+    packet = {
+        "facts": [
+            {
+                "id": "f1",
+                "predicate": "hiking_trip",
+                "value": {"trail": "Congress Trail"},
+                "confidence": 0.9,
+                "valid_from": "2023-06-04T00:00:00+00:00",
+                "valid_from_relative": "21 days (3 weeks) before the question",
+                "temporal_range": {"start": "2023-06-18", "end": "2023-06-25"},
+                "source_event_ids": ["evt-1"],
+            }
+        ],
+        "episodes": [
+            {
+                "event_id": "evt-2",
+                "kind": "chat_session",
+                "occurred_at": "2023-06-04T00:00:00+00:00",
+                "occurred_at_relative": "21 days (3 weeks) before the question",
+                "excerpt": "user: went hiking last week",
+                "context_neighbor": False,
+            }
+        ],
+        "warnings": [],
+    }
+    block = build_prompt_context(packet)
+    assert "21 days (3 weeks) before the question" in block
+    assert "2023-06-18 to 2023-06-25" in block
+
+
 def test_build_prompt_context_marks_contested_facts_and_their_tie_break():
     """13 aout, "stop hiding real conflicts": a genuine two-sided
     disagreement is now served (app.context), both facts sharing a

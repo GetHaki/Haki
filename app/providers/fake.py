@@ -76,6 +76,7 @@ def mock_fact(
     fact_kind: str | None = None,
     volatility: str | None = None,
     memory_form: str | None = None,
+    temporal_range: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Helper to build a raw mock_facts entry (kept unvalidated on purpose).
 
@@ -103,4 +104,6 @@ def mock_fact(
         fact["volatility"] = volatility
     if memory_form is not None:
         fact["memory_form"] = memory_form
+    if temporal_range is not None:
+        fact["temporal_range"] = temporal_range
     return fact

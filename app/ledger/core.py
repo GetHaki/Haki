@@ -180,6 +180,7 @@ async def create_fact(
     volatility: str = "stable",
     origin_trust: str = "trusted",
     memory_form: str = "state",
+    temporal_range: dict | None = None,
 ) -> Fact:
     fact = Fact(
         org_id=org_id,
@@ -200,6 +201,7 @@ async def create_fact(
         volatility=volatility,
         origin_trust=origin_trust,
         memory_form=memory_form,
+        temporal_range=temporal_range,
     )
     session.add(fact)
     await session.flush()

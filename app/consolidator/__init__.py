@@ -861,6 +861,7 @@ async def _apply_candidate(
             volatility=volatility,
             origin_trust=event.origin_trust or "trusted",
             memory_form=memory_form,
+            temporal_range=candidate.temporal_range,
         )
         held_fact.embedding = embedding
         held_fact.search_text = _search_text(candidate.predicate, candidate.value)
@@ -924,6 +925,7 @@ async def _apply_candidate(
         volatility=volatility,
         origin_trust=event.origin_trust or "trusted",
         memory_form=memory_form,
+        temporal_range=candidate.temporal_range,
     )
     fact.embedding = embedding
     fact.search_text = _search_text(candidate.predicate, value)

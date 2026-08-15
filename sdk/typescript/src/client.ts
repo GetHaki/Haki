@@ -46,6 +46,14 @@ export interface PacketFact {
   value: Record<string, unknown>;
   confidence: number | null;
   valid_from: string | null;
+  /** Dual-date rendering (mechanism F1, 15 aout): exact offset from the
+   * temporal point of view ("N days before/after the question"),
+   * precomputed server-side. Absent on older servers. */
+  valid_from_relative?: string | null;
+  /** {"start": iso, "end": iso} when this fact's source text used a
+   * relative time expression the extractor resolved. Absent otherwise or
+   * on older servers. */
+  temporal_range?: { start: string; end: string } | null;
   source_event_ids: string[];
   /** Typology + volatility (M2); absent when talking to a pre-M2 server. */
   fact_kind?: string | null;
@@ -68,6 +76,9 @@ export interface PacketEpisode {
   event_id: string;
   kind: string;
   occurred_at: string | null;
+  /** Dual-date rendering (mechanism F1, 15 aout) -- see
+   * PacketFact.valid_from_relative. Absent on older servers. */
+  occurred_at_relative?: string | null;
   excerpt: string;
   /** Context window (mechanism F2, 15 aout): true when this episode was
    * added as the temporal neighbor of a score-packed episode, or as the

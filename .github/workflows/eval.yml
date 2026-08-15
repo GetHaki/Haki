@@ -44,6 +44,10 @@ on:
       shard_count:
         description: "Nombre de shards paralleles — 1 = pas de sharding. LoCoMo complet (10 conversations): 10. LongMemEval complet (211 questions, aucune conversation partagee): 20-30."
         default: "1"
+      rerank:
+        description: "Active le reranker cross-encoder (mecanisme F-R, opt-in, HAKI_RERANK_ENABLED)"
+        type: boolean
+        default: false
 
 jobs:
   plan:
@@ -88,6 +92,7 @@ jobs:
       HAKI_AUTH_REQUIRED: "true"
       HAKI_ADMIN_KEY: gh-actions-eval-admin-key
       HAKI_EVAL_ADMIN_KEY: gh-actions-eval-admin-key
+      HAKI_RERANK_ENABLED: ${{ github.event.inputs.rerank }}
     steps:
       - uses: actions/checkout@v4
 

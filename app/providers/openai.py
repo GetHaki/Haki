@@ -327,7 +327,19 @@ class OpenAIProvider:
         self._client = httpx.AsyncClient(
             base_url=settings.llm_base_url,
             headers={"Authorization": f"Bearer {settings.llm_api_key}"},
-            timeout=60.0,
+            # 180s, not 60s (15 aout): a subject with dozens of accumulated
+            # sessions carries a growing `existing_facts` list into every
+            # later extraction call for that same subject -- the LAST calls
+            # of a long conversation (e.g. LongMemEval's 45-53 session
+            # "single-session-user" haystacks) send a much longer prompt
+            # than the first ones. Diagnosed live: real gpt-4o-mini calls on
+            # these timed out at 60s, the job kept failing/retrying, and the
+            # eval harness's fixed 40-round consolidate_until_idle budget
+            # (eval/haki_client.py) was exhausted before a single one of
+            # those retries ever got the extra headroom it needed to
+            # actually finish -- not a concurrency/rate-limit issue
+            # (reproduced with a single shard, zero contention).
+            timeout=180.0,
         )
 
     async def extract_facts(

@@ -1,9 +1,13 @@
-"""Local embedder: fastembed (ONNX Runtime, CPU), no network in the hot path.
+"""Local embedder + reranker: fastembed (ONNX Runtime, CPU), no network in
+the hot path.
 
-Model: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+Embedder model: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 (384 dims, multilingual — Haki's primary usage is francophone). The model
 (~100 MB) is downloaded once by fastembed into its local cache on first
 load, then everything runs offline.
+
+Reranker model (mechanism F-R, 15 aout): Xenova/ms-marco-MiniLM-L-6-v2, see
+LocalReranker below.
 
 Design notes:
 - Lazy singleton: the ONNX session is loaded on first `embed` call, not at
@@ -70,3 +74,47 @@ class LocalEmbedder:
                     self._cache.popitem(last=False)
                 results[text] = vector
         return [results[text] for text in texts]
+
+
+# Reranker (mechanism F-R, Sprint 2, 15 aout): a cross-encoder -- query and
+# document run through the model TOGETHER, so it can attend to their
+# interaction directly, unlike two independently-embedded vectors compared
+# by cosine distance. The literature's single largest measured retrieval
+# gain (SmartSearch ablation, +15.1pp, median gold rank 195 -> 8) --
+# app.context applies it as a re-scoring pass over the top candidates
+# already selected by the existing hybrid formula, not a replacement for
+# it (a cross-encoder scores one query-document PAIR at a time, too slow
+# to run over an entire scope; the hybrid formula's job is still to narrow
+# a large scope down to a shortlist cheaply).
+#
+# Model: Xenova/ms-marco-MiniLM-L-6-v2 -- a standard MS MARCO-trained
+# cross-encoder, not the exact model named in the plan (mxbai-rerank-base
+# for eval / bge-m3 int8 for production): neither is in fastembed==0.8.0's
+# supported list (pinned, see pyproject.toml) for THIS local ONNX runner.
+# Picked for being small (~80 MB, vs. BAAI/bge-reranker-base's ~1 GB also
+# offered here) and CPU-fast, consistent with this module's existing
+# preference for a light multilingual embedder over a larger one --
+# recalibrate/swap only if measured recall against the eval harness's own
+# gold-served metric says otherwise, not on the plan's model name alone.
+_RERANK_MODEL_NAME = "Xenova/ms-marco-MiniLM-L-6-v2"
+
+
+class LocalReranker:
+    def __init__(self) -> None:
+        self._model = None  # fastembed.rerank.cross_encoder.TextCrossEncoder, loaded lazily
+
+    def _load(self) -> None:
+        if self._model is None:
+            from fastembed.rerank.cross_encoder import TextCrossEncoder
+
+            self._model = TextCrossEncoder(model_name=_RERANK_MODEL_NAME)
+
+    def _rerank_blocking(self, query: str, documents: list[str]) -> list[float]:
+        self._load()
+        assert self._model is not None
+        return [float(s) for s in self._model.rerank(query, documents)]
+
+    async def rerank(self, query: str, documents: list[str]) -> list[float]:
+        if not documents:
+            return []
+        return await asyncio.to_thread(self._rerank_blocking, query, documents)

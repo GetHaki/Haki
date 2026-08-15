@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     # pooler, caching is safe and free performance).
     db_disable_prepared_statement_cache: bool = False  # HAKI_DB_DISABLE_PREPARED_STATEMENT_CACHE
 
+    # Consolidation worker (sprint 16 fix — see app/worker.py): how often
+    # the background loop polls for pending `consolidate` jobs. Previously
+    # `python -m app.worker` only ever ran ONE pass and exited — nothing in
+    # the Dockerfile/CMD ever invoked it again, so captured events queued a
+    # job that no process ever picked up. docker-entrypoint.sh now runs
+    # this loop alongside uvicorn.
+    worker_poll_seconds: float = 5.0  # HAKI_WORKER_POLL_SECONDS
+
     # Provider selection: extractor (LLM, off hot path) and embedder (in the
     # context hot path) are configured independently.
     llm_provider: str = "fake"  # HAKI_LLM_PROVIDER=fake|openai
@@ -39,6 +47,18 @@ class Settings(BaseSettings):
     llm_api_key: str | None = None
     llm_model: str = "gpt-4o-mini"
     llm_embed_model: str = "text-embedding-3-small"
+
+    # Reranker (mechanism F-R, Sprint 2, 15 aout): a cross-encoder re-scoring
+    # pass over the top candidates already selected by the hybrid formula --
+    # see app.context.RERANK_TOP_K. Off by default: extra latency (a local
+    # ONNX forward pass per candidate) and an extra ~80 MB model load on
+    # first use, a cost only worth paying once measured against the eval
+    # harness's own gold-served metric, not assumed a free win. fake|local
+    # only -- there is no remote/paid reranker provider (see app.providers.
+    # base.Reranker; local uses fastembed's TextCrossEncoder, same ONNX/CPU
+    # runtime already used for embeddings).
+    rerank_enabled: bool = False  # HAKI_RERANK_ENABLED
+    rerank_provider: str = "local"  # HAKI_RERANK_PROVIDER=local|fake
 
     # Dev auth (sprint 4): when set, the MCP endpoint requires
     # `Authorization: Bearer <api_key>`. Unset = open mode (local dev only,

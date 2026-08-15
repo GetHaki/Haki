@@ -160,3 +160,22 @@ class Embedder(Protocol):
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed texts into EMBEDDING_DIM-dimensional vectors."""
         ...
+
+
+@runtime_checkable
+class Reranker(Protocol):
+    async def rerank(self, query: str, documents: list[str]) -> list[float]:
+        """Score each document's relevance to `query` with a cross-encoder
+        (query+document jointly attended, not two separate embeddings
+        compared by distance) -- the mechanism the literature ties to the
+        single largest measured retrieval gain (SmartSearch ablation,
+        +15.1pp, median gold rank 195 -> 8; see app.context's
+        RERANK_TOP_K/HAKI_RERANK_ENABLED for where this is used).
+
+        Returns scores aligned 1:1 with `documents`, same order, higher =
+        more relevant. Not necessarily 0..1 or comparable across different
+        reranker models/queries -- callers use these scores only to
+        re-order candidates against EACH OTHER for the SAME query, never
+        blended arithmetically with a different scoring scale.
+        """
+        ...

@@ -9,6 +9,9 @@ consolidator is responsible for Pydantic validation and rejection.
 text (digest bytes repeated, mapped to [-1, 1], L2-normalized). Same text
 always yields the same vector, similar texts do NOT cluster — retrieval
 tests must use identical strings for the query to match.
+
+`rerank` (mechanism F-R) returns a word-overlap count, not a real
+relevance model -- see its docstring below.
 """
 
 import hashlib
@@ -33,6 +36,21 @@ class FakeProvider:
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         return [_embed_one(text) for text in texts]
+
+    async def rerank(self, query: str, documents: list[str]) -> list[float]:
+        """Deterministic stand-in for a cross-encoder (mechanism F-R):
+        word-overlap count between query and document, lowercased. Not a
+        real relevance signal -- just cheap and fully predictable, so
+        tests can construct an exact expected order (e.g. a document
+        sharing 3 query words outranks one sharing 1) without a real ML
+        model."""
+        return [_rerank_one(query, document) for document in documents]
+
+
+def _rerank_one(query: str, document: str) -> float:
+    query_words = {w for w in query.lower().split() if w}
+    doc_words = {w for w in document.lower().split() if w}
+    return float(len(query_words & doc_words))
 
 
 def _embed_one(text: str) -> list[float]:

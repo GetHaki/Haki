@@ -88,7 +88,7 @@ from app import metrics
 from app.config import settings
 from app.errors import ApiError
 from app.models import ConflictSet, ContextTrace, Event, Fact, FactStatus, SubjectAlias
-from app.providers import Embedder, get_embedder
+from app.providers import Embedder, Reranker, get_embedder, get_reranker
 
 # Scoring weights (documented; not part of the public contract).
 W_SIMILARITY = 0.6
@@ -113,6 +113,18 @@ CANDIDATE_LIMIT = 256
 # top-K by full-text rank (GIN index); only this union gets the full hybrid
 # score. 64 keeps recall comfortable while bounding the phase-2 work.
 RETRIEVAL_TOP_K = 64
+
+# Reranker (mechanism F-R, 15 aout): only the top RERANK_TOP_K candidates
+# from the unified pool (by the existing hybrid score, facts and episodes
+# combined) get a cross-encoder pass -- a cross-encoder scores one
+# query-document PAIR per forward call, an order of magnitude slower than
+# an embedding lookup, so running it over the FULL candidate set (up to
+# CANDIDATE_LIMIT + EPISODE_TOP_K) would put a real latency cost in the hot
+# path for no benefit: a candidate that did not even make the hybrid
+# shortlist is vanishingly unlikely to be the one the cross-encoder should
+# have promoted. 50 sits in the middle of the range cited in research/
+# Haki_Livre_Construction_2026-08-15.md ("40-60 candidats RRF").
+RERANK_TOP_K = 50
 
 # M3 recall gate — floor on the SEMANTIC axis only (cosine distance of the
 # candidate to the query), never on the hybrid score: similarity is the only
@@ -445,6 +457,7 @@ async def build_context(
     purpose: str | None = None,
     budget_tokens: int = 900,
     embedder: Embedder | None = None,
+    reranker: Reranker | None = None,
     extra_warnings: list[str] | None = None,
     as_of: datetime | None = None,
 ) -> tuple[dict[str, Any], int, uuid.UUID]:
@@ -468,6 +481,12 @@ async def build_context(
     function happens to run. See research/Diagnostic_Couverture_2026-08-14.md
     for the measured effect (~38% of facts hidden on every query on the
     LoCoMo/LongMemEval harnesses before this parameter existed).
+
+    `reranker` (mechanism F-R, 15 aout, Sprint 2): only consulted, and only
+    ever instantiated, when `settings.rerank_enabled` -- omitted here, an
+    unset flag means the cross-encoder pass never runs and every candidate
+    keeps its hybrid-formula score exactly as before this mechanism
+    existed. See RERANK_TOP_K below for what actually gets reranked.
     """
     if budget_tokens <= 0:
         raise ApiError(
@@ -476,6 +495,11 @@ async def build_context(
             field="budget_tokens",
         )
     embedder = embedder or get_embedder()
+    # Reranker (mechanism F-R): never instantiated unless the flag is set
+    # AND no explicit reranker was already passed by the caller (tests pass
+    # FakeProvider directly regardless of the flag).
+    if settings.rerank_enabled and reranker is None:
+        reranker = get_reranker()
     request_start = time.perf_counter()
     stage_timings: dict[str, int] = {}
 
@@ -766,6 +790,35 @@ async def build_context(
             continue
         pool.append((row.score, "episode", row))
     pool.sort(key=lambda item: item[0], reverse=True)
+
+    # Reranker (mechanism F-R, 15 aout): re-order only the top RERANK_TOP_K
+    # candidates (already sorted by the hybrid score above) with a
+    # cross-encoder pass, then keep that block strictly ahead of the
+    # untouched tail. Cross-encoder scores are NOT on the same scale as the
+    # hybrid formula's -- re-sorting the two blocks independently and
+    # concatenating (rather than merging both into one global sort by raw
+    # score value) is what keeps that safe: every reranked candidate still
+    # outranks every un-reranked one, exactly as it did before reranking
+    # touched anything, only the ORDER within the shortlist changes.
+    if reranker is not None and pool:
+        rerank_start = time.perf_counter()
+        head_items = pool[:RERANK_TOP_K]
+        tail = pool[RERANK_TOP_K:]
+        documents = [
+            _render(row.predicate, row.value) if kind == "fact" else episode_text(row.kind, row.payload)
+            for _score, kind, row in head_items
+        ]
+        rerank_scores = await reranker.rerank(query, documents)
+        reranked_head = sorted(
+            (
+                (new_score, kind, row)
+                for new_score, (_old_score, kind, row) in zip(rerank_scores, head_items)
+            ),
+            key=lambda item: item[0],
+            reverse=True,
+        )
+        pool = reranked_head + tail
+        stage_timings["rerank"] = round((time.perf_counter() - rerank_start) * 1000)
 
     packet_facts: list[dict[str, Any]] = []
     packet_episodes: list[dict[str, Any]] = []

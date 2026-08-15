@@ -6,6 +6,7 @@ from app.providers.base import (
     ExtractedFact,
     Extractor,
     RawCandidate,
+    Reranker,
 )
 from app.providers.fake import FakeProvider
 
@@ -14,6 +15,10 @@ from app.providers.fake import FakeProvider
 # recreating the embedder per request would put a ~2 s model load back into
 # the context hot path (measured).
 _embedder: Embedder | None = None
+# Process-wide reranker singleton (mechanism F-R): same reasoning as the
+# embedder above -- the ONNX cross-encoder session must be loaded once, not
+# per request.
+_reranker: Reranker | None = None
 
 
 def get_extractor() -> Extractor:
@@ -61,6 +66,32 @@ def get_embedder() -> Embedder:
     return _embedder
 
 
+def get_reranker() -> Reranker:
+    """Select the reranker provider (HAKI_RERANK_PROVIDER=local|fake).
+
+    Only consulted when HAKI_RERANK_ENABLED is set -- callers check that
+    flag themselves (see app.context) rather than this function silently
+    returning a no-op, so "reranking is on" is never ambiguous between
+    "disabled" and "enabled with a null provider". Process-wide singleton
+    (see module note on _embedder).
+    """
+    global _reranker
+    if _reranker is not None:
+        return _reranker
+    if settings.rerank_provider == "local":
+        from app.providers.local import LocalReranker
+
+        _reranker = LocalReranker()
+    elif settings.rerank_provider == "fake":
+        _reranker = FakeProvider()
+    else:
+        raise RuntimeError(
+            f"Unknown HAKI_RERANK_PROVIDER {settings.rerank_provider!r} "
+            "(expected 'local' or 'fake')"
+        )
+    return _reranker
+
+
 __all__ = [
     "EMBEDDING_DIM",
     "REJECT_REASONS",
@@ -69,6 +100,8 @@ __all__ = [
     "Extractor",
     "FakeProvider",
     "RawCandidate",
+    "Reranker",
     "get_embedder",
     "get_extractor",
+    "get_reranker",
 ]

@@ -76,6 +76,90 @@ async def test_event_form_declared_upfront_never_opens_a_conflict(client):
     assert all(fact.memory_form == "event" for fact in facts)
 
 
+async def test_event_form_never_fuses_two_occurrences_with_the_same_value(client):
+    """Regression guard (bug found by code review, 16 aout): _find_duplicate
+    ran before memory_form was computed for the candidate and had no
+    visibility into it, so a second "event" candidate with the exact same
+    value as the first (e.g. the same volunteering activity done twice) was
+    silently reinforced onto the first fact instead of becoming its own
+    active fact — defeating the one guarantee memory_form="event" exists to
+    make ("a new mention is never a contradiction OR a duplicate of the
+    previous ones")."""
+    subject = "usr_event_form_dup"
+    for at in ["2026-07-28T10:00:00Z", "2026-08-04T10:00:00Z"]:
+        await capture(
+            client,
+            [
+                make_memory_event(
+                    [
+                        mock_fact(
+                            "volunteered_at",
+                            {"place": "food bank"},
+                            subject_id=subject,
+                            memory_form="event",
+                        )
+                    ],
+                    subject_id=subject,
+                    occurred_at=at,
+                )
+            ],
+        )
+        await run_worker()
+
+    assert await _open_conflicts(subject) == []
+    facts = await _facts(subject, "volunteered_at")
+    assert len(facts) == 2
+    assert all(fact.status is FactStatus.active for fact in facts)
+    assert all(fact.reinforcement_count == 0 for fact in facts)
+
+
+async def test_active_fact_lookup_is_deterministic_with_multiple_actives(client):
+    """Regression guard (bug found by code review, 16 aout): _active_fact
+    had no ORDER BY, so once memory_form="event" allows several
+    simultaneously-active facts under one identity, which one it returned
+    depended on arbitrary DB row order — and the M8 trust/quarantine check
+    in _apply_candidate adjudicates against exactly that arbitrary pick.
+    Now pinned to the most recently recorded one, repeatably."""
+    subject = "usr_event_form_order"
+    for at in ["2026-07-28T10:00:00Z", "2026-08-04T10:00:00Z", "2026-08-11T10:00:00Z"]:
+        await capture(
+            client,
+            [
+                make_memory_event(
+                    [
+                        mock_fact(
+                            "volunteered_at",
+                            {"place": "food bank", "session": at},
+                            subject_id=subject,
+                            memory_form="event",
+                        )
+                    ],
+                    subject_id=subject,
+                    occurred_at=at,
+                )
+            ],
+        )
+        await run_worker()
+
+    facts = await _facts(subject, "volunteered_at")
+    assert len(facts) == 3
+    most_recent = max(facts, key=lambda f: f.recorded_from)
+
+    from app.consolidator import _active_fact
+
+    async with async_session() as session:
+        for _ in range(3):
+            found = await _active_fact(
+                session,
+                project_id=most_recent.project_id,
+                subject_id=subject,
+                predicate="volunteered_at",
+                qualifiers=None,
+            )
+            assert found is not None
+            assert found.id == most_recent.id
+
+
 async def test_memory_form_is_inherited_from_the_matched_identity_not_the_new_candidate(client):
     """Once an identity has a settled memory_form, a single later
     candidate's own guess must never flip it back — extraction is

@@ -14,7 +14,8 @@ Flow for `POST /gateway/v1/chat/completions` (non-streaming, memory active):
    no divergent copy) and prepended to the system message inside a
    `<haki_memory>...</haki_memory>` block ;
 4. the body is forwarded to `{HAKI_LLM_BASE_URL}/chat/completions`
-   (timeout 60 s) ;
+   (timeout 180 s, matching OpenAIProvider's own client -- see
+   UPSTREAM_TIMEOUT below) ;
 5. AFTER the response, the user/assistant turn is captured as a
    `conversation.turn` event (idempotent) and a consolidation job is
    enqueued — consolidation stays off the hot path ;
@@ -61,7 +62,12 @@ from app.schemas import EventIn
 
 logger = logging.getLogger("haki.gateway")
 
-UPSTREAM_TIMEOUT = 60.0
+# Kept in sync with OpenAIProvider's own httpx timeout (app/providers/
+# openai.py) -- found out of sync by code review (16 aout): both call the
+# same upstream chat-completions endpoint, so a request that outgrows 60s
+# hits the identical failure mode here that motivated raising the
+# provider's own timeout to 180s.
+UPSTREAM_TIMEOUT = 180.0
 
 __all__ = [
     "assistant_message",

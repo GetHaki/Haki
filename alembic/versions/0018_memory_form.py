@@ -73,6 +73,37 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Guard found by code review (16 aout): once mechanism C has reclassified
+    # any identity to memory_form="event", that identity can legitimately
+    # have 2+ simultaneously active facts -- exactly what this downgrade's
+    # target index (no memory_form filter) forbids. Without this check, the
+    # CREATE UNIQUE INDEX below fails on a cryptic unique-violation the
+    # moment such data exists, with no indication of why or how to proceed.
+    # Fail loud and specific instead; this migration is never applied
+    # automatically, only by an operator running an explicit downgrade.
+    conn = op.get_bind()
+    offenders = conn.execute(
+        sa.text(
+            f"""
+            SELECT project_id, subject_id, predicate, count(*)
+            FROM facts
+            WHERE status = 'active'
+            GROUP BY project_id, subject_id, predicate, {_IDENTITY_KEY}
+            HAVING count(*) > 1
+            LIMIT 5
+            """
+        )
+    ).fetchall()
+    if offenders:
+        raise RuntimeError(
+            "Cannot downgrade past 0018_memory_form: "
+            f"{len(offenders)}+ identities have multiple simultaneously "
+            "active facts (memory_form='event' data), which the pre-0018 "
+            "unique index forbids. Resolve manually first -- e.g. supersede "
+            "all but the most recent active fact per identity -- then retry. "
+            f"Examples (project_id, subject_id, predicate): {offenders}"
+        )
+
     op.drop_index("uq_facts_active_subject_predicate", table_name="facts")
     op.execute(
         f"""

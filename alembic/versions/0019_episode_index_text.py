@@ -29,11 +29,20 @@ the packet (`episode_excerpt`) is still computed on the fly from
 kind+payload, never from `index_text` -- no risk of a concatenated fact
 leaking into what the agent reads as a direct source quote.
 
-server_default NULL: no existing row changes behavior until the
-consolidator has repopulated it (events already consolidated before this
-migration keep `index_text` NULL -- treated as an empty string by
-`to_tsvector`, same GIN index but no full-text term until a new event for
-the same subject triggers another consolidation pass over it).
+server_default NULL: no existing row changes behavior immediately.
+
+FIX (found by code review, 16 aout): this migration wrongly assumed a new
+event for the same subject would trigger a consolidation pass that
+repopulates `index_text` on episodes already consolidated before it --
+false, a job only ever processes its own new events, never a subject's
+history. Without an explicit backfill, any episode already embedded
+before this migration keeps `index_text` NULL forever (treated as an
+empty string by `to_tsvector`, no full-text term), capping its maximum
+achievable score at similarity+recency alone (0.75 of 1.0 with the
+current weights) -- permanently ranked below episodes indexed after this
+migration, and below facts. See `scripts/backfill_episode_index_text.py`
+(no LLM call, local embedder only): run once per environment (dev, prod)
+after this migration.
 """
 
 from collections.abc import Sequence

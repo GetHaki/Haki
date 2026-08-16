@@ -316,11 +316,15 @@ async def _active_fact(
     predicate: str,
     qualifiers: dict[str, Any] | None,
 ) -> Fact | None:
-    stmt = select(Fact).where(
-        Fact.project_id == project_id,
-        Fact.subject_id == subject_id,
-        Fact.predicate == predicate,
-        Fact.status == FactStatus.active,
+    stmt = (
+        select(Fact)
+        .where(
+            Fact.project_id == project_id,
+            Fact.subject_id == subject_id,
+            Fact.predicate == predicate,
+            Fact.status == FactStatus.active,
+        )
+        .order_by(Fact.recorded_from.desc())
     )
     for fact in (await session.execute(stmt)).scalars().all():
         if _identity_qualifiers_match(fact, qualifiers):
@@ -347,12 +351,24 @@ async def _find_duplicate(
     Qualifiers matter here as much as in supersession: "8am on weekdays"
     and "8am at the weekend" carry the same predicate and the same value
     and are not the same fact, so collapsing them as duplicates would lose
-    one of them outright."""
+    one of them outright.
+
+    memory_form="event" is excluded from matching entirely (mechanism C,
+    15 aout): an event-form identity is "never fused" by definition -- two
+    occurrences that happen to share the exact same value are still two
+    occurrences (e.g. the same volunteering activity done twice), not one
+    reinforced fact. Without this guard, this function ran BEFORE
+    memory_form is computed for the candidate in _apply_candidate and had
+    no visibility into it at all, so a second identical-value "event"
+    candidate was silently reinforced onto the first instead of becoming
+    its own active fact -- defeating the one guarantee memory_form="event"
+    exists to make."""
     stmt = select(Fact).where(
         Fact.project_id == project_id,
         Fact.subject_id == subject_id,
         Fact.predicate == predicate,
         Fact.status != FactStatus.deleted,
+        Fact.memory_form != "event",
     )
     canonical = _canonical(value)
     matches = [
@@ -778,12 +794,22 @@ async def _apply_candidate(
     if (
         candidate.action == "create"
         and existing is not None
+        and existing.memory_form != "event"
         and _canonical(existing.value) == _canonical(candidate.value)
     ):
         # Same value under a semantically-equivalent predicate string
         # (exact-predicate matches were already caught by _find_duplicate):
         # reinforcement, and — unlike before — NO row is created first, so
         # no orphan `candidate` row is left behind.
+        #
+        # `existing.memory_form != "event"` (bug found by code review, 16
+        # aout): _resolve_existing_fact/_active_fact above have no
+        # memory_form filter (unlike _find_duplicate), so this short-
+        # circuit used to fire for an "event"-form identity too whenever a
+        # later occurrence happened to carry the exact same value as an
+        # earlier one -- silently reinforcing instead of falling through to
+        # the memory_form=="event" branch below (always active, never
+        # fused). Excluded here so that branch is reached instead.
         _reinforce_or_count_duplicate(existing, event=event, result=result)
         await session.flush()
         return
@@ -1007,6 +1033,11 @@ async def _apply_candidate(
                 other.memory_form = "event"
                 if other.status is not FactStatus.active:
                     await transition_fact_status(session, other.id, FactStatus.active)
+            # The triggering (3rd) fact was never a member of this conflict
+            # set -- it only existed as the incoming candidate. Record it so
+            # fact_ids reflects all 3 reclassified facts, matching what the
+            # log line below already claims.
+            conflict.fact_ids = [*conflict.fact_ids, fact.id]
             conflict.status = "reclassified_event"
             conflict.resolved_at = datetime.now(timezone.utc)
             await session.flush()

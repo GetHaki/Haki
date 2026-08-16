@@ -1,80 +1,87 @@
-# Haki — harnais d'évaluation public (sprint 10)
+# Haki — public evaluation harness (sprint 10)
 
-Le premier harnais de benchmark **reproductible** pour mémoire long-terme
-d'agents IA. Personne ne publie de leaderboard neutre : tous les scores du
-marché sont auto-rapportés avec des modèles, juges et budgets différents.
-Ici, tout est figé et vérifiable :
+The first **reproducible** benchmark harness for AI agent long-term
+memory. Nobody publishes a neutral leaderboard in this space: every
+number on the market is self-reported, with different models, judges and
+budgets. Here, everything is pinned and verifiable:
 
-- **datasets épinglés** : LongMemEval_S et LoCoMo, sha256 vérifié avant
-  chaque run (un fichier différent = run refusé) ;
-- **protocole figé** : config versionnée (`eval/configs/`) — modèle de
-  réponse, modèle juge, temperature 0, budget ContextPacket (900 tokens),
-  budget full-context baseline, versions des prompts (`eval/prompts/`),
-  prix utilisés pour le coût ;
-- **baseline honnête** : pas de chiffres marketing concurrents — la
-  référence est un full-context **ré-exécuté ici**, même modèle, même
-  prompt de réponse, même juge ;
-- **métriques que personne ne publie** : contradiction leakage (réponse
-  basée sur un fait supersédé), abstention accuracy, tokens du paquet de
-  contexte vs full-context, latence context p50/p95, coût estimé.
+- **pinned datasets**: LongMemEval_S and LoCoMo, sha256 verified before
+  every run (a different file = the run is refused);
+- **frozen protocol**: versioned config (`eval/configs/`) — reader model,
+  judge model, temperature 0, ContextPacket budget, full-context baseline
+  budget, prompt versions (`eval/prompts/`), prices used for cost;
+- **honest baseline**: no competitor marketing numbers — the reference is
+  a full-context pass **re-run here**, same model, same answer prompt,
+  same judge;
+- **metrics nobody else publishes**: contradiction leakage (an answer
+  based on a superseded fact), abstention accuracy, context packet tokens
+  vs. full-context, context latency p50/p95, estimated cost.
 
-## Protocole
+No pre-computed numbers are checked into this repository (see "Publishing
+your own run" below for why) — the harness produces yours when you run
+it.
 
-Pour chaque question, deux systèmes dans le MÊME protocole :
+## Protocol
 
-1. **haki** : ingestion des sessions d'historique comme événements
-   (`subject_id` = question, `occurred_at` = dates du dataset) →
-   consolidation (`POST /v1/consolidate`) → `POST /v1/context`
-   (budget 900 tokens) → réponse LLM avec le packet injecté ;
-2. **baseline** : tout l'historique (ou les sessions les plus récentes qui
-   tiennent dans `baseline_max_context_tokens`) dans le prompt ;
-3. **juge** : LLM-as-judge (prompt versionné, temperature 0) →
-   correct / incorrect / abstained + drapeau « relies on outdated
-   information » (contradiction leakage, questions knowledge-update).
+For each question, two systems under the SAME protocol:
 
-Chaque run vit dans un projet dédié `prj_eval_<dataset>_<run_id>`, nettoyé
-après le run (`--keep-data` pour conserver).
+1. **haki**: history sessions ingested as events (`subject_id` = the
+   question, `occurred_at` = the dataset's own dates) → consolidation
+   (`POST /v1/consolidate`) → `POST /v1/context` (budget from the config)
+   → LLM answer with the packet injected;
+2. **baseline**: the entire history (or the most recent sessions that fit
+   in `baseline_max_context_tokens`) in the prompt;
+3. **judge**: LLM-as-judge (versioned prompt, temperature 0) → correct /
+   incorrect / abstained + a "relies on outdated information" flag
+   (contradiction leakage, knowledge-update questions).
 
-## Reproduire
+Each run lives in its own dedicated project `prj_eval_<dataset>_<run_id>`,
+cleaned up after the run (`--keep-data` to preserve it).
+
+## Reproducing
 
 ```bash
-# 0. Postgres + migrations (voir README racine), dataset téléchargé
+# 0. Postgres + migrations (see the root README), dataset downloaded
 uv run python -m eval.download eval/configs/longmemeval_s.json
 uv run python -m eval.download eval/configs/locomo.json
 
-# 1. Lancer l'API avec le vrai LLM (extraction) et une clé admin locale
+# 1. Start the API with a real LLM (extraction) and a local admin key
 HAKI_LLM_PROVIDER=openai HAKI_ADMIN_KEY=<local> uv run uvicorn app.main:app --port 8000
 
-# 2. Sous-ensemble rapide (ce qui est publié dans eval/results/)
+# 2. Quick subset (fast sanity check)
 HAKI_EVAL_ADMIN_KEY=<local> uv run python -m eval.run \
   --config eval/configs/longmemeval_s.json --subset 15 \
   --types knowledge-update,temporal-reasoning
 HAKI_EVAL_ADMIN_KEY=<local> uv run python -m eval.run \
   --config eval/configs/locomo.json --subset 12
 
-# 3. Run complet (coût/temps : LongMemEval_S = 500 questions × ~40 sessions
-#    d'extraction LLM — compter plusieurs heures et quelques USD)
+# 3. Full run (cost/time: LongMemEval_S = 500 questions x ~40 LLM
+#    extraction sessions -- expect several hours and a few USD)
 HAKI_EVAL_ADMIN_KEY=<local> uv run python -m eval.run --config eval/configs/longmemeval_s.json
 ```
 
-Les rapports (JSON complet par question + Markdown lisible) sont écrits
-dans `eval/results/<dataset>_<run_id>.{json,md}`.
+## Publishing your own run
 
-## Sélection déterministe
+Reports (full JSON per question + readable Markdown) are written to
+`eval/results/<dataset>_<run_id>.{json,md}` — gitignored on purpose, so
+this repository never carries a stale or cherry-picked number: run the
+harness yourself, on the pinned dataset and frozen config, and the
+numbers you get are yours to trust or challenge.
 
-`--subset N` prend les N premières questions **dans l'ordre du dataset**
-(après `--types`, filtre exact sur le type). Mêmes arguments ⇒ mêmes
-questions, toujours. Note LoCoMo : les questions sont ordonnées par
-conversation, un petit subset ne couvre donc que les premières
-conversations.
+## Deterministic selection
 
-## Limites assumées
+`--subset N` takes the first N questions **in dataset order** (after
+`--types`, an exact type filter). Same arguments => same questions,
+always. LoCoMo note: questions are ordered by conversation, so a small
+subset only covers the first few conversations.
 
-- Le coût d'extraction Haki (consolidation côté serveur) n'est pas mesuré
-  par l'API ; il est **estimé** (1 passe LLM par session : tokens de
-  l'historique en entrée, ~5 % en sortie) et marqué comme tel.
-- La baseline est tronquée aux sessions récentes si l'historique dépasse
-  `baseline_max_context_tokens` (chars/4, documenté par question dans le
-  JSON : `sessions_used`, `truncated`).
-- Le juge est le même modèle que le répondeur (gpt-4o-mini) : c'est le
-  choix figé de la config V1 ; changer de juge = nouvelle config.
+## Known limitations
+
+- Haki's extraction cost (server-side consolidation) is not measured by
+  the API; it is **estimated** (1 LLM pass per session: history tokens in,
+  ~5% out) and marked as such.
+- The baseline is truncated to the most recent sessions if the history
+  exceeds `baseline_max_context_tokens` (chars/4, documented per question
+  in the JSON: `sessions_used`, `truncated`).
+- The judge is the same model as the reader (gpt-4o-mini): the frozen
+  choice for the V1 config; changing the judge means a new config.

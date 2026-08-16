@@ -422,16 +422,19 @@ a response.
 
 ## Public benchmarks
 
-Haki publishes a reproducible benchmark harness: a frozen, versioned
-configuration (dataset and checksum, models, prompts, budgets, prices), a
-full-context baseline re-run under the exact same protocol (same model, same
-prompt, same judge), and metrics the field rarely publishes — contradiction
-leakage, abstention rate, tokens per packet, latency, cost.
+Haki publishes a reproducible benchmark harness, not a cherry-picked
+number: a frozen, versioned configuration (dataset and checksum, models,
+prompts, budgets, prices), a full-context baseline re-run under the exact
+same protocol (same model, same prompt, same judge), and metrics the
+field rarely publishes — contradiction leakage, abstention rate, tokens
+per packet, latency, cost.
 
 - Harness: [`eval/`](eval/) (LoCoMo and LongMemEval_S loaders, pipeline,
   judge, reports).
-- Results: [`eval/results/`](eval/results/) (full JSON per question, Markdown
-  summary, configuration and checksum cited).
+- Results are never committed to this repository on purpose — run the
+  harness yourself against the pinned dataset and frozen config, and the
+  numbers you get (written to `eval/results/`, gitignored) are yours to
+  trust or challenge, not a number we chose to show you.
 - Reproduction: exact commands in [`eval/README.md`](eval/README.md).
 
 ---
@@ -620,7 +623,8 @@ proves it, are documented in
 | Security: API keys, RLS, policy engine, feedback | done |
 | OpenAI-compatible gateway (automatic memory via `base_url`) | done |
 | TypeScript SDK | done |
-| Public LoCoMo and LongMemEval benchmarks (reproducible harness) | done |
+| Public LoCoMo and LongMemEval benchmark harness (reproducible, run it yourself) | done |
+| Haki's own published accuracy numbers on that harness | in progress |
 | CLI device-code authentication (`haki login`) | done |
 | Multi-channel identity resolution (`/v1/subjects/resolve`, `/merge`) | done |
 | Cross-encoder reranking, temporal grounding, entity/PRF expansion | done |

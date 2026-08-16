@@ -56,6 +56,7 @@ os.environ.setdefault("HAKI_REDIS_URL", "redis://localhost:6379/15")
 from app.config import settings  # noqa: E402
 from app.db import async_session, engine  # noqa: E402
 from app.main import app  # noqa: E402
+from app.rate_limit import limiter  # noqa: E402
 from app.redis_client import redis_client  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -127,6 +128,23 @@ async def clean_tables():
     # loop that opened them, so drop them now rather than let the next
     # test's (new) loop try to reuse a dead one.
     await redis_client.connection_pool.disconnect()
+
+
+@pytest.fixture(autouse=True)
+def reset_rate_limiter():
+    """slowapi's in-memory counters live in a module-level global (real
+    backend, not mocked — see app/rate_limit.py) and would otherwise
+    accumulate across every test in the session, sharing one bucket
+    ("127.0.0.1") for every unauthenticated request. Reset once per test,
+    same idea as clean_tables truncating Postgres between tests.
+
+    Found missing entirely (16 aout): app/rate_limit.py and its @limiter.
+    limit(...) routes were already present, but this fixture had never been
+    ported -- every rate-limit test before today's /v1/context one
+    happened to fit under the relevant limit within a single test, so nothing
+    ever exposed the gap until a test that deliberately exhausts one did."""
+    limiter.reset()
+    yield
 
 
 @pytest.fixture

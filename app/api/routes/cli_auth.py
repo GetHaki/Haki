@@ -45,6 +45,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, Request
 from redis.asyncio import Redis
 
+from app.auth import constant_time_bearer_match
 from app.config import settings
 from app.errors import ApiError
 from app.redis_client import get_redis
@@ -258,7 +259,9 @@ async def device_approve(
 ) -> DeviceApproveResponse:
     if not settings.console_service_key:
         raise _unauthorized()
-    if request.headers.get("authorization") != f"Bearer {settings.console_service_key}":
+    if not constant_time_bearer_match(
+        request.headers.get("authorization"), settings.console_service_key
+    ):
         raise _unauthorized()
 
     attempts_key = await _check_approve_attempts(redis, body.approver_ref)

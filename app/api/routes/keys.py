@@ -21,7 +21,13 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import bearer_token, generate_key, hash_key, resolve_api_key
+from app.auth import (
+    bearer_token,
+    constant_time_bearer_match,
+    generate_key,
+    hash_key,
+    resolve_api_key,
+)
 from app.config import settings
 from app.db import get_session
 from app.errors import ApiError
@@ -49,8 +55,10 @@ def _unauthorized() -> ApiError:
 async def _caller(request: Request) -> tuple[bool, ApiKey | None]:
     """(is_admin, valid caller key or None)."""
     if settings.admin_key:
-        expected = f"Bearer {settings.admin_key}"
-        return request.headers.get("authorization") == expected, None
+        is_admin = constant_time_bearer_match(
+            request.headers.get("authorization"), settings.admin_key
+        )
+        return is_admin, None
     token = bearer_token(list(request.headers.raw))
     return False, await resolve_api_key(token)
 

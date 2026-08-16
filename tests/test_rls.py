@@ -12,7 +12,7 @@ from sqlalchemy import select, text
 
 from app.db import async_session
 from app.ledger import create_fact
-from app.models import Event, Fact
+from app.models import Event, Fact, ForgetReceipt
 
 
 async def _seed_two_projects() -> None:
@@ -80,6 +80,34 @@ async def test_rls_empty_string_setting_is_permissive():
         )
         facts = (await session.execute(select(Fact))).scalars().all()
     assert {f.project_id for f in facts} == {"prj_a", "prj_b"}
+
+
+async def test_rls_never_discloses_other_project_forget_receipts():
+    """forget_receipts (migration 0005) predates RLS (migration 0006) and
+    was never retrofitted -- gap found and closed by security review
+    (16 aout, migration 0022). Same guarantee as test_rls_never_discloses_
+    other_project above, for this one table."""
+    async with async_session() as session:
+        for project_id in ("prj_a", "prj_b"):
+            session.add(
+                ForgetReceipt(
+                    project_id=project_id,
+                    scope="subject",
+                    subject_id="usr_1",
+                    mode="delete",
+                    counters={"events_deleted": 1},
+                )
+            )
+        await session.commit()
+
+    async with async_session() as session:
+        await session.execute(
+            text("SELECT set_config('haki.project_id', 'prj_a', true)")
+        )
+        receipts = (await session.execute(select(ForgetReceipt))).scalars().all()
+
+    assert receipts, "expected at least the prj_a receipt"
+    assert {r.project_id for r in receipts} == {"prj_a"}
 
 
 async def test_rls_blocks_cross_project_insert():

@@ -1,31 +1,41 @@
 import uuid
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import ledger, policy
 from app.context import build_context, get_trace
 from app.db import get_session
 from app.errors import ApiError
+from app.rate_limit import key_or_ip, limiter
 from app.schemas import ContextRequest, ContextResponse, TraceResponse
 
 router = APIRouter()
 
 
+# Found by security review (16 aout): every other write/consolidate route on
+# this router already had a rate limit (capture: 300/min, consolidate:
+# 20/min) but this one didn't. build_context makes no LLM call (local
+# embeddings only) so a leaked key can't run up a bill here -- but it IS an
+# expensive DB query (hybrid scoring, multi-hop expansion), unthrottled, on
+# every request. 120/minute is generous for real conversational use (one
+# call per turn) while still bounding an application-level DoS from a
+# single leaked key or IP.
 @router.post("/context", response_model=ContextResponse)
+@limiter.limit("120/minute", key_func=key_or_ip)
 async def context(
-    request: ContextRequest, session: AsyncSession = Depends(get_session)
+    request: Request, body: ContextRequest, session: AsyncSession = Depends(get_session)
 ) -> ContextResponse:
     # Identity resolution (M4), read path: NEVER writes. An unknown alias is
     # a loud typed 404 — returning an empty "ok" packet here would be
     # exactly the silent cold-start bug this layer exists to kill.
-    subject_id = request.subject_id
-    if request.subject_alias is not None:
+    subject_id = body.subject_id
+    if body.subject_alias is not None:
         alias_row, _ = await ledger.resolve_alias(
             session,
-            project_id=request.project_id,
-            alias_kind=request.subject_alias.kind,
-            alias_value=request.subject_alias.value,
+            project_id=body.project_id,
+            alias_kind=body.subject_alias.kind,
+            alias_value=body.subject_alias.value,
             register=False,
         )
         if alias_row is None:
@@ -39,19 +49,19 @@ async def context(
 
     # Policy Engine (rule 3): purpose recommended — warning, not an error.
     purpose_warning = policy.context_purpose_warning(
-        purpose=request.purpose,
-        project_id=request.project_id,
+        purpose=body.purpose,
+        project_id=body.project_id,
         subject_id=subject_id,
     )
     packet, token_count, trace_id = await build_context(
         session,
-        project_id=request.project_id,
+        project_id=body.project_id,
         subject_id=subject_id,
-        query=request.query,
-        purpose=request.purpose,
-        budget_tokens=request.budget_tokens,
+        query=body.query,
+        purpose=body.purpose,
+        budget_tokens=body.budget_tokens,
         extra_warnings=[purpose_warning] if purpose_warning else None,
-        as_of=request.as_of,
+        as_of=body.as_of,
     )
     await session.commit()
     return ContextResponse(packet=packet, token_count=token_count, trace_id=trace_id)

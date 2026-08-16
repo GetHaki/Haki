@@ -1,11 +1,29 @@
+import json
 import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.models.event import ORIGIN_TRUST_LEVELS
 from app.schemas.subjects import SubjectAliasIn
+
+# Found by security review (16 aout): payload/source had no size bound at
+# all -- an authenticated key holder could post an arbitrarily large or
+# deeply nested JSON blob (JSONB storage bloat, slow serialization on every
+# read). 256 KiB is generous for any real conversational payload (a full
+# chat session comfortably fits) while still bounding a deliberate abuse
+# case to something trivial to store and process.
+MAX_JSON_BYTES = 256 * 1024
+
+
+def _bounded_json(value: dict[str, Any] | None) -> dict[str, Any] | None:
+    if value is None:
+        return value
+    size = len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+    if size > MAX_JSON_BYTES:
+        raise ValueError(f"exceeds {MAX_JSON_BYTES} bytes serialized (got {size})")
+    return value
 
 
 class EventIn(BaseModel):
@@ -42,6 +60,9 @@ class EventIn(BaseModel):
     classification: list[str] = Field(default_factory=list)
     retention_policy: str | None = Field(default=None, max_length=128)
     idempotency_key: str | None = Field(default=None, max_length=256)
+
+    _bound_payload = field_validator("payload")(_bounded_json)
+    _bound_source = field_validator("source")(_bounded_json)
 
     @model_validator(mode="after")
     def subject_or_alias(self) -> "EventIn":

@@ -7,9 +7,37 @@ import uuid
 
 import pytest
 
+from app.auth import constant_time_bearer_match
+
 
 def auth(key: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {key}"}
+
+
+# -- constant_time_bearer_match (security review, 16 aout) -------------------
+# The 4 shared-secret checks (HAKI_ADMIN_KEY, HAKI_CONSOLE_SERVICE_KEY) used
+# plain str comparison before this; behavior must stay identical, only the
+# comparison mechanics change.
+
+
+def test_constant_time_bearer_match_accepts_exact_bearer_header():
+    assert constant_time_bearer_match("Bearer svc_secret", "svc_secret") is True
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        None,
+        "",
+        "svc_secret",  # missing "Bearer " prefix
+        "Bearer svc_secre",  # truncated
+        "Bearer svc_secretx",  # extra char
+        "bearer svc_secret",  # wrong case on the scheme
+        "Bearer other_secret",
+    ],
+)
+def test_constant_time_bearer_match_rejects_anything_else(header):
+    assert constant_time_bearer_match(header, "svc_secret") is False
 
 
 def make_event(project_id: str, subject_id: str = "usr_1") -> dict:

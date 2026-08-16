@@ -21,6 +21,7 @@ permissive when haki.project_id is unset.
 """
 
 import hashlib
+import hmac
 import json
 import uuid
 from collections.abc import Awaitable, Callable
@@ -47,6 +48,21 @@ def generate_key() -> str:
 
 def hash_key(clear: str) -> str:
     return hashlib.sha256(clear.encode()).hexdigest()
+
+
+def constant_time_bearer_match(authorization_header: str | None, secret: str) -> bool:
+    """True when `authorization_header` is exactly `Bearer <secret>`, compared
+    in constant time (`hmac.compare_digest`) so response timing never leaks
+    how many leading bytes of a guessed secret were correct.
+
+    Found by security review (16 aout): the shared-secret checks this
+    guards (HAKI_ADMIN_KEY in app.api.routes.keys, the CLI device-code
+    approve endpoint) used plain `==`/`!=` on `str`. A timing attack over
+    a real network is hard to pull off, but there is no reason for the
+    inconsistency with how this project already verifies its own
+    signed/keyed inputs elsewhere, and no cost to closing it."""
+    expected = f"Bearer {secret}"
+    return hmac.compare_digest((authorization_header or "").encode(), expected.encode())
 
 
 def bearer_token(headers: list[tuple[bytes, bytes]]) -> str | None:

@@ -6,6 +6,8 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 from mcp.server.streamable_http_manager import StreamableHTTPASGIApp
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 from app.api.routes import api_router
 from app.auth import ApiKeyAuthMiddleware
@@ -13,6 +15,7 @@ from app.config import settings
 from app.db import install_tcp_nodelay
 from app.errors import error_body, register_error_handlers
 from app.mcp_server import mcp as mcp_server
+from app.rate_limit import limiter, rate_limit_exceeded_handler
 
 logger = logging.getLogger("haki.main")
 
@@ -63,6 +66,21 @@ app = FastAPI(
 )
 register_error_handlers(app)
 app.include_router(api_router)
+
+# Found missing entirely by security review (16 aout): app/rate_limit.py and
+# every route's @limiter.limit(...) decorator were already present and
+# ported from the private repo, but this activation block (the part that
+# actually wires slowapi into the app -- state, exception handler,
+# middleware) never was. Routes still returned 429 without it (slowapi's
+# own per-call check still runs), but with slowapi's raw default error body
+# instead of this API's {"error": {...}} envelope and Retry-After header --
+# see app/rate_limit.py for why the in-memory backend is the right call for
+# this single-instance deployment. Per-route limits are declared with
+# @limiter.limit(...) on the individual endpoints (key creation, capture,
+# consolidate, context).
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
 # API key auth + project scope binding on /v1/* (sprint 6). No-op when
 # HAKI_AUTH_REQUIRED=false (open dev mode).

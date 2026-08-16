@@ -73,3 +73,35 @@ async def test_capture_ack_contains_ids_and_consolidation_job(client):
         job = await session.get(Job, job_id)
     assert job is not None
     assert job.kind == "consolidate"
+
+
+async def test_capture_rejects_oversized_payload(client):
+    """No size bound existed at all before this (found by security review,
+    16 aout) -- an authenticated key holder could post an arbitrarily large
+    or deeply nested JSON blob. See app.schemas.capture.MAX_JSON_BYTES."""
+    from app.schemas.capture import MAX_JSON_BYTES
+
+    event = make_event()
+    event["payload"] = {"content": "x" * (MAX_JSON_BYTES + 1)}
+
+    response = await client.post(
+        "/v1/capture",
+        json={"idempotency_key": f"batch-{uuid.uuid4()}", "events": [event]},
+    )
+    assert response.status_code == 422
+    assert await count_events() == 0
+
+
+async def test_capture_accepts_payload_under_the_size_bound(client):
+    """Regression guard: the size bound must not reject ordinary payloads
+    -- a real conversational session comfortably fits under it."""
+    from app.schemas.capture import MAX_JSON_BYTES
+
+    event = make_event()
+    event["payload"] = {"content": "x" * (MAX_JSON_BYTES // 2)}
+
+    response = await client.post(
+        "/v1/capture",
+        json={"idempotency_key": f"batch-{uuid.uuid4()}", "events": [event]},
+    )
+    assert response.status_code == 202

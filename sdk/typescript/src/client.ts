@@ -54,6 +54,11 @@ export interface PacketFact {
    * relative time expression the extractor resolved. Absent otherwise or
    * on older servers. */
   temporal_range?: { start: string; end: string } | null;
+  /** Reclassification safety net (16 aout): true when this fact was
+   * activated by the automatic overflow reclassification (mechanism C)
+   * rather than an extractor declaring memory_form="event" up front.
+   * Absent/false on older servers. */
+  auto_reclassified?: boolean;
   source_event_ids: string[];
   /** Typology + volatility (M2); absent when talking to a pre-M2 server. */
   fact_kind?: string | null;

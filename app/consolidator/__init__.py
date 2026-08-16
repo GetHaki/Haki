@@ -1026,11 +1026,25 @@ async def _apply_candidate(
             # so this never fires on a real scalar.
             other_id = next(fid for fid in conflict.fact_ids if fid != existing.id)
             other = await session.get(Fact, other_id)
+            # Safety net (found by code review, 16 aout): this reclassification
+            # trusts a heuristic ("a genuine scalar never reaches a 3rd
+            # competing value") that non-deterministic extraction can defeat.
+            # Rather than a new calibrated threshold or reintroducing the
+            # quarantine this branch replaces, mark all 3 members instead --
+            # the project's existing honest-degradation convention (contested
+            # facts, "unconfirmed"/"stale" freshness): never hidden, always
+            # flagged so the reader can judge whether this looks like 3
+            # genuine occurrences or 3 updates to one attribute. See
+            # Fact.reclassified_at and app.context._packet_fact.
+            reclassified_at = datetime.now(timezone.utc)
             existing.memory_form = "event"
+            existing.reclassified_at = reclassified_at
             fact.memory_form = "event"
+            fact.reclassified_at = reclassified_at
             await transition_fact_status(session, fact.id, FactStatus.active)
             if other is not None:
                 other.memory_form = "event"
+                other.reclassified_at = reclassified_at
                 if other.status is not FactStatus.active:
                     await transition_fact_status(session, other.id, FactStatus.active)
             # The triggering (3rd) fact was never a member of this conflict

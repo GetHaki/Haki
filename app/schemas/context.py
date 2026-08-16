@@ -65,6 +65,12 @@ class PacketFact(BaseModel):
     # relative time expression the extractor resolved -- see
     # app.providers.base.ExtractedFact.temporal_range. None otherwise.
     temporal_range: dict[str, str] | None = None
+    # Reclassification safety net (16 aout): True when this fact was
+    # activated by the automatic overflow reclassification (mechanism C)
+    # rather than an extractor declaring memory_form="event" up front --
+    # see Fact.reclassified_at. Default False keeps old persisted traces
+    # (predating this field) re-validating unchanged.
+    auto_reclassified: bool = False
     source_event_ids: list[str]
     # Typology + volatility (M2). All optional with None defaults: traces
     # persisted BEFORE migration 0016 re-validate through this model on

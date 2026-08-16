@@ -144,6 +144,17 @@ def build_prompt_context(packet: dict[str, Any]) -> str:
                 "id; use the one with the most recent 'valid from' date as current, "
                 "do not present both as equally true"
             )
+        if fact.get("auto_reclassified"):
+            marker += (
+                " [AUTO-RECLASSIFIED: the system automatically decided this is "
+                "one occurrence among several for this subject, based on 3+ "
+                "differing values arriving for what looked like a single "
+                "attribute — if these look like updates to ONE attribute over "
+                "time (e.g. successive employers) rather than genuinely "
+                "distinct occurrences (e.g. separate volunteering events), "
+                "flag this to the subject instead of treating all values as "
+                "equally current]"
+            )
         lines.append(
             f"- {fact.get('predicate')}: {value} "
             f"(valid from {valid_from}; sources: {sources}){marker}"

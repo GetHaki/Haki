@@ -111,6 +111,27 @@ class Fact(Base):
         String(16), default="state", server_default="state"
     )
 
+    # Set when this fact was activated by the AUTOMATIC overflow
+    # reclassification (a 3rd competing "state" value flipping the whole
+    # identity to "event", app.consolidator._apply_candidate) rather than
+    # an extractor declaring memory_form="event" up front. None otherwise.
+    #
+    # Safety net added by code review (16 aout): the reclassification trusts
+    # a deterministic heuristic ("a genuine scalar never reaches a 3rd
+    # competing value") that non-deterministic extraction can defeat --
+    # three "create" candidates for what is actually one scalar attribute
+    # (e.g. employer) would otherwise be silently activated and served as
+    # three equally-trusted facts. Rather than a new calibrated threshold
+    # (which the reclassification was explicitly designed to avoid) or
+    # reintroducing the quarantine this mechanism replaces, this follows
+    # the project's existing honest-degradation convention (contested
+    # facts, "unconfirmed"/"stale" freshness, migration 0018's own docstring):
+    # never hidden, always marked. Surfaced in the served packet
+    # (auto_reclassified) and the SDK-rendered prompt text so the reader --
+    # human or agent -- can judge whether 3 "occurrences" actually look like
+    # updates to one attribute instead.
+    reclassified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     # Origin trust inherited from the source event (M8) — what authority
     # this fact was born with. Drives the consolidator's supersession
     # authority rule and the packet's provenance display.

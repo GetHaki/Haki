@@ -337,6 +337,38 @@ test("buildPromptContext: contested facts are marked, with the tie-break excepti
   assert.ok(!ordinary.includes("— CONTESTED (conflict"));
 });
 
+test("buildPromptContext: flags auto-reclassified facts (16 aout, reclassification safety net)", () => {
+  // Parity with the Python SDK's equivalent test: a fact activated by the
+  // automatic overflow reclassification (mechanism C) is served like any
+  // other, but flagged so the reader can judge whether 3 "occurrences"
+  // actually look like updates to one attribute instead.
+  const packet = {
+    facts: [
+      {
+        id: "f1",
+        predicate: "office_city",
+        value: { city: "Dakar" },
+        valid_from: "2026-07-28T10:00:00+00:00",
+        source_event_ids: ["evt-1"],
+        auto_reclassified: true,
+      },
+      {
+        id: "f2",
+        predicate: "plan",
+        value: { tier: "pro" },
+        valid_from: "2026-07-28T10:00:00+00:00",
+        source_event_ids: ["evt-2"],
+      },
+    ],
+    warnings: [],
+  };
+  const block = buildPromptContext(packet);
+  assert.equal((block.match(/AUTO-RECLASSIFIED/g) ?? []).length, 1);
+  const lines = block.split("\n");
+  assert.ok(lines.some((l) => l.includes("office_city") && l.includes("AUTO-RECLASSIFIED")));
+  assert.ok(!lines.some((l) => l.includes("plan:") && l.includes("AUTO-RECLASSIFIED")));
+});
+
 test("buildPromptContext: carries a past-value exception (13 aout, LongMemEval)", () => {
   // The "always prefer most recent" guard is wrong when the question
   // itself asks about a PAST value (real case: Apex Legends level goal,

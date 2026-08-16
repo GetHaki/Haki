@@ -318,6 +318,7 @@ async def _expand_via_entities(
                 Fact.origin_trust,
                 Fact.qualifiers,
                 Fact.temporal_range,
+                Fact.reclassified_at,
             )
             .where(
                 Fact.project_id == project_id,
@@ -474,6 +475,14 @@ def _packet_fact(
         # valid_from (always the MESSAGE's own timestamp). See
         # app.providers.base.ExtractedFact.temporal_range.
         "temporal_range": getattr(row, "temporal_range", None),
+        # Reclassification safety net (found by code review, 16 aout): True
+        # when this fact was activated by the automatic overflow
+        # reclassification (a 3rd competing "state" value flipping the
+        # whole identity to "event") rather than an extractor declaring
+        # memory_form="event" up front. See Fact.reclassified_at -- never
+        # hidden, always flagged, same honest-degradation contract as
+        # "contested"/"unconfirmed"/"stale" above.
+        "auto_reclassified": getattr(row, "reclassified_at", None) is not None,
         "source_event_ids": [str(e) for e in row.source_event_ids],
         "fact_kind": row.fact_kind,
         "volatility": row.volatility,
@@ -689,6 +698,7 @@ async def build_context(
             Fact.origin_trust,
             Fact.qualifiers,
             Fact.temporal_range,
+            Fact.reclassified_at,
             Fact.embedding.cosine_distance(query_embedding).label("distance"),
             score.label("score"),
         )

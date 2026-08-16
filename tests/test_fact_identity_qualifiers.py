@@ -554,3 +554,42 @@ async def test_a_reclassified_third_value_is_served_alongside_the_others(client)
     served = response.json()["packet"]["facts"]
     assert {f["value"]["city"] for f in served} == {"Dakar", "Abidjan", "Lome"}
     assert not any(f["contested"] for f in served)
+    # Safety net (16 aout): served, never hidden -- but flagged, so the
+    # reader can judge whether 3 "occurrences" actually look like updates
+    # to one attribute instead of genuinely distinct ones.
+    assert all(f["auto_reclassified"] for f in served)
+
+
+async def test_a_declared_event_fact_is_not_flagged_auto_reclassified(client):
+    """Regression guard: `auto_reclassified` distinguishes HOW an identity
+    became memory_form="event" -- only the automatic overflow path sets
+    it. An extractor that declares "event" up front (no conflict, no
+    reclassification) is not flagged; there was nothing to second-guess."""
+    subject = "usr_conflict_cap_4"
+    await capture(
+        client,
+        [
+            make_memory_event(
+                [
+                    mock_fact(
+                        "office_city",
+                        {"city": "Dakar"},
+                        subject_id=subject,
+                        memory_form="event",
+                    )
+                ],
+                subject_id=subject,
+                occurred_at="2026-07-28T10:00:00Z",
+            )
+        ],
+    )
+    await run_worker()
+
+    response = await client.post(
+        "/v1/context",
+        json={"project_id": "prj_support", "subject_id": subject, "query": "office_city"},
+    )
+    assert response.status_code == 200
+    served = response.json()["packet"]["facts"]
+    assert len(served) == 1
+    assert served[0]["auto_reclassified"] is False

@@ -257,6 +257,39 @@ def test_build_prompt_context_marks_contested_facts_and_their_tie_break():
     assert "— CONTESTED (conflict" not in ordinary
 
 
+def test_build_prompt_context_flags_auto_reclassified_facts():
+    """16 aout, reclassification safety net: a fact activated by the
+    automatic overflow reclassification (mechanism C) is served like any
+    other -- but flagged, so the reader can judge whether 3 "occurrences"
+    actually look like updates to one attribute instead of genuinely
+    distinct ones."""
+    packet = {
+        "facts": [
+            {
+                "id": "f1",
+                "predicate": "office_city",
+                "value": {"city": "Dakar"},
+                "valid_from": "2026-07-28T10:00:00+00:00",
+                "source_event_ids": ["evt-1"],
+                "auto_reclassified": True,
+            },
+            {
+                "id": "f2",
+                "predicate": "plan",
+                "value": {"tier": "pro"},
+                "valid_from": "2026-07-28T10:00:00+00:00",
+                "source_event_ids": ["evt-2"],
+            },
+        ],
+        "warnings": [],
+    }
+    block = build_prompt_context(packet)
+    assert block.count("AUTO-RECLASSIFIED") == 1
+    lines = block.splitlines()
+    assert any("office_city" in line and "AUTO-RECLASSIFIED" in line for line in lines)
+    assert not any(line.startswith("- plan:") and "AUTO-RECLASSIFIED" in line for line in lines)
+
+
 def test_build_prompt_context_carries_a_past_value_exception():
     """13 aout, LongMemEval diagnostic (run 31705865474): the "always
     prefer most recent" guard is wrong when the question itself asks

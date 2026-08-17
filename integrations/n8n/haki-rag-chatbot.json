@@ -1,18 +1,31 @@
 {
-  "name": "Haki Persistent Support Agent",
+  "name": "Haki RAG Chatbot That Remembers",
   "nodes": [
     {
       "parameters": {
-        "content": "## Haki Persistent Support Agent\n\nLong-term memory for this agent, with no Qdrant/Supabase/Data Table to configure.\n\n**Required chain:** Webhook → **Haki Context** (always BEFORE the agent) → AI Agent → **Haki Capture** (always AFTER the agent) → Respond.\n\n**Webhook payload:** `{\"subject_id\": \"usr_123\", \"message\": \"...\"}`\n\n**The golden rule of subject:** `subject_id` is required, never empty, never `default`. The \"Valid subject?\" node rejects the request otherwise (HTTP 400). Durable memory without a stable identity is dangerous memory.",
-        "height": 300,
-        "width": 420,
+        "content": "## Haki RAG Chatbot That Remembers\n\nRAG (your documents) and Haki (your conversations) solve two different problems — this template shows them working together instead of competing.\n\n**RAG answers**: \"what does the manual say?\" — facts from documents, the same for every user.\n**Haki answers**: \"what does THIS person prefer, what did we already agree on?\" — facts about the relationship, one memory per subject.\n\n**Required chain:** Webhook → **Haki Context** (always BEFORE the agent) → AI Agent (with your vector store wired in as a tool) → **Haki Capture** (always AFTER the agent) → Respond.\n\n**Webhook payload:** `{\"subject_id\": \"usr_123\", \"message\": \"...\"}`\n\n**The golden rule of subject:** `subject_id` is required, never empty, never `default`. Durable memory without a stable identity is dangerous memory.",
+        "height": 340,
+        "width": 460,
         "color": 4
       },
-      "id": "a1b2c3d4-0001-4000-8000-haki00000001",
+      "id": "c3d4e5f6-0001-4000-8000-haki20000001",
       "name": "Note — Overview",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
-      "position": [-460, -420]
+      "position": [-460, -460]
+    },
+    {
+      "parameters": {
+        "content": "## Wire in your own vector store here\n\nThis template ships the Haki side fully wired (that part needs zero external account). The RAG side is intentionally left as a slot for **your** documents: connect any n8n vector store node (Simple Vector Store for a quick local test, or Pinecone/Qdrant/Supabase/PGVector for production) to the **AI Agent's Tool input**, in \"Retrieve Documents (As Tool for AI Agent)\" mode.\n\nWhy left open rather than pre-wired: which vector store you use, and what you've already indexed into it, is specific to your setup — a hard-coded guess here would import broken for almost everyone. The Haki wiring next to it is the part that's the same for everyone, so that part is fully built.",
+        "height": 320,
+        "width": 420,
+        "color": 3
+      },
+      "id": "c3d4e5f6-0002-4000-8000-haki20000002",
+      "name": "Note — Add your vector store",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [220, 180]
     },
     {
       "parameters": {
@@ -21,25 +34,25 @@
         "width": 420,
         "color": 5
       },
-      "id": "a1b2c3d4-0002-4000-8000-haki00000002",
+      "id": "c3d4e5f6-0003-4000-8000-haki20000003",
       "name": "Note — Configuration",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
-      "position": [0, -420]
+      "position": [0, -460]
     },
     {
       "parameters": {
         "httpMethod": "POST",
-        "path": "haki-support-agent",
+        "path": "haki-rag-chatbot",
         "responseMode": "responseNode",
         "options": {}
       },
-      "id": "a1b2c3d4-0010-4000-8000-haki00000010",
+      "id": "c3d4e5f6-0010-4000-8000-haki20000010",
       "name": "Webhook",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
       "position": [-460, -60],
-      "webhookId": "haki-support-agent"
+      "webhookId": "haki-rag-chatbot"
     },
     {
       "parameters": {
@@ -74,7 +87,7 @@
         },
         "options": {}
       },
-      "id": "a1b2c3d4-0011-4000-8000-haki00000011",
+      "id": "c3d4e5f6-0011-4000-8000-haki20000011",
       "name": "Subject valid?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
@@ -88,11 +101,11 @@
           "responseCode": 400
         }
       },
-      "id": "a1b2c3d4-0012-4000-8000-haki00000012",
+      "id": "c3d4e5f6-0012-4000-8000-haki20000012",
       "name": "Reject — missing subject",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [0, 120]
+      "position": [0, 140]
     },
     {
       "parameters": {
@@ -102,7 +115,7 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ { project_id: \"prj_support_dev\", subject_id: $(\"Webhook\").item.json.body.subject_id, query: $(\"Webhook\").item.json.body.message, budget_tokens: 2000, purpose: \"support\" } }}",
+        "jsonBody": "={{ { project_id: \"prj_rag_dev\", subject_id: $(\"Webhook\").item.json.body.subject_id, query: $(\"Webhook\").item.json.body.message, budget_tokens: 2000, purpose: \"rag_chat\" } }}",
         "options": {}
       },
       "credentials": {
@@ -111,7 +124,7 @@
           "name": "Haki API (Header Auth)"
         }
       },
-      "id": "a1b2c3d4-0013-4000-8000-haki00000013",
+      "id": "c3d4e5f6-0013-4000-8000-haki20000013",
       "name": "Haki Context",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
@@ -122,10 +135,10 @@
         "promptType": "define",
         "text": "={{ $(\"Webhook\").item.json.body.message }}",
         "options": {
-          "systemMessage": "=You are a support agent. You have a Haki long-term memory about this person: prefer these verified facts over your own assumptions, and cite them when you use them.\n\n{{ $json.packet.facts.length ? \"<haki_memory>\\n\" + $json.packet.facts.map((f) => \"- \" + f.predicate + \": \" + JSON.stringify(f.value) + \" (valid from \" + (f.valid_from || \"unknown date\") + \"; sources: \" + (f.source_event_ids.join(\",\") || \"no-source\") + \")\").join(\"\\n\") + ($json.packet.warnings.length ? \"\\n\" + $json.packet.warnings.map((w) => \"! \" + w).join(\"\\n\") : \"\") + \"\\n</haki_memory>\" : \"(No memory recorded yet.)\" }}"
+          "systemMessage": "=You answer using two sources, and you don't confuse them. For facts about documents/policies/product details, use your document-search tool. For facts about THIS person — their preferences, prior decisions, running context — use the Haki memory below; prefer it over your own assumptions and cite it when you use it.\n\n{{ $json.packet.facts.length ? \"<haki_memory>\\n\" + $json.packet.facts.map((f) => \"- \" + f.predicate + \": \" + JSON.stringify(f.value) + \" (valid from \" + (f.valid_from || \"unknown date\") + \"; sources: \" + (f.source_event_ids.join(\",\") || \"no-source\") + \")\").join(\"\\n\") + ($json.packet.warnings.length ? \"\\n\" + $json.packet.warnings.map((w) => \"! \" + w).join(\"\\n\") : \"\") + \"\\n</haki_memory>\" : \"(No memory recorded yet — this is likely the first conversation.)\" }}"
         }
       },
-      "id": "a1b2c3d4-0014-4000-8000-haki00000014",
+      "id": "c3d4e5f6-0014-4000-8000-haki20000014",
       "name": "AI Agent",
       "type": "@n8n/n8n-nodes-langchain.agent",
       "typeVersion": 1.7,
@@ -148,7 +161,7 @@
           "name": "OpenRouter (credential LLM)"
         }
       },
-      "id": "a1b2c3d4-0015-4000-8000-haki00000015",
+      "id": "c3d4e5f6-0015-4000-8000-haki20000015",
       "name": "OpenAI Chat Model",
       "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
       "typeVersion": 1.2,
@@ -162,7 +175,7 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ { events: [ { org_id: \"org_default\", project_id: \"prj_support_dev\", subject_type: \"user\", subject_id: $(\"Webhook\").item.json.body.subject_id, agent_id: \"n8n\", kind: \"conversation.turn\", occurred_at: $now.toISO(), payload: { messages: [ { role: \"user\", content: $(\"Webhook\").item.json.body.message }, { role: \"assistant\", content: $(\"AI Agent\").item.json.output } ] }, source: { integration: \"n8n\", template: \"haki-persistent-support-agent\" }, idempotency_key: \"n8n-turn-\" + $execution.id } ] } }}",
+        "jsonBody": "={{ { events: [ { org_id: \"org_default\", project_id: \"prj_rag_dev\", subject_type: \"user\", subject_id: $(\"Webhook\").item.json.body.subject_id, agent_id: \"n8n\", kind: \"conversation.turn\", occurred_at: $now.toISO(), payload: { messages: [ { role: \"user\", content: $(\"Webhook\").item.json.body.message }, { role: \"assistant\", content: $(\"AI Agent\").item.json.output } ] }, source: { integration: \"n8n\", template: \"haki-rag-chatbot\" }, idempotency_key: \"n8n-turn-\" + $execution.id } ] } }}",
         "options": {}
       },
       "credentials": {
@@ -171,7 +184,7 @@
           "name": "Haki API (Header Auth)"
         }
       },
-      "id": "a1b2c3d4-0016-4000-8000-haki00000016",
+      "id": "c3d4e5f6-0016-4000-8000-haki20000016",
       "name": "Haki Capture",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
@@ -183,7 +196,7 @@
         "responseBody": "={{ { reply: $(\"AI Agent\").item.json.output, trace_id: $(\"Haki Context\").item.json.trace_id } }}",
         "options": {}
       },
-      "id": "a1b2c3d4-0017-4000-8000-haki00000017",
+      "id": "c3d4e5f6-0017-4000-8000-haki20000017",
       "name": "Respond",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,

@@ -1,14 +1,14 @@
 {
-  "name": "Haki Persistent Support Agent",
+  "name": "Haki Personal Assistant with Memory",
   "nodes": [
     {
       "parameters": {
-        "content": "## Haki Persistent Support Agent\n\nLong-term memory for this agent, with no Qdrant/Supabase/Data Table to configure.\n\n**Required chain:** Webhook → **Haki Context** (always BEFORE the agent) → AI Agent → **Haki Capture** (always AFTER the agent) → Respond.\n\n**Webhook payload:** `{\"subject_id\": \"usr_123\", \"message\": \"...\"}`\n\n**The golden rule of subject:** `subject_id` is required, never empty, never `default`. The \"Valid subject?\" node rejects the request otherwise (HTTP 400). Durable memory without a stable identity is dangerous memory.",
+        "content": "## Haki Personal Assistant with Memory\n\nA personal assistant that actually remembers you across conversations — preferences, decisions, running context — with no Qdrant/Supabase/Data Table to configure.\n\n**Required chain:** Webhook → **Haki Context** (always BEFORE the agent) → AI Agent → **Haki Capture** (always AFTER the agent) → Respond.\n\n**Webhook payload:** `{\"subject_id\": \"usr_123\", \"message\": \"...\"}`\n\n**The golden rule of subject:** `subject_id` is required, never empty, never `default`. The \"Valid subject?\" node rejects the request otherwise (HTTP 400). Durable memory without a stable identity is dangerous memory.",
         "height": 300,
         "width": 420,
         "color": 4
       },
-      "id": "a1b2c3d4-0001-4000-8000-haki00000001",
+      "id": "b2c3d4e5-0001-4000-8000-haki10000001",
       "name": "Note — Overview",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
@@ -21,7 +21,7 @@
         "width": 420,
         "color": 5
       },
-      "id": "a1b2c3d4-0002-4000-8000-haki00000002",
+      "id": "b2c3d4e5-0002-4000-8000-haki10000002",
       "name": "Note — Configuration",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
@@ -30,16 +30,16 @@
     {
       "parameters": {
         "httpMethod": "POST",
-        "path": "haki-support-agent",
+        "path": "haki-personal-assistant",
         "responseMode": "responseNode",
         "options": {}
       },
-      "id": "a1b2c3d4-0010-4000-8000-haki00000010",
+      "id": "b2c3d4e5-0010-4000-8000-haki10000010",
       "name": "Webhook",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
       "position": [-460, -60],
-      "webhookId": "haki-support-agent"
+      "webhookId": "haki-personal-assistant"
     },
     {
       "parameters": {
@@ -74,7 +74,7 @@
         },
         "options": {}
       },
-      "id": "a1b2c3d4-0011-4000-8000-haki00000011",
+      "id": "b2c3d4e5-0011-4000-8000-haki10000011",
       "name": "Subject valid?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
@@ -88,7 +88,7 @@
           "responseCode": 400
         }
       },
-      "id": "a1b2c3d4-0012-4000-8000-haki00000012",
+      "id": "b2c3d4e5-0012-4000-8000-haki10000012",
       "name": "Reject — missing subject",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
@@ -102,7 +102,7 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ { project_id: \"prj_support_dev\", subject_id: $(\"Webhook\").item.json.body.subject_id, query: $(\"Webhook\").item.json.body.message, budget_tokens: 2000, purpose: \"support\" } }}",
+        "jsonBody": "={{ { project_id: \"prj_assistant_dev\", subject_id: $(\"Webhook\").item.json.body.subject_id, query: $(\"Webhook\").item.json.body.message, budget_tokens: 2000, purpose: \"personal_assistant\" } }}",
         "options": {}
       },
       "credentials": {
@@ -111,7 +111,7 @@
           "name": "Haki API (Header Auth)"
         }
       },
-      "id": "a1b2c3d4-0013-4000-8000-haki00000013",
+      "id": "b2c3d4e5-0013-4000-8000-haki10000013",
       "name": "Haki Context",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
@@ -122,10 +122,10 @@
         "promptType": "define",
         "text": "={{ $(\"Webhook\").item.json.body.message }}",
         "options": {
-          "systemMessage": "=You are a support agent. You have a Haki long-term memory about this person: prefer these verified facts over your own assumptions, and cite them when you use them.\n\n{{ $json.packet.facts.length ? \"<haki_memory>\\n\" + $json.packet.facts.map((f) => \"- \" + f.predicate + \": \" + JSON.stringify(f.value) + \" (valid from \" + (f.valid_from || \"unknown date\") + \"; sources: \" + (f.source_event_ids.join(\",\") || \"no-source\") + \")\").join(\"\\n\") + ($json.packet.warnings.length ? \"\\n\" + $json.packet.warnings.map((w) => \"! \" + w).join(\"\\n\") : \"\") + \"\\n</haki_memory>\" : \"(No memory recorded yet.)\" }}"
+          "systemMessage": "=You are the user's personal assistant. You have a Haki long-term memory about them: preferences, ongoing projects, decisions, recurring context. Prefer these verified facts over your own assumptions, and cite them naturally when relevant — don't just dump them.\n\n{{ $json.packet.facts.length ? \"<haki_memory>\\n\" + $json.packet.facts.map((f) => \"- \" + f.predicate + \": \" + JSON.stringify(f.value) + \" (valid from \" + (f.valid_from || \"unknown date\") + \"; sources: \" + (f.source_event_ids.join(\",\") || \"no-source\") + \")\").join(\"\\n\") + ($json.packet.warnings.length ? \"\\n\" + $json.packet.warnings.map((w) => \"! \" + w).join(\"\\n\") : \"\") + \"\\n</haki_memory>\" : \"(No memory recorded yet — this is likely the first conversation.)\" }}"
         }
       },
-      "id": "a1b2c3d4-0014-4000-8000-haki00000014",
+      "id": "b2c3d4e5-0014-4000-8000-haki10000014",
       "name": "AI Agent",
       "type": "@n8n/n8n-nodes-langchain.agent",
       "typeVersion": 1.7,
@@ -148,7 +148,7 @@
           "name": "OpenRouter (credential LLM)"
         }
       },
-      "id": "a1b2c3d4-0015-4000-8000-haki00000015",
+      "id": "b2c3d4e5-0015-4000-8000-haki10000015",
       "name": "OpenAI Chat Model",
       "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
       "typeVersion": 1.2,
@@ -162,7 +162,7 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ { events: [ { org_id: \"org_default\", project_id: \"prj_support_dev\", subject_type: \"user\", subject_id: $(\"Webhook\").item.json.body.subject_id, agent_id: \"n8n\", kind: \"conversation.turn\", occurred_at: $now.toISO(), payload: { messages: [ { role: \"user\", content: $(\"Webhook\").item.json.body.message }, { role: \"assistant\", content: $(\"AI Agent\").item.json.output } ] }, source: { integration: \"n8n\", template: \"haki-persistent-support-agent\" }, idempotency_key: \"n8n-turn-\" + $execution.id } ] } }}",
+        "jsonBody": "={{ { events: [ { org_id: \"org_default\", project_id: \"prj_assistant_dev\", subject_type: \"user\", subject_id: $(\"Webhook\").item.json.body.subject_id, agent_id: \"n8n\", kind: \"conversation.turn\", occurred_at: $now.toISO(), payload: { messages: [ { role: \"user\", content: $(\"Webhook\").item.json.body.message }, { role: \"assistant\", content: $(\"AI Agent\").item.json.output } ] }, source: { integration: \"n8n\", template: \"haki-personal-assistant\" }, idempotency_key: \"n8n-turn-\" + $execution.id } ] } }}",
         "options": {}
       },
       "credentials": {
@@ -171,7 +171,7 @@
           "name": "Haki API (Header Auth)"
         }
       },
-      "id": "a1b2c3d4-0016-4000-8000-haki00000016",
+      "id": "b2c3d4e5-0016-4000-8000-haki10000016",
       "name": "Haki Capture",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
@@ -183,7 +183,7 @@
         "responseBody": "={{ { reply: $(\"AI Agent\").item.json.output, trace_id: $(\"Haki Context\").item.json.trace_id } }}",
         "options": {}
       },
-      "id": "a1b2c3d4-0017-4000-8000-haki00000017",
+      "id": "b2c3d4e5-0017-4000-8000-haki10000017",
       "name": "Respond",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,

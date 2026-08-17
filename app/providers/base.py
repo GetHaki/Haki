@@ -15,12 +15,15 @@ The consolidator ALWAYS re-validates every candidate with Pydantic before
 touching the ledger, so a provider can never crash a batch with bad output.
 """
 
+import logging
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.models import FACT_KINDS, MEMORY_FORMS, VOLATILITY_CLASSES, Event
+
+logger = logging.getLogger("haki.providers.base")
 
 # Embedding dimension of the `facts.embedding` column (vector(384), migration
 # 0003). Every embedder selected by config MUST produce vectors of this size.
@@ -139,6 +142,44 @@ class ExtractedFact(BaseModel):
     # (current LongMemEval SOTA, 95.6%, precisely because it resolves this
     # at write time instead of leaving it for the reader to re-derive).
     temporal_range: dict[str, str] | None = Field(default=None)
+
+    # Real-model bug found by external GTM-driven measurement (17 aout): a
+    # live gpt-4o-mini extraction run on real LoCoMo conversations emitted
+    # fact_kind="event" repeatedly -- not one of fact_kind's own three
+    # values, but memory_form's. The two fields are documented separately
+    # and clearly, but nothing stops a real (non-deterministic) model from
+    # confusing "what kind of fact is this" with "is this an accumulating
+    # occurrence" when both prompt sections use the word "event". Before
+    # this fix, the strict `pattern=` constraint on fact_kind/volatility/
+    # memory_form turned that single-field slip into total data loss --
+    # the whole candidate (predicate, value, evidence_span, everything) was
+    # rejected, not just the misclassified field. Every one of these three
+    # fields already has a documented, safe default for "the provider never
+    # set it" -- extending that same default to "the provider set it to
+    # something outside the enum" recovers the fact instead of discarding
+    # it, at the cost of a possibly-wrong classification tag rather than a
+    # lost memory. Logged (not silent) so a real prompt-quality regression
+    # is still visible, just no longer destructive.
+    @field_validator("fact_kind", "volatility", "memory_form", mode="before")
+    @classmethod
+    def _coerce_unknown_enum_to_default(cls, value: Any, info: Any) -> Any:
+        if value is None:
+            return value
+        allowed = {
+            "fact_kind": FACT_KINDS,
+            "volatility": VOLATILITY_CLASSES,
+            "memory_form": MEMORY_FORMS,
+        }[info.field_name]
+        if value not in allowed:
+            logger.warning(
+                "extraction: provider set %s=%r, not one of %s -- falling back to "
+                "the field's own default instead of dropping the whole candidate",
+                info.field_name,
+                value,
+                sorted(allowed),
+            )
+            return None
+        return value
 
     @model_validator(mode="after")
     def _reject_action_requires_reason(self) -> "ExtractedFact":

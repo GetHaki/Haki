@@ -60,9 +60,14 @@ async def test_extraction_without_classes_defaults_to_attribute_stable(client):
     assert facts[0].last_reinforced_at is None
 
 
-async def test_invalid_volatility_candidate_is_rejected_batch_survives(client):
+async def test_unknown_volatility_candidate_falls_back_to_default_not_rejected(client):
+    """Regression guard (17 aout): a real model emitting an out-of-enum
+    volatility (or fact_kind/memory_form) used to destroy the WHOLE
+    candidate -- see app.providers.base's field_validator. Both facts must
+    now be created; the one with the bad tag simply falls back to the
+    field's own default ("stable") instead of being lost."""
     valid = mock_fact("language", {"lang": "fr"})
-    invalid = {
+    unknown_volatility = {
         "subject_id": "usr_42",
         "predicate": "mood",
         "value": {"mood": "curious"},
@@ -71,7 +76,38 @@ async def test_invalid_volatility_candidate_is_rejected_batch_survives(client):
         "evidence_span": "feeling curious today",
         "volatility": "hourly",
     }
-    body = await capture(client, [make_memory_event([valid, invalid])])
+    body = await capture(client, [make_memory_event([valid, unknown_volatility])])
+
+    assert await run_worker() == 1
+
+    facts = await facts_for("usr_42")
+    assert sorted(f.predicate for f in facts) == ["language", "mood"]
+    mood_fact = next(f for f in facts if f.predicate == "mood")
+    assert mood_fact.volatility == "stable"  # the documented default, not "hourly"
+
+    async with async_session() as session:
+        from app.models import Job
+
+        job = await session.get(Job, uuid.UUID(body["consolidation_job_id"]))
+    assert job.payload["result"]["rejected"] == 0
+    assert job.payload["result"]["created"] == 2
+
+
+async def test_malformed_candidate_is_rejected_batch_survives(client):
+    """A candidate that is genuinely unrecoverable (here: an action outside
+    create/supersede/reject -- no documented default to fall back to,
+    unlike fact_kind/volatility/memory_form) must still be dropped without
+    crashing the rest of the batch."""
+    valid = mock_fact("language", {"lang": "fr"})
+    malformed = {
+        "subject_id": "usr_42",
+        "predicate": "mood",
+        "value": {"mood": "curious"},
+        "confidence": 0.9,
+        "action": "update",  # not create/supersede/reject
+        "evidence_span": "feeling curious today",
+    }
+    body = await capture(client, [make_memory_event([valid, malformed])])
 
     assert await run_worker() == 1
 

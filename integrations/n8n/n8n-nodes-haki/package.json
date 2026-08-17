@@ -1,13 +1,13 @@
 {
   "name": "n8n-nodes-haki",
   "version": "0.1.0",
-  "description": "Nœuds n8n communautaires pour Haki : Haki Context (avant l'agent) et Haki Capture (après l'agent)",
+  "description": "Community n8n nodes for Haki: Haki Context (before the agent) and Haki Capture (after the agent)",
   "license": "MIT",
   "author": "Ousmane Dicko",
-  "homepage": "https://github.com/BigOD2307/Haki",
+  "homepage": "https://github.com/GetHaki/Haki",
   "repository": {
     "type": "git",
-    "url": "https://github.com/BigOD2307/Haki.git"
+    "url": "https://github.com/GetHaki/Haki.git"
   },
   "keywords": [
     "n8n-community-node-package",

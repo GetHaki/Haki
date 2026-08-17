@@ -1,22 +1,23 @@
-// Harness de test des nœuds Haki compilés, hors n8n, contre la vraie API Haki.
+// Test harness for the compiled Haki nodes, outside n8n, against a real
+// Haki API.
 //
-// Prérequis : API Haki lancée (défaut http://localhost:8100, override via
-// HAKI_BASE_URL). Exécute les fonctions execute() des deux nœuds avec un mock
-// minimal d'IExecuteFunctions (fetch natif à la place du helper httpRequest).
+// Prerequisite: Haki API running (default http://localhost:8100, override
+// via HAKI_BASE_URL). Runs both nodes' execute() functions with a minimal
+// IExecuteFunctions mock (native fetch instead of the httpRequest helper).
 //
 //   npm run build && node --test test/
 //
-// Note provider : avec HAKI_LLM_PROVIDER=fake, la consolidation ne produit
-// aucun fait (le fake n'extrait rien) — le test wait_consolidation vérifie
-// donc le traitement du job, pas la création d'un fait. Le chemin LLM réel
-// est démontré séparément (démo live OpenRouter).
+// Provider note: with HAKI_LLM_PROVIDER=fake, consolidation produces no
+// facts (the fake extractor extracts nothing) -- the wait_consolidation
+// test checks that the job is processed, not that a fact is created. The
+// real LLM path is demonstrated separately (live OpenRouter demo).
 
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import test from 'node:test';
 
-// n8n-workflow publie un build ESM aux imports sans extension, irrésolvable
-// par Node natif : on passe par le build CJS.
+// n8n-workflow ships an ESM build with extensionless imports that native
+// Node can't resolve: go through the CJS build instead.
 const require = createRequire(import.meta.url);
 const { NodeOperationError } = require('n8n-workflow');
 const { HakiContext } = require('../dist/nodes/HakiContext/HakiContext.node.js');
@@ -26,7 +27,7 @@ const BASE_URL = (process.env.HAKI_BASE_URL ?? 'http://localhost:8100').replace(
 const PROJECT_ID = 'prj_n8n_harness';
 const SUBJECT_ID = 'usr_n8n_harness';
 
-// -- Mock minimal d'IExecuteFunctions ---------------------------------------
+// -- Minimal IExecuteFunctions mock ------------------------------------------
 
 function mockExecuteFunctions(params, credentials) {
 	return {
@@ -63,53 +64,53 @@ function mockExecuteFunctions(params, credentials) {
 
 const CREDENTIALS = { base_url: BASE_URL, api_key: '' };
 
-// -- Haki Context ------------------------------------------------------------
+// -- Haki Context -------------------------------------------------------------
 
-test('Haki Context : subject valide → packet + trace_id', async () => {
+test('Haki Context: valid subject -> packet + trace_id', async () => {
 	const node = new HakiContext();
 	const result = await node.execute.call(
 		mockExecuteFunctions(
 			{
 				project_id: PROJECT_ID,
 				subject_id: SUBJECT_ID,
-				query: 'dans quelle langue répondre ?',
-				budget_tokens: 900,
+				query: 'which language to reply in?',
+				budget_tokens: 2000,
 			},
 			CREDENTIALS,
 		),
 	);
 	const item = result[0][0].json;
-	assert.ok(item.trace_id, 'trace_id attendu');
-	assert.ok(item.context_text.includes('<haki_memory>'), 'bloc mémoire formaté attendu');
+	assert.ok(item.trace_id, 'expected a trace_id');
+	assert.ok(item.context_text.includes('<haki_memory>'), 'expected a formatted memory block');
 	assert.equal(item.subject_id, SUBJECT_ID);
 	assert.equal(typeof item.token_count, 'number');
-	console.log('  context_text =', JSON.stringify(item.context_text.slice(0, 120)) + '…');
+	console.log('  context_text =', JSON.stringify(item.context_text.slice(0, 120)) + '...');
 	console.log('  trace_id =', item.trace_id, '| token_count =', item.token_count);
 });
 
-test('Haki Context : subject vide → NodeOperationError', async () => {
+test('Haki Context: empty subject -> NodeOperationError', async () => {
 	const node = new HakiContext();
 	await assert.rejects(
 		node.execute.call(
 			mockExecuteFunctions(
-				{ project_id: PROJECT_ID, subject_id: '', query: 'q', budget_tokens: 900 },
+				{ project_id: PROJECT_ID, subject_id: '', query: 'q', budget_tokens: 2000 },
 				CREDENTIALS,
 			),
 		),
 		(error) => {
-			assert.ok(error instanceof NodeOperationError, 'NodeOperationError attendu');
+			assert.ok(error instanceof NodeOperationError, 'expected a NodeOperationError');
 			assert.match(error.message, /subject_id/);
 			return true;
 		},
 	);
 });
 
-test('Haki Context : subject « default » → NodeOperationError', async () => {
+test('Haki Context: "default" subject -> NodeOperationError', async () => {
 	const node = new HakiContext();
 	await assert.rejects(
 		node.execute.call(
 			mockExecuteFunctions(
-				{ project_id: PROJECT_ID, subject_id: 'default', query: 'q', budget_tokens: 900 },
+				{ project_id: PROJECT_ID, subject_id: 'default', query: 'q', budget_tokens: 2000 },
 				CREDENTIALS,
 			),
 		),
@@ -117,9 +118,9 @@ test('Haki Context : subject « default » → NodeOperationError', async () => 
 	);
 });
 
-// -- Haki Capture ------------------------------------------------------------
+// -- Haki Capture -------------------------------------------------------------
 
-test('Haki Capture : tour capturé → visible via /v1/timeline', async () => {
+test('Haki Capture: captured turn -> visible via /v1/timeline', async () => {
 	const node = new HakiCapture();
 	const userMessage = `harness capture ${Date.now()}`;
 	const result = await node.execute.call(
@@ -128,7 +129,7 @@ test('Haki Capture : tour capturé → visible via /v1/timeline', async () => {
 				project_id: PROJECT_ID,
 				subject_id: SUBJECT_ID,
 				user_message: userMessage,
-				assistant_message: 'réponse du harness',
+				assistant_message: 'harness reply',
 				thread_id: 'thread_harness',
 			},
 			CREDENTIALS,
@@ -143,18 +144,18 @@ test('Haki Capture : tour capturé → visible via /v1/timeline', async () => {
 		await fetch(`${BASE_URL}/v1/timeline?project_id=${PROJECT_ID}&subject_id=${SUBJECT_ID}`)
 	).json();
 	const found = timeline.events.find((e) => e.idempotency_key === item.idempotency_key);
-	assert.ok(found, 'événement attendu dans la timeline');
+	assert.ok(found, 'expected the event in the timeline');
 	assert.equal(found.payload.messages[0].content, userMessage);
-	console.log('  timeline : événement retrouvé, kind =', found.kind);
+	console.log('  timeline: event found, kind =', found.kind);
 });
 
-test('Haki Capture : idempotence — même run rejoué → dédupliqué', async () => {
+test('Haki Capture: idempotency -- same run replayed -> deduplicated', async () => {
 	const node = new HakiCapture();
 	const params = {
 		project_id: PROJECT_ID,
 		subject_id: SUBJECT_ID,
-		user_message: 'tour idempotent',
-		assistant_message: 'même réponse',
+		user_message: 'idempotent turn',
+		assistant_message: 'same reply',
 		run_id: `run_${Date.now()}`,
 	};
 	const first = await node.execute.call(mockExecuteFunctions(params, CREDENTIALS));
@@ -162,18 +163,18 @@ test('Haki Capture : idempotence — même run rejoué → dédupliqué', async 
 	assert.equal(first[0][0].json.events[0].deduplicated, false);
 	assert.equal(second[0][0].json.events[0].deduplicated, true);
 	assert.equal(second[0][0].json.consolidation_job_id, null);
-	console.log('  replay : deduplicated = true, pas de nouveau job');
+	console.log('  replay: deduplicated = true, no new job');
 });
 
-test('Haki Capture : wait_consolidation → job traité (provider fake : pas de fait)', async () => {
+test('Haki Capture: wait_consolidation -> job processed (fake provider: no fact)', async () => {
 	const node = new HakiCapture();
 	const result = await node.execute.call(
 		mockExecuteFunctions(
 			{
 				project_id: PROJECT_ID,
 				subject_id: SUBJECT_ID,
-				user_message: 'je préfère le français (harness wait)',
-				assistant_message: 'noté',
+				user_message: 'I prefer French (harness wait)',
+				assistant_message: 'noted',
 				wait_consolidation: true,
 			},
 			CREDENTIALS,
@@ -181,12 +182,12 @@ test('Haki Capture : wait_consolidation → job traité (provider fake : pas de 
 	);
 	const item = result[0][0].json;
 	assert.equal(typeof item.processed, 'number');
-	assert.ok(item.processed >= 1, 'au moins le job créé par cette capture');
-	console.log('  consolidation : processed =', item.processed);
-	console.log('  (HAKI_LLM_PROVIDER=fake → 0 fait extrait, comportement attendu en dev)');
+	assert.ok(item.processed >= 1, 'expected at least the job created by this capture');
+	console.log('  consolidation: processed =', item.processed);
+	console.log('  (HAKI_LLM_PROVIDER=fake -> 0 facts extracted, expected in dev)');
 });
 
-test('Haki Capture : subject vide → NodeOperationError', async () => {
+test('Haki Capture: empty subject -> NodeOperationError', async () => {
 	const node = new HakiCapture();
 	await assert.rejects(
 		node.execute.call(

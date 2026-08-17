@@ -1,45 +1,45 @@
 # Haki × n8n
 
-Deux façons de donner une mémoire long-terme à un agent n8n, sans Qdrant/Supabase/Data Table à configurer.
+Two ways to give an n8n agent long-term memory, with no Qdrant/Supabase/Data Table to configure.
 
-La chaîne imposée (PRD, Flow 2) :
+The required chain (PRD, Flow 2):
 
 ```text
 Chat Trigger / Webhook → Haki Context → AI Agent → Haki Capture → Respond
 ```
 
-**Haki Context toujours avant l'agent, Haki Capture toujours après.** Le `subject_id` est obligatoire et ne peut jamais être vide ni `default` — une mémoire durable sans identité stable est une mémoire dangereuse.
+**Haki Context always before the agent, Haki Capture always after.** `subject_id` is required and can never be empty or `default` — durable memory without a stable identity is dangerous memory.
 
-## Option 1 — Template natif (V1 beta, marche partout)
+## Option 1 — Native template (V1 beta, works everywhere)
 
-[`haki-persistent-support-agent.json`](./haki-persistent-support-agent.json) : workflow importable utilisant uniquement le nœud **HTTP Request** natif — aucune installation, y compris sur les instances qui ne peuvent pas installer de nœuds communautaires.
+[`haki-persistent-support-agent.json`](./haki-persistent-support-agent.json): an importable workflow using only the native **HTTP Request** node — no installation, works even on instances that can't install community nodes.
 
-1. n8n → *Import from file* → le JSON.
-2. Configurer les **3 seules choses** (détaillées dans les sticky notes du canvas) :
-   - **Credential Haki (header)** — Header Auth `Authorization: Bearer <clé>` sur les deux nœuds HTTP (en dev local sans `HAKI_API_KEY`, passer l'authentification sur *None*) ;
-   - **Credential LLM** — sur *OpenAI Chat Model* (base URL OpenRouter pré-remplie, modifiable) ;
-   - **Mapping du subject** — le template lit `{{ $json.body.subject_id }}` ; adapter à sa source (sessionId, email, ID Telegram/WhatsApp…), jamais une constante partagée.
-3. Activer le workflow, puis :
+1. n8n → *Import from file* → the JSON.
+2. Configure the **only 3 things** (detailed in the canvas sticky notes):
+   - **Haki credential (header)** — Header Auth `Authorization: Bearer <key>` on both HTTP nodes (in local dev with no admin/API key configured, set authentication to *None*);
+   - **LLM credential** — on *OpenAI Chat Model* (OpenRouter base URL pre-filled, editable);
+   - **Subject mapping** — the template reads `{{ $json.body.subject_id }}`; adapt to your own source (sessionId, email, Telegram/WhatsApp ID...), never a shared constant.
+3. Activate the workflow, then:
 
 ```bash
 curl -X POST http://localhost:5678/webhook/haki-support-agent \
   -H 'content-type: application/json' \
-  -d '{"subject_id": "usr_123", "message": "je préfère que mes réponses soient en français"}'
+  -d '{"subject_id": "usr_123", "message": "I prefer my replies in French"}'
 ```
 
-Le nœud **IF « Subject valide ? »** rejette (HTTP 400) tout appel sans `subject_id` stable.
+The **IF "Valid subject?"** node rejects (HTTP 400) any call without a stable `subject_id`.
 
-## Option 2 — Package de nœuds communautaires (V1.1)
+## Option 2 — Community node package (V1.1)
 
-[`n8n-nodes-haki/`](./n8n-nodes-haki/) : nœuds visuels **Haki Context** / **Haki Capture** + credential **Haki API** (base URL + clé optionnelle). Validation du subject intégrée (erreur d'exécution lisible si vide/`default`), sortie `context_text` prête à injecter, idempotence dérivée du run/thread, `wait_consolidation` pour une mémoire rappelable immédiatement.
+[`n8n-nodes-haki/`](./n8n-nodes-haki/): visual **Haki Context** / **Haki Capture** nodes + a **Haki API** credential (base URL + optional key). Built-in subject validation (a readable execution error if empty/`default`), `context_text` output ready to inject, idempotency derived from the run/thread, `wait_consolidation` for memory that's recallable immediately.
 
-Installation et détails : voir le [README du package](./n8n-nodes-haki/README.md). n8n Cloud exige un nœud vérifié — soumission Creator Portal prévue post-beta.
+Installation and details: see the [package README](./n8n-nodes-haki/README.md). n8n Cloud requires a verified node — Creator Portal submission in progress.
 
-## Vérification de bout en bout
+## End-to-end verification
 
-- Harness Node hors n8n (`n8n-nodes-haki/test/`) : 7/7 contre la vraie API.
-- Exécution réelle dans n8n Docker (`n8nio/n8n` 2.32.7, package monté, workflows importés par l'API REST, appels webhook, provider LLM OpenRouter) : préférence « français » capturée au premier message et **rappelée au second** — via le template natif (réponse LLM réelle : « Ta langue préférée est le français. ») comme via les nœuds communautaires ; rejet HTTP 400 sans subject ; événements `conversation.turn` visibles dans `/v1/timeline`. Le workflow de test des nœuds communautaires est versionné : [`haki-e2e-test-workflow.json`](./haki-e2e-test-workflow.json).
+- Node harness outside n8n (`n8n-nodes-haki/test/`): 7/7 against a real API.
+- Real execution in n8n Docker (`n8nio/n8n` 2.32.7, package mounted, workflows imported via the REST API, webhook calls, OpenRouter LLM provider): a "French" preference captured on the first message and **recalled on the second** — both via the native template (real LLM reply: "Your preferred language is French.") and via the community nodes; HTTP 400 rejection with no subject; `conversation.turn` events visible in `/v1/timeline`. The community-node test workflow is checked in: [`haki-e2e-test-workflow.json`](./haki-e2e-test-workflow.json).
 
-## Limites honnêtes
+## Honest limitations
 
-Le builder peut casser la chaîne (supprimer Haki Capture, brancher l'agent ailleurs) : n8n ne permet pas d'imposer le passage. La mesure de couverture (appels Context vs Capture observés) arrivera dans la console Haki — la règle est aujourd'hui garantie par le template et les validations des nœuds, pas par interception.
+A builder can break the chain (remove Haki Capture, wire the agent elsewhere) — n8n has no way to enforce the path. Coverage measurement (Context calls vs. Capture calls observed) is coming to the Haki console; today the rule is only guaranteed by the template and the nodes' own validation, not by interception.

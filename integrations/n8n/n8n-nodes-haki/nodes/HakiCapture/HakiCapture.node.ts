@@ -20,8 +20,8 @@ interface CaptureApiResponse {
 	policy: string;
 }
 
-/** Idempotency key dérivée du run/thread quand disponible : relancer la même
- * exécution n8n ne duplique jamais le tour capturé. */
+/** Idempotency key derived from the run/thread when available: re-running the
+ * same n8n execution never duplicates the captured turn. */
 function idempotencyKey(
 	runId: string,
 	threadId: string,
@@ -43,7 +43,7 @@ export class HakiCapture implements INodeType {
 		group: ['transform'],
 		version: 1,
 		description:
-			"Enregistre le tour user/assistant APRÈS l'appel LLM. Toujours placer après l'AI Agent.",
+			"Records the user/assistant turn AFTER the LLM call. Always place after the AI Agent.",
 		defaults: { name: 'Haki Capture' },
 		inputs: ['main'],
 		outputs: ['main'],
@@ -56,7 +56,7 @@ export class HakiCapture implements INodeType {
 				default: '',
 				required: true,
 				placeholder: 'prj_support',
-				description: 'Projet Haki (doit être le même que le nœud Haki Context).',
+				description: 'Haki project (must match the Haki Context node).',
 			},
 			{
 				displayName: 'Subject ID',
@@ -65,7 +65,7 @@ export class HakiCapture implements INodeType {
 				default: '',
 				required: true,
 				placeholder: "{{ $('Haki Context').item.json.subject_id }}",
-				description: "Identifiant stable — reprendre celui du nœud Haki Context.",
+				description: "Stable identifier — reuse the one from the Haki Context node.",
 			},
 			{
 				displayName: 'User Message',
@@ -73,7 +73,7 @@ export class HakiCapture implements INodeType {
 				type: 'string',
 				default: '',
 				required: true,
-				description: 'Le message utilisateur du tour.',
+				description: "The turn's user message.",
 			},
 			{
 				displayName: 'Assistant Message',
@@ -81,21 +81,21 @@ export class HakiCapture implements INodeType {
 				type: 'string',
 				default: '',
 				required: true,
-				description: "La réponse de l'agent pour ce tour.",
+				description: "The agent's reply for this turn.",
 			},
 			{
 				displayName: 'Thread ID',
 				name: 'thread_id',
 				type: 'string',
 				default: '',
-				description: 'Optionnel : fil de conversation (utilisé pour l’idempotence).',
+				description: 'Optional: conversation thread (used for idempotency).',
 			},
 			{
 				displayName: 'Run ID',
 				name: 'run_id',
 				type: 'string',
 				default: '',
-				description: "Optionnel : identifiant d'exécution (prioritaire pour l’idempotence).",
+				description: "Optional: execution ID (takes priority for idempotency).",
 			},
 			{
 				displayName: 'Wait Consolidation',
@@ -103,28 +103,28 @@ export class HakiCapture implements INodeType {
 				type: 'boolean',
 				default: false,
 				description:
-					'Si actif, appelle aussi POST /v1/consolidate pour que la mémoire soit rappelable immédiatement (dev/démo).',
+					'When on, also calls POST /v1/consolidate so the memory is recallable immediately (dev/demo).',
 			},
 			{
 				displayName: 'Org ID',
 				name: 'org_id',
 				type: 'string',
 				default: 'org_default',
-				description: 'Organisation Haki (contrat B.1).',
+				description: 'Haki organization (contract B.1).',
 			},
 			{
 				displayName: 'Origin Trust',
 				name: 'origin_trust',
 				type: 'options',
 				options: [
-					{ name: 'Trusted (message direct du sujet)', value: 'trusted' },
-					{ name: 'Semi-trusted (sortie agent/outil)', value: 'semi_trusted' },
-					{ name: 'Third-party (tiers dans la conversation)', value: 'third_party' },
-					{ name: 'Untrusted (contenu ingéré)', value: 'untrusted' },
+					{ name: 'Trusted (direct message from the subject)', value: 'trusted' },
+					{ name: 'Semi-trusted (agent/tool output)', value: 'semi_trusted' },
+					{ name: 'Third-party (someone else in the conversation)', value: 'third_party' },
+					{ name: 'Untrusted (ingested content)', value: 'untrusted' },
 				],
 				default: 'trusted',
 				description:
-					"Niveau de confiance d'origine du tour capturé. En groupe (l'expéditeur n'est pas le sujet suivi), choisir third-party — le fait sera attribué au tiers, jamais au sujet.",
+					"Authority level of the captured turn's origin. In a group (the sender is not the tracked subject), choose third-party — the fact will be attributed to that third party, never to the subject.",
 			},
 		],
 	};
@@ -175,9 +175,9 @@ export class HakiCapture implements INodeType {
 
 			let capture: CaptureApiResponse;
 			try {
-				// Clé par événement uniquement : une clé de batch serait
-				// suffixée du hash de contenu côté Ledger et casserait la
-				// déduplication d'un replay (occurred_at change à chaque run).
+				// Per-event key only: a batch-level key would be suffixed
+				// with a content hash on the Ledger side and would break
+				// dedup on replay (occurred_at changes on every run).
 				capture = (await this.helpers.httpRequest({
 					method: 'POST',
 					url: `${root}/v1/capture`,

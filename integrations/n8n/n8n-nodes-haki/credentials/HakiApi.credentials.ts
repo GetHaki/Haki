@@ -5,7 +5,7 @@ export class HakiApi implements ICredentialType {
 
 	displayName = 'Haki API';
 
-	documentationUrl = 'https://github.com/BigOD2307/Haki';
+	documentationUrl = 'https://github.com/GetHaki/Haki';
 
 	properties: INodeProperties[] = [
 		{
@@ -16,7 +16,7 @@ export class HakiApi implements ICredentialType {
 			required: true,
 			placeholder: 'http://localhost:8100',
 			description:
-				"URL de l'API Haki, sans slash final. Depuis un n8n Docker vers une API Haki sur la machine hôte : http://host.docker.internal:8100",
+				"The Haki API URL, no trailing slash. From an n8n Docker container to a Haki API on the host machine: http://host.docker.internal:8100",
 		},
 		{
 			displayName: 'API Key',
@@ -25,7 +25,7 @@ export class HakiApi implements ICredentialType {
 			typeOptions: { password: true },
 			default: '',
 			description:
-				"Clé Bearer Haki. Optionnelle en développement local (l'API tourne en mode ouvert), obligatoire dès que HAKI_API_KEY est configurée côté serveur.",
+				"Haki bearer key. Optional in local development (the API runs in open mode), required as soon as HAKI_ADMIN_KEY or an API key is configured server-side.",
 		},
 	];
 }

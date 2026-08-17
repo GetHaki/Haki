@@ -40,7 +40,7 @@
         "project_id": "prj_n8n_e2e",
         "subject_id": "={{ $('Haki Context').item.json.subject_id }}",
         "user_message": "={{ $('Webhook').item.json.body.message }}",
-        "assistant_message": "={{ 'Réponse E2E déterministe (sans LLM). Mémoire injectée : ' + $json.context_text }}",
+        "assistant_message": "={{ 'Deterministic E2E reply (no LLM). Injected memory: ' + $json.context_text }}",
         "thread_id": "={{ 'thread-' + $('Webhook').item.json.body.subject_id }}",
         "run_id": "",
         "wait_consolidation": true,

@@ -21,7 +21,7 @@ export class HakiContext implements INodeType {
 		group: ['transform'],
 		version: 1,
 		description:
-			"Récupère la mémoire long-terme du sujet (ContextPacket) AVANT l'appel LLM. Toujours placer avant l'AI Agent.",
+			"Fetches the subject's long-term memory (ContextPacket) BEFORE the LLM call. Always place before the AI Agent.",
 		defaults: { name: 'Haki Context' },
 		inputs: ['main'],
 		outputs: ['main'],
@@ -34,7 +34,7 @@ export class HakiContext implements INodeType {
 				default: '',
 				required: true,
 				placeholder: 'prj_support',
-				description: 'Projet Haki (scope mémoire). Jamais choisi par le modèle.',
+				description: 'Haki project (memory scope). Never chosen by the model.',
 			},
 			{
 				displayName: 'Subject ID',
@@ -44,7 +44,7 @@ export class HakiContext implements INodeType {
 				required: true,
 				placeholder: '{{ $json.body.subject_id }}',
 				description:
-					"Identifiant stable de la personne (sessionId, email, ID webhook…). Vide ou « default » = erreur.",
+					"Stable identifier for the person (sessionId, email, webhook ID...). Empty or \"default\" is an error.",
 			},
 			{
 				displayName: 'Query',
@@ -53,21 +53,21 @@ export class HakiContext implements INodeType {
 				default: '',
 				required: true,
 				placeholder: '{{ $json.body.message }}',
-				description: 'Le message courant — sert à reranker les faits pertinents.',
+				description: 'The current message — used to rerank relevant facts.',
 			},
 			{
 				displayName: 'Budget Tokens',
 				name: 'budget_tokens',
 				type: 'number',
-				default: 900,
-				description: 'Budget de tokens du ContextPacket.',
+				default: 2000,
+				description: 'Token budget for the ContextPacket.',
 			},
 			{
 				displayName: 'Purpose',
 				name: 'purpose',
 				type: 'string',
 				default: '',
-				description: 'Optionnel : type de tâche (support, onboarding…), consigné dans la trace.',
+				description: 'Optional: task type (support, onboarding...), recorded in the trace.',
 			},
 		],
 	};
@@ -111,7 +111,7 @@ export class HakiContext implements INodeType {
 
 			returnData.push({
 				json: {
-					// Texte prêt à injecter dans le system prompt de l'agent.
+					// Text ready to inject into the agent's system prompt.
 					context_text: formatPacket(response.packet),
 					packet: response.packet,
 					warnings: response.packet.warnings ?? [],

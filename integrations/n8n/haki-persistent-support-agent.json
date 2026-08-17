@@ -3,7 +3,7 @@
   "nodes": [
     {
       "parameters": {
-        "content": "## Haki Persistent Support Agent\n\nMémoire long-terme pour cet agent, sans Qdrant/Supabase/Data Table à configurer.\n\n**Chaîne imposée :** Webhook → **Haki Context** (toujours AVANT l'agent) → AI Agent → **Haki Capture** (toujours APRÈS l'agent) → Respond.\n\n**Payload du webhook :** `{\"subject_id\": \"usr_123\", \"message\": \"...\"}`\n\n**Règle d'or du subject :** `subject_id` est obligatoire, jamais vide, jamais `default`. Le nœud « Subject valide ? » rejette la requête sinon (HTTP 400). Une mémoire durable sans identité stable est une mémoire dangereuse.",
+        "content": "## Haki Persistent Support Agent\n\nLong-term memory for this agent, with no Qdrant/Supabase/Data Table to configure.\n\n**Required chain:** Webhook → **Haki Context** (always BEFORE the agent) → AI Agent → **Haki Capture** (always AFTER the agent) → Respond.\n\n**Webhook payload:** `{\"subject_id\": \"usr_123\", \"message\": \"...\"}`\n\n**The golden rule of subject:** `subject_id` is required, never empty, never `default`. The \"Valid subject?\" node rejects the request otherwise (HTTP 400). Durable memory without a stable identity is dangerous memory.",
         "height": 300,
         "width": 420,
         "color": 4
@@ -16,7 +16,7 @@
     },
     {
       "parameters": {
-        "content": "## Seulement 3 choses à configurer\n\n**1. Credential Haki (header)** — les deux nœuds HTTP Request utilisent *Header Auth* : crée une credential avec Name = `Authorization`, Value = `Bearer <ta clé Haki>`.\nEn dev local sans `HAKI_API_KEY` côté serveur, tu peux passer l'authentification des deux nœuds sur *None*.\n\n**2. Credential LLM** — sur le nœud *OpenAI Chat Model* : ta clé OpenAI ou OpenRouter (base URL déjà pré-remplie : `https://openrouter.ai/api/v1`, modèle `gpt-4o-mini`).\n\n**3. Mapping du subject** — le template lit `{{ $json.body.subject_id }}` du webhook. Adapte l'expression à ta source : `sessionId`, email, ID Telegram/WhatsApp… mais jamais une constante partagée.\n\n**Base URL Haki :** les nœuds HTTP pointent `http://localhost:8100`. Si n8n tourne dans Docker et l'API Haki sur la machine hôte : `http://host.docker.internal:8100`.",
+        "content": "## Only 3 things to configure\n\n**1. Haki credential (header)** — both HTTP Request nodes use *Header Auth*: create a credential with Name = `Authorization`, Value = `Bearer <your Haki key>`.\nIn local dev with no admin/API key configured server-side, you can set both nodes' authentication to *None*.\n\n**2. LLM credential** — on the *OpenAI Chat Model* node: your OpenAI or OpenRouter key (base URL already pre-filled: `https://openrouter.ai/api/v1`, model `gpt-4o-mini`).\n\n**3. Subject mapping** — the template reads `{{ $json.body.subject_id }}` from the webhook. Adapt the expression to your own source: `sessionId`, email, Telegram/WhatsApp ID... but never a shared constant.\n\n**Haki Base URL:** the HTTP nodes point to `http://localhost:8100`. If n8n runs in Docker and the Haki API on the host machine: `http://host.docker.internal:8100`.",
         "height": 460,
         "width": 420,
         "color": 5
@@ -83,7 +83,7 @@
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ { error: \"subject_id obligatoire : fournis un identifiant stable (non vide, différent de 'default') dans le payload du webhook\" } }}",
+        "responseBody": "={{ { error: \"subject_id is required: provide a stable identifier (non-empty, different from 'default') in the webhook payload\" } }}",
         "options": {
           "responseCode": 400
         }
@@ -122,7 +122,7 @@
         "promptType": "define",
         "text": "={{ $(\"Webhook\").item.json.body.message }}",
         "options": {
-          "systemMessage": "=Tu es un agent support. Tu disposes d'une mémoire long-terme Haki sur cette personne : préfère ces faits vérifiés à tes propres suppositions et cite-les quand tu les utilises.\n\n{{ $json.packet.facts.length ? \"<haki_memory>\\n\" + $json.packet.facts.map((f) => \"- \" + f.predicate + \": \" + JSON.stringify(f.value) + \" (valid from \" + (f.valid_from || \"unknown date\") + \"; sources: \" + (f.source_event_ids.join(\",\") || \"no-source\") + \")\").join(\"\\n\") + ($json.packet.warnings.length ? \"\\n\" + $json.packet.warnings.map((w) => \"! \" + w).join(\"\\n\") : \"\") + \"\\n</haki_memory>\" : \"(Aucune mémoire enregistrée pour l'instant.)\" }}"
+          "systemMessage": "=You are a support agent. You have a Haki long-term memory about this person: prefer these verified facts over your own assumptions, and cite them when you use them.\n\n{{ $json.packet.facts.length ? \"<haki_memory>\\n\" + $json.packet.facts.map((f) => \"- \" + f.predicate + \": \" + JSON.stringify(f.value) + \" (valid from \" + (f.valid_from || \"unknown date\") + \"; sources: \" + (f.source_event_ids.join(\",\") || \"no-source\") + \")\").join(\"\\n\") + ($json.packet.warnings.length ? \"\\n\" + $json.packet.warnings.map((w) => \"! \" + w).join(\"\\n\") : \"\") + \"\\n</haki_memory>\" : \"(No memory recorded yet.)\" }}"
         }
       },
       "id": "a1b2c3d4-0014-4000-8000-haki00000014",

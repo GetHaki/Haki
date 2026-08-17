@@ -28,8 +28,8 @@ export function requireSubject(node: INode, subjectId: string, itemIndex: number
 	if (!subject || subject === 'default') {
 		throw new NodeOperationError(
 			node,
-			"subject_id est obligatoire et ne peut pas être vide ni « default ». " +
-				"Mappe un identifiant stable (sessionId, email, ID webhook…) depuis le trigger.",
+			"subject_id is required and cannot be empty or \"default\". " +
+				"Map a stable identifier (sessionId, email, webhook ID...) from the trigger.",
 			{ itemIndex },
 		);
 	}
@@ -73,7 +73,7 @@ export function apiError(node: INode, error: unknown, itemIndex: number): NodeOp
 		status?: number;
 		body?: unknown;
 	};
-	const status = err.status ? `HTTP ${err.status}` : 'connexion impossible';
+	const status = err.status ? `HTTP ${err.status}` : 'connection failed';
 	let detail = '';
 	if (typeof err.body === 'string') {
 		detail = err.body.slice(0, 500);
@@ -86,7 +86,7 @@ export function apiError(node: INode, error: unknown, itemIndex: number): NodeOp
 	}
 	return new NodeOperationError(
 		node,
-		`Erreur API Haki (${status})${detail ? ` : ${detail}` : ''}. Vérifie la Base URL de la credential et que l'API Haki tourne.`,
+		`Haki API error (${status})${detail ? `: ${detail}` : ''}. Check the credential's Base URL and that the Haki API is running.`,
 		{ itemIndex },
 	);
 }

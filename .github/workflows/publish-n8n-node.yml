@@ -1,0 +1,54 @@
+name: Publish n8n node
+
+# Manual only — publishing to npm is a real, external, irreversible action
+# (a version number can never be republished once taken). Never on push/tag.
+#
+# npm has required provenance (a signed, verifiable link from the published
+# package back to this exact workflow run and commit) for new/updated
+# packages since May 2026 — `id-token: write` + `npm publish --provenance`
+# below is what produces it, not an optional flag.
+#
+# Requires a repository secret NPM_TOKEN (an npm "Automation" token, scoped
+# to this package) — add it under Settings > Secrets and variables >
+# Actions. Never pasted into this file or entered by the agent on the
+# user's behalf.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and pack only, skip the actual npm publish"
+        type: boolean
+        default: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # required for npm provenance
+    defaults:
+      run:
+        working-directory: integrations/n8n/n8n-nodes-haki
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build
+        run: npm run build
+
+      - name: Pack (sanity check on the exact tarball contents)
+        run: npm pack
+
+      - name: Publish to npm
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

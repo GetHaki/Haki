@@ -1,0 +1,47 @@
+name: Publish Python SDK (gethaki, PyPI)
+
+# Manual only -- publishing to PyPI is a real, external, irreversible action
+# (a version number can never be reused once released). Never on push/tag.
+#
+# Uses PyPI Trusted Publishing (OIDC) -- no long-lived token stored anywhere,
+# nothing for this agent to ever see. One-time setup on PyPI's side (not
+# here): on https://pypi.org/manage/project/gethaki/settings/publishing/,
+# add a trusted publisher with Owner=GetHaki, Repository=Haki,
+# Workflow=publish-sdk-python.yml, Environment=pypi. Until that's
+# configured, a dry run still builds and checks the package; the actual
+# publish step will fail with a clear PyPI auth error, not silently no-op.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and check only, skip the actual PyPI publish"
+        type: boolean
+        default: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write # required for PyPI Trusted Publishing
+    defaults:
+      run:
+        working-directory: sdk/python
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Build
+        run: uv build
+
+      - name: Check package metadata
+        run: uvx twine check dist/*
+
+      - name: Publish to PyPI
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdk/python/dist

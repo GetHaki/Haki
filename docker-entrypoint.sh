@@ -22,7 +22,13 @@ alembic upgrade head
 python -m app.worker &
 WORKER_PID=$!
 
-uvicorn app.main:app --host 0.0.0.0 --port 8100 &
+# --proxy-headers/--forwarded-allow-ips: Coolify's front proxy (Traefik)
+# terminates TLS and forwards plain HTTP with X-Forwarded-Proto: https.
+# Without these flags uvicorn ignores that header and believes every
+# request is HTTP, so any redirect it emits (e.g. the trailing-slash
+# redirect on /mcp) downgrades to an http:// Location — which browsers
+# and MCP clients then refuse to follow from an https:// page.
+uvicorn app.main:app --host 0.0.0.0 --port 8100 --proxy-headers --forwarded-allow-ips='*' &
 API_PID=$!
 
 trap 'kill -TERM $WORKER_PID $API_PID 2>/dev/null' TERM INT

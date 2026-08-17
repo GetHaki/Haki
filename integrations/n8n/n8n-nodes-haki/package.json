@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-haki",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Community n8n nodes for Haki: Haki Context (before the agent) and Haki Capture (after the agent)",
   "license": "MIT",
   "author": {
@@ -10,7 +10,8 @@
   "homepage": "https://github.com/GetHaki/Haki",
   "repository": {
     "type": "git",
-    "url": "https://github.com/GetHaki/Haki.git"
+    "url": "https://github.com/GetHaki/Haki.git",
+    "directory": "integrations/n8n/n8n-nodes-haki"
   },
   "keywords": [
     "n8n-community-node-package",

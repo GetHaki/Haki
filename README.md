@@ -5,7 +5,7 @@
 ### Reliable memory for AI agents
 *Context with proof: every fact carries a date, a source, and a status.*
 
-![Tests](https://img.shields.io/badge/tests-354%20Python%20%2B%2013%20Node%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-376%20Python%20%2B%2014%20Node%20passing-brightgreen)
 ![Python](https://img.shields.io/badge/python-3.12-blue)
 ![PostgreSQL](https://img.shields.io/badge/postgresql-16%20%2B%20pgvector-336791)
 ![p95 context](https://img.shields.io/badge/p95%20context-249ms-orange)
@@ -586,7 +586,7 @@ embedding, `search_vector` tsvector + GIN), `jobs`, `conflict_sets`,
 
 ## Quality and tests
 
-354 Python tests and 13 Node tests against a real PostgreSQL database (no
+376 Python tests and 14 Node tests against a real PostgreSQL database (no
 database mocking): `uv run pytest` and `cd sdk/typescript && npm test`.
 
 Tests verify behavioral guarantees, not implementation details:

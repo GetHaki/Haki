@@ -1,6 +1,6 @@
 {
   "name": "gethaki",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "TypeScript SDK for Haki — long-term memory for AI agents, with proof",
   "keywords": ["ai", "agents", "memory", "llm", "rag", "context"],
   "homepage": "https://gethaki.space",

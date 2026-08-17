@@ -31,13 +31,13 @@ The **IF "Valid subject?"** node rejects (HTTP 400) any call without a stable `s
 
 ## Option 2 — Community node package (V1.1)
 
-[`n8n-nodes-haki/`](./n8n-nodes-haki/): visual **Haki Context** / **Haki Capture** nodes + a **Haki API** credential (base URL + optional key). Built-in subject validation (a readable execution error if empty/`default`), `context_text` output ready to inject, idempotency derived from the run/thread, `wait_consolidation` for memory that's recallable immediately.
+**[`n8n-nodes-haki`](https://github.com/GetHaki/n8n-nodes-haki)** (own repository, not part of this monorepo — n8n's Creator Portal verification requires a single-purpose repo structure): visual **Haki Context** / **Haki Capture** nodes + a **Haki API** credential (base URL + optional key). Built-in subject validation (a readable execution error if empty/`default`), `context_text` output ready to inject, idempotency derived from the run/thread, `wait_consolidation` for memory that's recallable immediately.
 
-Installation and details: see the [package README](./n8n-nodes-haki/README.md). n8n Cloud requires a verified node — Creator Portal submission in progress.
+Installation and details: see the [package README](https://github.com/GetHaki/n8n-nodes-haki#readme). Published on npm; n8n Cloud additionally requires a **verified** node — Creator Portal submission in progress.
 
 ## End-to-end verification
 
-- Node harness outside n8n (`n8n-nodes-haki/test/`): 7/7 against a real API.
+- Node harness outside n8n ([`n8n-nodes-haki/test/`](https://github.com/GetHaki/n8n-nodes-haki/tree/main/test)): 7/7 against a real API.
 - Real execution in n8n Docker (`n8nio/n8n` 2.32.7, package mounted, workflows imported via the REST API, webhook calls, OpenRouter LLM provider): a "French" preference captured on the first message and **recalled on the second** — both via the native template (real LLM reply: "Your preferred language is French.") and via the community nodes; HTTP 400 rejection with no subject; `conversation.turn` events visible in `/v1/timeline`. The community-node test workflow is checked in: [`haki-e2e-test-workflow.json`](./haki-e2e-test-workflow.json).
 
 ## Honest limitations

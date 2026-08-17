@@ -641,7 +641,7 @@ haki/
 ├── app/                 # FastAPI API (ledger, consolidator, context, gateway, MCP)
 ├── sdk/python/          # SDK + haki CLI
 ├── sdk/typescript/      # TypeScript SDK + haki-ts CLI (Python parity)
-├── integrations/n8n/    # Community template + nodes
+├── integrations/n8n/    # Native template + e2e workflow (node package: github.com/GetHaki/n8n-nodes-haki)
 ├── alembic/             # PostgreSQL migrations
 ├── tests/               # Behavioral tests (incl. eval harness tests)
 ├── eval/                # Public benchmark harness (LoCoMo + LongMemEval)

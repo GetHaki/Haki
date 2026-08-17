@@ -1,9 +1,12 @@
 {
   "name": "n8n-nodes-haki",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Community n8n nodes for Haki: Haki Context (before the agent) and Haki Capture (after the agent)",
   "license": "MIT",
-  "author": "Ousmane Dicko",
+  "author": {
+    "name": "Ousmane Dicko",
+    "email": "dicken.media2@gmail.com"
+  },
   "homepage": "https://github.com/GetHaki/Haki",
   "repository": {
     "type": "git",

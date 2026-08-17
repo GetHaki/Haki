@@ -6,6 +6,7 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 from mcp.server.streamable_http_manager import StreamableHTTPASGIApp
+from mcp.server.transport_security import TransportSecuritySettings
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
@@ -20,11 +21,34 @@ from app.rate_limit import limiter, rate_limit_exceeded_handler
 logger = logging.getLogger("haki.main")
 
 # Configure the MCP streamable-HTTP session manager (json responses, DNS
-# rebinding protection for localhost). The returned Starlette app is not
-# mounted as-is: its inner route is "/mcp", and mounting it under FastAPI
-# would force a "/mcp/" trailing-slash redirect that MCP clients may not
-# follow. Instead the raw ASGI handler is mounted on exactly "/mcp".
-mcp_server.streamable_http_app(streamable_http_path="/mcp", json_response=True)
+# rebinding protection scoped explicitly -- see settings.mcp_public_host).
+# The returned Starlette app is not mounted as-is: its inner route is
+# "/mcp", and mounting it under FastAPI would force a "/mcp/"
+# trailing-slash redirect that MCP clients may not follow. Instead the raw
+# ASGI handler is mounted on exactly "/mcp".
+#
+# transport_security is passed explicitly (not left to the SDK's default):
+# left unset, mcp.server.lowlevel.server.streamable_http_app() only
+# auto-enables the Host-header allowlist when its own `host` argument
+# defaults to "127.0.0.1" -- which it always does here, since Haki mounts
+# the app rather than running it standalone. That silently restricted
+# every request's Host header to localhost variants, so any real deployed
+# domain (confirmed live on api.gethaki.space) got a blanket 421 "Invalid
+# Host header" on /mcp/, before any Haki code ever ran.
+_mcp_allowed_hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+_mcp_allowed_origins = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
+if settings.mcp_public_host:
+    _mcp_allowed_hosts.append(settings.mcp_public_host)
+    _mcp_allowed_origins.append(f"https://{settings.mcp_public_host}")
+
+mcp_server.streamable_http_app(
+    streamable_http_path="/mcp",
+    json_response=True,
+    transport_security=TransportSecuritySettings(
+        allowed_hosts=_mcp_allowed_hosts,
+        allowed_origins=_mcp_allowed_origins,
+    ),
+)
 mcp_session_manager = mcp_server._lowlevel_server.session_manager
 
 
@@ -67,17 +91,10 @@ app = FastAPI(
 register_error_handlers(app)
 app.include_router(api_router)
 
-# Found missing entirely by security review (16 aout): app/rate_limit.py and
-# every route's @limiter.limit(...) decorator were already present and
-# ported from the private repo, but this activation block (the part that
-# actually wires slowapi into the app -- state, exception handler,
-# middleware) never was. Routes still returned 429 without it (slowapi's
-# own per-call check still runs), but with slowapi's raw default error body
-# instead of this API's {"error": {...}} envelope and Retry-After header --
-# see app/rate_limit.py for why the in-memory backend is the right call for
-# this single-instance deployment. Per-route limits are declared with
-# @limiter.limit(...) on the individual endpoints (key creation, capture,
-# consolidate, context).
+# Basic rate limiting (production-readiness fix): in-memory backend, see
+# app/rate_limit.py for why that's the right call for this single-instance
+# deployment. Per-route limits are declared with @limiter.limit(...) on
+# the individual endpoints (provisioning, key creation, capture).
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
@@ -95,9 +112,10 @@ async def mcp_dev_auth(request: Request, call_next) -> Response:
     validated per-tool-call against the api_keys table by
     app.mcp_server._resolve_scope (invalid/revoked -> a clear ToolError,
     not a silent fallback) — checking it AGAIN here against the single
-    shared HAKI_API_KEY secret would reject every real multi-tenant
-    deployment, since a customer's key is never equal to that one shared
-    value.
+    shared HAKI_API_KEY secret would reject every real Cloud customer,
+    since their key is never equal to that one shared value (this is
+    exactly the bug found live: multi-tenant MCP was unusable whenever
+    HAKI_API_KEY was configured in production).
 
     When HAKI_API_KEY is set, any OTHER bearer token on /mcp (not an hk_
     key — i.e. no Authorization header, or one that isn't the legacy

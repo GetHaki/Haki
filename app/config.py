@@ -31,14 +31,6 @@ class Settings(BaseSettings):
     # pooler, caching is safe and free performance).
     db_disable_prepared_statement_cache: bool = False  # HAKI_DB_DISABLE_PREPARED_STATEMENT_CACHE
 
-    # Consolidation worker (sprint 16 fix — see app/worker.py): how often
-    # the background loop polls for pending `consolidate` jobs. Previously
-    # `python -m app.worker` only ever ran ONE pass and exited — nothing in
-    # the Dockerfile/CMD ever invoked it again, so captured events queued a
-    # job that no process ever picked up. docker-entrypoint.sh now runs
-    # this loop alongside uvicorn.
-    worker_poll_seconds: float = 5.0  # HAKI_WORKER_POLL_SECONDS
-
     # Provider selection: extractor (LLM, off hot path) and embedder (in the
     # context hot path) are configured independently.
     llm_provider: str = "fake"  # HAKI_LLM_PROVIDER=fake|openai
@@ -129,6 +121,14 @@ class Settings(BaseSettings):
     billing_cloud_plan_monthly_credits: int = 20000  # HAKI_BILLING_CLOUD_PLAN_MONTHLY_CREDITS
     billing_credit_price_xof_per_credit: float = 0.65  # HAKI_BILLING_CREDIT_PRICE_XOF_PER_CREDIT
 
+    # Consolidation worker (sprint 16 fix — see app/worker.py): how often
+    # the background loop polls for pending `consolidate` jobs. Previously
+    # `python -m app.worker` only ever ran ONE pass and exited — nothing in
+    # the Dockerfile/CMD ever invoked it again, so captured events queued a
+    # job that no process ever picked up. docker-entrypoint.sh now runs
+    # this loop alongside uvicorn.
+    worker_poll_seconds: float = 5.0  # HAKI_WORKER_POLL_SECONDS
+
     # MCP server scope (sprint 4): memory is project- AND subject-scoped by
     # config, never chosen by the model (security invariant, README —
     # "le modele ne choisit jamais les scopes"). One MCP server instance =
@@ -141,6 +141,18 @@ class Settings(BaseSettings):
     # Synchronous consolidation after each haki_capture so the memory is
     # recallable immediately (dev default; a worker can take over in prod).
     mcp_autoconsolidate: bool = True  # HAKI_MCP_AUTOCONSOLIDATE
+
+    # Public Host header the MCP endpoint is actually reached on (e.g.
+    # "api.gethaki.space"). The MCP SDK's streamable_http_app auto-enables
+    # DNS-rebinding protection whenever its `host` argument defaults to
+    # 127.0.0.1 -- unset, every real request (any Host other than
+    # localhost) is rejected with 421 "Invalid Host header" before it ever
+    # reaches app code (found live: curl against the deployed /mcp/ always
+    # 421'd, traced to mcp/server/lowlevel/server.py's
+    # `if transport_security is None and host in ("127.0.0.1", ...)`).
+    # None (self-hosted default) disables the check entirely -- correct
+    # for docker-compose installs with no fixed public hostname.
+    mcp_public_host: str | None = None  # HAKI_MCP_PUBLIC_HOST
 
     # Volatility horizons (M2 -- typologie + classes de volatilite): how long a
     # fact of each class is served as current without re-confirmation. The

@@ -1,0 +1,110 @@
+---
+title: "Reliability Report"
+description: "How well Haki actually recalls the right memory, measured on a frozen, reproducible protocol -- not a chosen number."
+---
+
+<Info>
+  Every number on this page comes from a real, paid run against the exact
+  harness in [`eval/`](https://github.com/GetHaki/Haki/tree/main/eval) --
+  never a proxy, never cherry-picked. Reproduce any of it yourself: see
+  [`eval/README.md`](https://github.com/GetHaki/Haki/blob/main/eval/README.md).
+</Info>
+
+## Where we are today
+
+**30.6%** answer accuracy on a 180-question stratified sample of
+[LoCoMo](https://arxiv.org/abs/2402.17753), measured on 2026-08-17 under a
+protocol frozen for comparability with published Mem0/Zep numbers (same
+question, judge and answer prompts; `gpt-4o-mini` for both reading and
+judging, temperature 0).
+
+That's not a number we're leading with as a competitive claim. Published
+academic results put credible non-graph memory systems in the 65-70% range
+on LoCoMo -- Mem0's own paper reports 66.9%, for instance
+([arXiv:2504.19413](https://arxiv.org/abs/2504.19413)). We're not there yet,
+and this page says so plainly instead of picking a friendlier metric.
+
+What we do have is a real, measured trajectory on the same frozen protocol,
+and a harness honest enough to show its own weak spots.
+
+## The trajectory
+
+| Date | What changed | Overall | Single-hop | Multi-hop | Temporal | Open-domain | Sample |
+|---|---|---|---|---|---|---|---|
+| 2026-08-14 | Calibration protocol adopted, no retrieval mechanisms yet | 17.1% | 19.0% | 18.8% | 12.1% | 11.5% | full 1540 |
+| 2026-08-17 | + cross-encoder reranker, temporal grounding, PRF expansion | **30.6%** | **32.7%** | **30.3%** | **26.3%** | **27.3%** | stratified 180 |
+
+Every category improved, temporal the most (+14.2 points) -- the direct
+effect of resolving relative dates ("last week") into exact ranges at write
+time instead of leaving that arithmetic to the reading model (an LLM given
+raw dates alone gets it right only 13.5-16% of the time, per the
+[Test-of-Time](https://arxiv.org/abs/2406.09170) benchmark).
+
+<Note>
+  The two runs use different sample sizes (full 1540 vs. a 180-question
+  stratified sample keeping LoCoMo's real category proportions). Both are
+  real paid measurements on the identical frozen protocol, not a proxy --
+  but a 180-question sample carries wider error bars than 1540. Treat the
+  trajectory's direction and magnitude as solid; treat the exact endpoint as
+  ±7 points until the next full run.
+</Note>
+
+## What it costs
+
+$0.082 total for the 180-question stratified run -- $0.00036 per query,
+$0.0025 per ingested conversation. Full breakdown, including the per-run
+config (frozen dataset checksum, prompts, model prices) that makes this
+number reproducible: [`eval/results/`](https://github.com/GetHaki/Haki/tree/main/eval)
+(gitignored in the repo -- generated locally when you run the harness).
+
+<Note>
+  The calibration protocol pins the context budget at 900 tokens for
+  comparability with published Mem0/Zep numbers -- not the product's own
+  2000-token default (raised in `v0.2.0` based on accuracy-vs-budget curves
+  that don't apply to this frozen protocol). The number above is Haki
+  measured under a stricter budget than it actually ships with.
+</Note>
+
+## What's still broken
+
+Declared as tracked, labeled issues -- not hidden, not silently fixed
+between releases:
+
+<CardGroup cols={2}>
+  <Card title="Temporal accuracy trails single-hop" icon="clock" href="https://github.com/GetHaki/Haki/issues/1">
+    26.3% vs. 32.7% -- temporal grounding closed part of the gap, not all of it.
+  </Card>
+  <Card title="Gap to published Mem0/Zep numbers" icon="chart-line" href="https://github.com/GetHaki/Haki/issues/2">
+    What we know and don't yet know about the remaining ~35 points.
+  </Card>
+  <Card title="Count and open-domain: sample too small" icon="calculator" href="https://github.com/GetHaki/Haki/issues/3">
+    n=3 and n=11 -- not enough to trust on their own yet.
+  </Card>
+  <Card title="Reranker latency, not yet isolated" icon="gauge" href="https://github.com/GetHaki/Haki/issues/4">
+    +33.4 points measured, but opt-in because the exact latency cost isn't quantified in isolation.
+  </Card>
+</CardGroup>
+
+See the full list, and comment if you've hit something not listed:
+[`known-limitation` issues](https://github.com/GetHaki/Haki/issues?q=is%3Aissue+is%3Aopen+label%3Aknown-limitation).
+
+## Methodology
+
+- **Dataset**: [LoCoMo](https://arxiv.org/abs/2402.17753), pinned by SHA-256
+  checksum -- the same 1540-question set every run draws from, never a
+  moving target.
+- **Protocol**: `mem0_calibration` in `eval/configs/` -- reproduces Mem0's
+  exact question-then-context ordering and judge prompt, so the resulting
+  number is comparable to what Mem0 and Zep publish under their own
+  conditions, not just internally consistent.
+- **Models**: `gpt-4o-mini` for both the answering model and the judge,
+  temperature 0.
+- **What's measured beyond accuracy**: abstention rate, contradiction
+  leakage, context tokens per packet, p50/p95 latency, cost per query and
+  per ingestion -- metrics the field rarely publishes alongside a headline
+  number.
+- **Run it yourself**: exact commands in
+  [`eval/README.md`](https://github.com/GetHaki/Haki/blob/main/eval/README.md).
+  No account needed -- it runs against your own self-hosted instance.
+
+*Report generated 2026-08-17. Next revision alongside the next full-scale run.*

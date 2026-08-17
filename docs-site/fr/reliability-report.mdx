@@ -1,0 +1,119 @@
+---
+title: "Rapport de fiabilité"
+description: "À quel point Haki récupère réellement le bon souvenir, mesuré sur un protocole figé et reproductible -- pas un chiffre choisi."
+---
+
+<Info>
+  Chaque chiffre de cette page provient d'un vrai run payant contre le
+  harnais exact dans [`eval/`](https://github.com/GetHaki/Haki/tree/main/eval)
+  -- jamais un proxy, jamais trié sur le volet. Reproductible par vous-même :
+  voir [`eval/README.md`](https://github.com/GetHaki/Haki/blob/main/eval/README.md).
+</Info>
+
+## Où on en est aujourd'hui
+
+**30,6 %** de précision de réponse sur un échantillon stratifié de 180
+questions [LoCoMo](https://arxiv.org/abs/2402.17753), mesuré le 17/08/2026
+sous un protocole figé pour rester comparable aux chiffres publiés de
+Mem0/Zep (mêmes prompts de question, de contexte et de jugement ;
+`gpt-4o-mini` pour la lecture comme pour le jugement, température 0).
+
+Ce n'est pas un chiffre qu'on met en avant comme argument concurrentiel.
+Les résultats académiques publiés placent les systèmes de mémoire non-graphe
+crédibles dans la fourchette 65-70 % sur LoCoMo -- le papier de Mem0
+lui-même rapporte 66,9 %
+([arXiv:2504.19413](https://arxiv.org/abs/2504.19413)). On n'y est pas
+encore, et cette page le dit clairement plutôt que de choisir une métrique
+plus flatteuse.
+
+Ce qu'on a réellement, c'est une trajectoire mesurée sur ce même protocole
+figé, et un harnais assez honnête pour montrer ses propres points faibles.
+
+## La trajectoire
+
+| Date | Ce qui a changé | Global | Single-hop | Multi-hop | Temporal | Open-domain | Échantillon |
+|---|---|---|---|---|---|---|---|
+| 14/08/2026 | Protocole de calibration adopté, aucun mécanisme de retrieval encore | 17,1 % | 19,0 % | 18,8 % | 12,1 % | 11,5 % | 1540 complet |
+| 17/08/2026 | + reranker cross-encoder, ancrage temporel, expansion PRF | **30,6 %** | **32,7 %** | **30,3 %** | **26,3 %** | **27,3 %** | 180 stratifié |
+
+Toutes les catégories ont progressé, le temporal le plus (+14,2 points) --
+l'effet direct de la résolution des dates relatives ("la semaine dernière")
+en plages exactes dès l'écriture, plutôt que de laisser ce calcul au modèle
+de lecture (un LLM livré à lui-même sur des dates brutes ne réussit ce
+calcul que 13,5-16 % du temps, benchmark
+[Test-of-Time](https://arxiv.org/abs/2406.09170)).
+
+<Note>
+  Les deux runs utilisent des tailles d'échantillon différentes (1540
+  complet vs. un échantillon stratifié de 180 questions respectant les
+  vraies proportions de catégories LoCoMo). Les deux sont de vraies mesures
+  payantes sur le protocole figé identique, pas un proxy -- mais un
+  échantillon de 180 questions porte une marge d'erreur plus large que
+  1540. Considérez la direction et l'ampleur de la trajectoire comme
+  solides ; considérez le point d'arrivée exact comme ±7 points jusqu'au
+  prochain run complet.
+</Note>
+
+## Ce que ça coûte
+
+0,082 $ au total pour le run stratifié de 180 questions -- 0,00036 $ par
+requête, 0,0025 $ par conversation ingérée. Détail complet, config du run
+incluse (checksum du dataset figé, prompts, prix des modèles) qui rend ce
+chiffre reproductible :
+[`eval/results/`](https://github.com/GetHaki/Haki/tree/main/eval)
+(gitignored dans le dépôt -- généré localement quand vous lancez le
+harnais).
+
+<Note>
+  Le protocole de calibration fige le budget de contexte à 900 tokens pour
+  rester comparable aux chiffres publiés Mem0/Zep -- pas le défaut produit
+  réel de 2000 tokens (relevé dans `v0.2.0` sur la base de courbes
+  précision/budget qui ne s'appliquent pas à ce protocole figé). Le chiffre
+  ci-dessus est Haki mesuré sous un budget plus strict que ce qu'il livre
+  réellement.
+</Note>
+
+## Ce qui est encore cassé
+
+Déclaré comme issues suivies et étiquetées -- pas caché, pas corrigé
+silencieusement entre deux versions :
+
+<CardGroup cols={2}>
+  <Card title="Accuracy temporal en retrait" icon="clock" href="https://github.com/GetHaki/Haki/issues/1">
+    26,3 % vs. 32,7 % -- l'ancrage temporel a comblé une partie de l'écart, pas tout.
+  </Card>
+  <Card title="Écart aux chiffres publiés Mem0/Zep" icon="chart-line" href="https://github.com/GetHaki/Haki/issues/2">
+    Ce qu'on sait et ce qu'on ne sait pas encore sur les ~35 points restants.
+  </Card>
+  <Card title="Count et open-domain : échantillon trop petit" icon="calculator" href="https://github.com/GetHaki/Haki/issues/3">
+    n=3 et n=11 -- pas encore assez pour en tirer une conclusion seule.
+  </Card>
+  <Card title="Latence du reranker, pas encore isolée" icon="gauge" href="https://github.com/GetHaki/Haki/issues/4">
+    +33,4 points mesurés, mais opt-in car le coût de latence exact n'est pas quantifié isolément.
+  </Card>
+</CardGroup>
+
+Liste complète, et commentez si vous êtes tombé sur quelque chose de non
+listé :
+[issues `known-limitation`](https://github.com/GetHaki/Haki/issues?q=is%3Aissue+is%3Aopen+label%3Aknown-limitation).
+
+## Méthodologie
+
+- **Dataset** : [LoCoMo](https://arxiv.org/abs/2402.17753), figé par
+  checksum SHA-256 -- le même jeu de 1540 questions à chaque run, jamais
+  une cible mouvante.
+- **Protocole** : `mem0_calibration` dans `eval/configs/` -- reproduit
+  l'ordre exact question-puis-contexte de Mem0 et son prompt de jugement,
+  pour que le chiffre obtenu soit comparable à ce que Mem0 et Zep publient
+  dans leurs propres conditions, pas juste cohérent en interne.
+- **Modèles** : `gpt-4o-mini` pour le modèle de réponse comme pour le juge,
+  température 0.
+- **Ce qui est mesuré au-delà de l'accuracy** : taux d'abstention, fuite de
+  contradiction, tokens de contexte par paquet, latence p50/p95, coût par
+  requête et par ingestion -- des métriques que le secteur publie rarement
+  à côté d'un chiffre vitrine.
+- **Reproduisez-le vous-même** : commandes exactes dans
+  [`eval/README.md`](https://github.com/GetHaki/Haki/blob/main/eval/README.md).
+  Aucun compte requis -- ça tourne contre votre propre instance auto-hébergée.
+
+*Rapport généré le 17/08/2026. Prochaine révision au prochain run complet.*

@@ -34,7 +34,7 @@
             "groups": [
               {
                 "group": "Bienvenue",
-                "pages": ["fr/index", "fr/quickstart", "fr/changelog"]
+                "pages": ["fr/index", "fr/quickstart", "fr/reliability-report", "fr/changelog"]
               },
               {
                 "group": "Concepts",
@@ -104,7 +104,7 @@
             "groups": [
               {
                 "group": "Welcome",
-                "pages": ["en/index", "en/quickstart", "en/changelog"]
+                "pages": ["en/index", "en/quickstart", "en/reliability-report", "en/changelog"]
               },
               {
                 "group": "Concepts",

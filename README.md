@@ -624,7 +624,8 @@ proves it, are documented in
 | OpenAI-compatible gateway (automatic memory via `base_url`) | done |
 | TypeScript SDK | done |
 | Public LoCoMo and LongMemEval benchmark harness (reproducible, run it yourself) | done |
-| Haki's own published accuracy numbers on that harness | in progress |
+| Haki's own accuracy numbers on that harness (calibrated, reproducible) | done |
+| Public Reliability Report page (trajectory, methodology, what's still broken) | planned |
 | CLI device-code authentication (`haki login`) | done |
 | Multi-channel identity resolution (`/v1/subjects/resolve`, `/merge`) | done |
 | Cross-encoder reranking, temporal grounding, entity/PRF expansion | done |

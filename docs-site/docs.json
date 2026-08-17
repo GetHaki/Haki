@@ -34,7 +34,7 @@
             "groups": [
               {
                 "group": "Bienvenue",
-                "pages": ["fr/index", "fr/quickstart"]
+                "pages": ["fr/index", "fr/quickstart", "fr/changelog"]
               },
               {
                 "group": "Concepts",
@@ -53,7 +53,7 @@
               },
               {
                 "group": "Integrations",
-                "pages": ["fr/integrations/cursor"]
+                "pages": ["fr/integrations/cursor", "fr/integrations/n8n"]
               },
               {
                 "group": "Exploitation",
@@ -104,7 +104,7 @@
             "groups": [
               {
                 "group": "Welcome",
-                "pages": ["en/index", "en/quickstart"]
+                "pages": ["en/index", "en/quickstart", "en/changelog"]
               },
               {
                 "group": "Concepts",
@@ -123,7 +123,7 @@
               },
               {
                 "group": "Integrations",
-                "pages": ["en/integrations/cursor"]
+                "pages": ["en/integrations/cursor", "en/integrations/n8n"]
               },
               {
                 "group": "Operations",

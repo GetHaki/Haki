@@ -1,0 +1,114 @@
+---
+title: "n8n — Community Node"
+description: "Two nodes (Haki Context, Haki Capture) for persistent agent memory in n8n workflows — integrations/n8n/n8n-nodes-haki/"
+---
+
+`n8n-nodes-haki` gives any n8n AI Agent workflow durable, cross-session
+memory on your own Postgres — no vendor lock-in, no per-call memory tax.
+Two nodes, placed around your existing AI Agent node: one reads memory
+in, one writes the turn back out.
+
+<Info>
+  Runs against any Haki instance you already host (`docker compose up`).
+  No Haki account required — self-hosted end to end.
+</Info>
+
+## Install
+
+```bash
+# n8n → Settings → Community Nodes → Install
+n8n-nodes-haki
+```
+
+Or from the CLI, inside your n8n data directory:
+
+```bash
+npm install n8n-nodes-haki
+```
+
+## Credential — Haki API
+
+One credential, shared by both nodes:
+
+<ResponseField name="Base URL" type="string" required>
+  The Haki API URL, no trailing slash. From an n8n Docker container to a
+  Haki API on the host machine, use
+  `http://host.docker.internal:8100` instead of `localhost`.
+</ResponseField>
+<ResponseField name="API Key" type="string">
+  Haki bearer key. Optional in local development (the API runs in open
+  mode), required as soon as `HAKI_ADMIN_KEY` or a project key is
+  configured server-side.
+</ResponseField>
+
+## Haki Context — place before your AI Agent
+
+Fetches the subject's memory as a ready-to-inject block, before the LLM
+call.
+
+<ResponseField name="Project ID" type="string" required>
+  Haki project (memory scope). Never chosen by the model.
+</ResponseField>
+<ResponseField name="Subject ID" type="string" required>
+  Stable identifier for the person (sessionId, email, webhook ID...).
+  Empty or `"default"` is rejected.
+</ResponseField>
+<ResponseField name="Query" type="string" required>
+  The current message — used to rerank relevant facts.
+</ResponseField>
+<ResponseField name="Budget Tokens" type="number" default="2000">
+  Token budget for the returned context packet.
+</ResponseField>
+<ResponseField name="Purpose" type="string">
+  Optional task type (`support`, `onboarding`...), recorded in the trace.
+</ResponseField>
+
+Outputs `context_text` (drop straight into your AI Agent's system
+message), the raw `packet`, `warnings`, `token_count` and `trace_id`.
+
+## Haki Capture — place after your AI Agent
+
+Records the user/assistant turn once the reply exists.
+
+<ResponseField name="Project ID" type="string" required>
+  Must match the Haki Context node.
+</ResponseField>
+<ResponseField name="Subject ID" type="string" required>
+  Reuse the one from the Haki Context node.
+</ResponseField>
+<ResponseField name="User Message" type="string" required />
+<ResponseField name="Assistant Message" type="string" required />
+<ResponseField name="Thread ID / Run ID" type="string">
+  Optional — either anchors an idempotency key derived from the run/
+  thread plus a content hash, so re-running the same n8n execution never
+  duplicates the captured turn.
+</ResponseField>
+<ResponseField name="Wait Consolidation" type="boolean" default="false">
+  When on, also calls `/v1/consolidate` so the memory is recallable
+  immediately — useful in dev/demo, not needed in steady-state production
+  (consolidation runs on its own cadence).
+</ResponseField>
+<ResponseField name="Origin Trust" type="options" default="trusted">
+  `trusted` (direct message from the subject), `semi_trusted` (agent/tool
+  output), `third_party` (someone else in the conversation) or
+  `untrusted` (ingested content). In a group where the sender is not the
+  tracked subject, choose `third_party` — the fact is attributed to that
+  third party, never silently merged into the subject's own memory.
+</ResponseField>
+
+## A minimal wiring
+
+```
+Webhook → Haki Context → AI Agent → Haki Capture → Respond to Webhook
+```
+
+`Haki Context` runs first and hands `context_text` to the AI Agent's
+system message; `Haki Capture` runs after the agent replies, so the next
+turn — even in a brand new execution — starts with everything the agent
+already learned.
+
+<Card title="Ready-made workflows" icon="diagram-project" href="https://github.com/GetHaki/Haki/tree/main/integrations/n8n">
+  A persistent support-agent template and an end-to-end test workflow
+  ship in the repository's `integrations/n8n/` directory — import either
+  one directly into n8n to see the wiring above running for real.
+</Card>

@@ -1,0 +1,119 @@
+---
+title: "n8n — Nœud communautaire"
+description: "Deux nœuds (Haki Context, Haki Capture) pour une mémoire d'agent persistante dans vos workflows n8n — integrations/n8n/n8n-nodes-haki/"
+---
+
+`n8n-nodes-haki` donne à n'importe quel workflow AI Agent n8n une mémoire
+durable, inter-sessions, sur votre propre Postgres — sans dépendance à
+un fournisseur, sans taxe mémoire par appel. Deux nœuds, placés autour de
+votre nœud AI Agent existant : l'un lit la mémoire, l'autre réécrit le
+tour de conversation.
+
+<Info>
+  Fonctionne contre n'importe quelle instance Haki que vous hébergez déjà
+  (`docker compose up`). Aucun compte Haki requis — auto-hébergé de bout
+  en bout.
+</Info>
+
+## Installation
+
+```bash
+# n8n → Settings → Community Nodes → Install
+n8n-nodes-haki
+```
+
+Ou en ligne de commande, dans le répertoire de données n8n :
+
+```bash
+npm install n8n-nodes-haki
+```
+
+## Credential — Haki API
+
+Un seul credential, partagé par les deux nœuds :
+
+<ResponseField name="Base URL" type="string" required>
+  L'URL de l'API Haki, sans slash final. D'un conteneur Docker n8n vers
+  une API Haki sur la machine hôte, utilisez
+  `http://host.docker.internal:8100` plutôt que `localhost`.
+</ResponseField>
+<ResponseField name="API Key" type="string">
+  Clé bearer Haki. Optionnelle en développement local (l'API tourne en
+  mode ouvert), requise dès que `HAKI_ADMIN_KEY` ou une clé de projet est
+  configurée côté serveur.
+</ResponseField>
+
+## Haki Context — à placer avant votre AI Agent
+
+Récupère la mémoire du sujet sous forme de bloc prêt à injecter, avant
+l'appel au LLM.
+
+<ResponseField name="Project ID" type="string" required>
+  Projet Haki (portée mémoire). Jamais choisi par le modèle.
+</ResponseField>
+<ResponseField name="Subject ID" type="string" required>
+  Identifiant stable de la personne (sessionId, email, ID de webhook...).
+  Vide ou `"default"` est rejeté.
+</ResponseField>
+<ResponseField name="Query" type="string" required>
+  Le message courant — utilisé pour reclasser les faits pertinents.
+</ResponseField>
+<ResponseField name="Budget Tokens" type="number" default="2000">
+  Budget de tokens pour le paquet de contexte retourné.
+</ResponseField>
+<ResponseField name="Purpose" type="string">
+  Optionnel : type de tâche (`support`, `onboarding`...), enregistré dans
+  la trace.
+</ResponseField>
+
+Retourne `context_text` (à injecter directement dans le message système
+de votre AI Agent), le `packet` brut, les `warnings`, `token_count` et
+`trace_id`.
+
+## Haki Capture — à placer après votre AI Agent
+
+Enregistre le tour utilisateur/assistant une fois la réponse produite.
+
+<ResponseField name="Project ID" type="string" required>
+  Doit correspondre au nœud Haki Context.
+</ResponseField>
+<ResponseField name="Subject ID" type="string" required>
+  Réutilisez celui du nœud Haki Context.
+</ResponseField>
+<ResponseField name="User Message" type="string" required />
+<ResponseField name="Assistant Message" type="string" required />
+<ResponseField name="Thread ID / Run ID" type="string">
+  Optionnel — sert d'ancrage à une clé d'idempotence dérivée du run/
+  thread plus un hash de contenu, pour qu'une ré-exécution de la même
+  exécution n8n ne duplique jamais le tour capturé.
+</ResponseField>
+<ResponseField name="Wait Consolidation" type="boolean" default="false">
+  Si activé, appelle aussi `/v1/consolidate` pour que la mémoire soit
+  immédiatement récupérable — utile en dev/démo, pas nécessaire en
+  production stable (la consolidation tourne selon son propre cycle).
+</ResponseField>
+<ResponseField name="Origin Trust" type="options" default="trusted">
+  `trusted` (message direct du sujet), `semi_trusted` (sortie
+  agent/outil), `third_party` (une autre personne dans la conversation)
+  ou `untrusted` (contenu ingéré). Dans un groupe où l'émetteur n'est pas
+  le sujet suivi, choisissez `third_party` — le fait est attribué à ce
+  tiers, jamais fusionné silencieusement dans la mémoire du sujet.
+</ResponseField>
+
+## Un câblage minimal
+
+```
+Webhook → Haki Context → AI Agent → Haki Capture → Respond to Webhook
+```
+
+`Haki Context` s'exécute en premier et transmet `context_text` au
+message système de l'AI Agent ; `Haki Capture` s'exécute après la
+réponse de l'agent, donc le tour suivant — même dans une toute nouvelle
+exécution — démarre avec tout ce que l'agent a déjà appris.
+
+<Card title="Workflows prêts à l'emploi" icon="diagram-project" href="https://github.com/GetHaki/Haki/tree/main/integrations/n8n">
+  Un modèle d'agent de support persistant et un workflow de test de bout
+  en bout sont fournis dans le répertoire `integrations/n8n/` du dépôt —
+  importez-en un directement dans n8n pour voir ce câblage tourner pour
+  de vrai.
+</Card>

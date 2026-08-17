@@ -1,0 +1,86 @@
+---
+title: "Journal des modifications"
+description: "Tous les changements notables de Haki, dans l'ordre. Même source que CHANGELOG.md dans le dépôt."
+---
+
+<Update label="v0.2.0" description="17 août 2026">
+  **Ajouté**
+
+  - **Reranker cross-encoder** (opt-in, `HAKI_RERANK_ENABLED`) : reclasse
+    les meilleurs candidats de recherche pour plus de précision avant de
+    composer le contexte. Effet mesuré sur un vrai test A/B :
+    **+33,4 points de précision** sur les cas ciblés (`eval/`, même
+    protocole avant/après).
+  - **Ancrage temporel** : un fait extrait d'une expression temporelle
+    relative ("la semaine dernière", "il y a trois jours") porte
+    désormais une plage de dates ISO exacte résolue, au lieu de perdre
+    cette information à l'écriture. Chaque date affichée embarque aussi
+    un décalage précalculé et vérifié ("21 jours avant la question") pour
+    que le modèle de lecture n'ait jamais à faire ce calcul lui-même — un
+    LLM livré à lui-même sur des dates brutes ne réussit ce calcul que
+    13,5-16 % du temps (benchmark Test-of-Time).
+  - **Expansion par pseudo-relevance feedback (PRF)** : la recherche
+    considère désormais aussi les noms d'entités qui reviennent parmi les
+    meilleurs candidats, comblant les cas où le bon souvenir ne partage
+    aucun mot-clé exact avec la requête.
+  - Démo animée de `haki verify` dans le Quickstart du README.
+
+  **Modifié**
+
+  - Budget de contexte par défaut relevé de 900 à 2000 tokens, appuyé sur
+    des courbes précision/budget publiées (le gain s'aplatit bien avant
+    4000 tokens sur un modèle de lecture classe `gpt-4o-mini` ; 900
+    laissait de la précision réelle sur la table sans gain de latence).
+  - README réécrit et entièrement traduit en anglais ; roadmap, badge de
+    tests et liens internes corrigés pour correspondre à ce qui est
+    réellement dans ce dépôt.
+
+  **Corrigé**
+
+  - **Sécurité** (revue externe) : comparaison à temps constant pour les
+    vérifications de secret partagé, une limite de débit manquante sur
+    `/v1/context`, une taille de payload non bornée sur la capture, et
+    une politique row-level-security manquante sur `forget_receipts`.
+    Aucune n'était exploitable en pratique au moment où elles ont été
+    trouvées, mais les quatre sont fermées.
+  - **Sécurité** : la limitation de débit était déclarée sur chaque route
+    concernée mais jamais réellement activée dans `app/main.py` de ce
+    dépôt. Branchée.
+  - **Extraction** : une valeur `fact_kind`, `volatility` ou
+    `memory_form` hors énumération émise par le modèle d'extraction —
+    observée sur un vrai run `gpt-4o-mini` — détruisait silencieusement
+    tout le fait candidat au lieu de retomber sur la valeur par défaut
+    déjà documentée du champ. Trouvé le jour même où cela biaisait une
+    vraie mesure.
+  - **Consolidation** : la reclassification automatique "débordement de
+    conflit" signale désormais les faits qu'elle active comme tels, au
+    lieu de les servir comme silencieusement certains.
+  - 6 bugs de robustesse et de correction supplémentaires trouvés par une
+    revue de code interne sur le code de recherche et de consolidation.
+  - Timeout `httpx` relevé de 60s à 180s sur le fournisseur d'extraction,
+    pour les longues conversations dont le prompt dépassait parfois
+    l'ancienne limite.
+  - La section benchmarks publics n'implique plus que des résultats
+    pré-publiés vivent dans ce dépôt — le harnais est réel et
+    reproductible, mais aucun chiffre trié sur le volet n'y est jamais
+    commité ; lancez-le vous-même.
+</Update>
+
+<Update label="v0.1.3" description="14 août 2026">
+  Couverture SDK du mécanisme D (`as_of`, volatilité qui dégrade au lieu
+  d'exclure un fait périmé) et du protocole d'éval calibré.
+</Update>
+
+<Update label="v0.1.2" description="13 août 2026">
+  Couverture SDK du correctif de tie-break temporel et du service des
+  conflits contestés introduits le même jour.
+</Update>
+
+<Update label="v0.1.1" description="10 août 2026">
+  Correctif de suivi peu après la sortie initiale.
+</Update>
+
+<Update label="v0.1.0" description="10 août 2026">
+  Première sortie publique : SDK Python et TypeScript, CLI `haki`,
+  serveur MCP, gateway compatible OpenAI.
+</Update>

@@ -39,7 +39,12 @@ jobs:
           registry-url: "https://registry.npmjs.org"
 
       - name: Install dependencies
-        run: npm install
+        # --ignore-scripts: n8n-workflow (devDependency, types only) pulls in
+        # isolated-vm transitively, whose native addon fails to compile on
+        # this runner's Node/V8 combo (unrelated to this package -- it's
+        # never imported here, only n8n-workflow's TypeScript types are).
+        # Confirmed locally: build and pack are identical with or without it.
+        run: npm ci --ignore-scripts
 
       - name: Build
         run: npm run build

@@ -33,7 +33,7 @@ The **IF "Valid subject?"** node rejects (HTTP 400) any call without a stable `s
 
 **[`n8n-nodes-haki`](https://github.com/GetHaki/n8n-nodes-haki)** (own repository, not part of this monorepo — n8n's Creator Portal verification requires a single-purpose repo structure): visual **Haki Context** / **Haki Capture** nodes + a **Haki API** credential (base URL + optional key). Built-in subject validation (a readable execution error if empty/`default`), `context_text` output ready to inject, idempotency derived from the run/thread, `wait_consolidation` for memory that's recallable immediately.
 
-Installation and details: see the [package README](https://github.com/GetHaki/n8n-nodes-haki#readme). Published on npm; n8n Cloud additionally requires a **verified** node — Creator Portal submission in progress.
+Installation and details: see the [package README](https://github.com/GetHaki/n8n-nodes-haki#readme). Published on npm; n8n Cloud additionally requires a **verified** node — automated review passed, pending manual review (demo video) on the Creator Portal.
 
 ## End-to-end verification
 

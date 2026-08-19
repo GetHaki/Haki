@@ -2,7 +2,7 @@
   "$schema": "https://mintlify.com/docs.json",
   "theme": "maple",
   "name": "Haki",
-  "description": "La memoire fiable pour agents IA — reference technique de l'API, des SDK et des integrations Haki.",
+  "description": "Reliable memory for AI agents — technical reference for the Haki API, SDKs and integrations.",
   "colors": {
     "primary": "#d4a24e",
     "light": "#e0b36a",
@@ -22,80 +22,10 @@
   "logo": {
     "light": "/images/logo-light.png",
     "dark": "/images/logo-dark.png",
-    "href": "/fr/index"
+    "href": "/en/index"
   },
   "navigation": {
     "languages": [
-      {
-        "language": "fr",
-        "tabs": [
-          {
-            "tab": "Documentation",
-            "groups": [
-              {
-                "group": "Bienvenue",
-                "pages": ["fr/index", "fr/quickstart", "fr/reliability-report", "fr/changelog"]
-              },
-              {
-                "group": "Concepts",
-                "pages": [
-                  "fr/concepts/memory-ledger",
-                  "fr/concepts/facts-lifecycle",
-                  "fr/concepts/consolidator",
-                  "fr/concepts/context-assembler",
-                  "fr/concepts/conflicts",
-                  "fr/concepts/forget"
-                ]
-              },
-              {
-                "group": "SDK",
-                "pages": ["fr/sdk/python", "fr/sdk/typescript"]
-              },
-              {
-                "group": "Integrations",
-                "pages": ["fr/integrations/cursor", "fr/integrations/n8n"]
-              },
-              {
-                "group": "Exploitation",
-                "pages": ["fr/security", "fr/deploy", "fr/production-guarantees"]
-              }
-            ]
-          },
-          {
-            "tab": "Reference API",
-            "groups": [
-              {
-                "group": "Demarrer",
-                "pages": ["fr/api-reference/introduction"]
-              },
-              {
-                "group": "Memoire",
-                "pages": [
-                  "fr/api-reference/capture",
-                  "fr/api-reference/context",
-                  "fr/api-reference/memory-read"
-                ]
-              },
-              {
-                "group": "Qualite et correction",
-                "pages": ["fr/api-reference/conflicts", "fr/api-reference/feedback"]
-              },
-              {
-                "group": "Administration",
-                "pages": [
-                  "fr/api-reference/keys",
-                  "fr/api-reference/consolidate",
-                  "fr/api-reference/forget"
-                ]
-              },
-              {
-                "group": "Gateway et sante",
-                "pages": ["fr/api-reference/gateway", "fr/api-reference/health"]
-              }
-            ]
-          }
-        ]
-      },
       {
         "language": "en",
         "tabs": [
@@ -161,6 +91,76 @@
               {
                 "group": "Gateway and health",
                 "pages": ["en/api-reference/gateway", "en/api-reference/health"]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "language": "fr",
+        "tabs": [
+          {
+            "tab": "Documentation",
+            "groups": [
+              {
+                "group": "Bienvenue",
+                "pages": ["fr/index", "fr/quickstart", "fr/reliability-report", "fr/changelog"]
+              },
+              {
+                "group": "Concepts",
+                "pages": [
+                  "fr/concepts/memory-ledger",
+                  "fr/concepts/facts-lifecycle",
+                  "fr/concepts/consolidator",
+                  "fr/concepts/context-assembler",
+                  "fr/concepts/conflicts",
+                  "fr/concepts/forget"
+                ]
+              },
+              {
+                "group": "SDK",
+                "pages": ["fr/sdk/python", "fr/sdk/typescript"]
+              },
+              {
+                "group": "Integrations",
+                "pages": ["fr/integrations/cursor", "fr/integrations/n8n"]
+              },
+              {
+                "group": "Exploitation",
+                "pages": ["fr/security", "fr/deploy", "fr/production-guarantees"]
+              }
+            ]
+          },
+          {
+            "tab": "Reference API",
+            "groups": [
+              {
+                "group": "Demarrer",
+                "pages": ["fr/api-reference/introduction"]
+              },
+              {
+                "group": "Memoire",
+                "pages": [
+                  "fr/api-reference/capture",
+                  "fr/api-reference/context",
+                  "fr/api-reference/memory-read"
+                ]
+              },
+              {
+                "group": "Qualite et correction",
+                "pages": ["fr/api-reference/conflicts", "fr/api-reference/feedback"]
+              },
+              {
+                "group": "Administration",
+                "pages": [
+                  "fr/api-reference/keys",
+                  "fr/api-reference/consolidate",
+                  "fr/api-reference/forget"
+                ]
+              },
+              {
+                "group": "Gateway et sante",
+                "pages": ["fr/api-reference/gateway", "fr/api-reference/health"]
               }
             ]
           }

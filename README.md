@@ -32,12 +32,12 @@ Today, an AI agent remembers nothing beyond a single conversation: every new
 session starts from scratch, re-explains context, and can apply a preference
 that went stale months ago with no way to tell.
 
-Haki is a persistent memory layer, independent of whatever model or framework
-you use: it extracts structured facts from an agent's exchanges, keeps them
-current over time, and hands every new request a relevant, dated, sourced
-context packet. It stays entirely under your control — one `docker compose
-up` installs it, and your existing agent, model, and infrastructure don't
-change.
+Haki is an open-source (Apache-2.0), persistent memory layer, independent of
+whatever model or framework you use: it extracts structured facts from an
+agent's exchanges, keeps them current over time, and hands every new request
+a relevant, dated, sourced context packet. It stays entirely under your
+control — one `docker compose up` installs it, and your existing agent,
+model, and infrastructure don't change.
 
 ---
 

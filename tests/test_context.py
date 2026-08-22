@@ -4,7 +4,7 @@ token budget, scope isolation, trace inspection with reason codes.
 """
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.config import settings
 from app.consolidator import _search_text
@@ -37,6 +37,43 @@ def recall_floor(monkeypatch):
     """
     monkeypatch.setattr(settings, "recall_max_distance", 0.5)
     return settings
+
+
+async def test_fulltext_axis_survives_a_stopword_heavy_natural_question(client):
+    """Found via external code audit (20 Aug): websearch_to_tsquery ANDs
+    every term of the query together, and the 'simple' ts config has no
+    stopword list -- so a natural question like "What is the name of the
+    dog?" used to become a query requiring "what" AND "is" AND "the" AND
+    "of" to literally appear in the indexed text. `search_text`
+    (`_search_text`, "predicate value") never contains those words, so the
+    0.25-weighted full-text axis fired on almost nothing in practice.
+    'english' drops recognized stopwords before ANDing, fixing it -- proven
+    here directly against Postgres, both configs, no fixtures needed."""
+    question = "What is the name of the dog?"
+    indexed_text = _search_text("dog_name", {"name": "Rex"})
+
+    async with async_session() as session:
+        matches_simple = (
+            await session.execute(
+                select(
+                    func.to_tsvector("simple", indexed_text).op("@@")(
+                        func.websearch_to_tsquery("simple", question)
+                    )
+                )
+            )
+        ).scalar_one()
+        matches_english = (
+            await session.execute(
+                select(
+                    func.to_tsvector("english", indexed_text).op("@@")(
+                        func.websearch_to_tsquery("english", question)
+                    )
+                )
+            )
+        ).scalar_one()
+
+    assert matches_simple is False
+    assert matches_english is True
 
 
 async def test_budget_packs_best_scored_facts_and_traces_over_budget(client):
@@ -207,8 +244,14 @@ async def test_unified_pool_lets_a_highly_relevant_episode_outrank_low_relevance
     # regardless of the episode -- budget alone forces some out.
     assert len(packet["facts"]) < 6
     # The episode wins a slot on merit (top score), not on a reserved share.
-    assert len(packet["episodes"]) == 1
-    assert "Lisbon" in packet["episodes"][0]["excerpt"]
+    # Since 21 Aug the served unit is a chunk, and the context window may
+    # legitimately add its neighbour, so what is asserted is the merit
+    # inclusion itself: a scored (non-neighbour) episode carrying the
+    # matching text.
+    scored = [e for e in packet["episodes"] if not e["context_neighbor"]]
+    assert any("Lisbon" in episode["excerpt"] for episode in scored), (
+        "the episode matching the query did not win a slot against the facts"
+    )
 
 
 async def test_entity_boost_prefers_the_named_person_over_a_same_scored_rival(client):

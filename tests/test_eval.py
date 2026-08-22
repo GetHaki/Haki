@@ -166,10 +166,29 @@ def test_locomo_parsing(locomo_file):
 # --------------------------------------------------------------------------
 
 def test_select_subset_deterministic(longmemeval_file):
+    """Same config in, same questions out -- in every process.
+
+    The ids are no longer the first two in dataset order: since 21 Aug
+    the sample is stratified by question type, so which two come back
+    depends on the corpus's type mix rather than on file order (see
+    tests/test_eval_sampling.py for the properties, and eval.datasets.select
+    for why first-N was a bug). What this test guards is unchanged:
+    repeating the call must repeat the sample exactly.
+    """
     questions = datasets.load_longmemeval(longmemeval_file)
     first = datasets.select(questions, subset=2)
     second = datasets.select(questions, subset=2)
-    assert [q.qid for q in first] == ["ku_1", "tr_1"] == [q.qid for q in second]
+    assert [q.qid for q in first] == [q.qid for q in second]
+    assert len(first) == 2
+
+
+def test_select_can_reproduce_the_pre_stratification_behaviour(longmemeval_file):
+    """`--no-stratify` exists to re-run an old number on purpose, and
+    nothing else. If this ever stops returning dataset order, a
+    pre-21-Aug result can no longer be reproduced at all."""
+    questions = datasets.load_longmemeval(longmemeval_file)
+    selected = datasets.select(questions, subset=2, stratify=False)
+    assert [q.qid for q in selected] == ["ku_1", "tr_1"]
 
 
 def test_select_types_filter_then_subset(longmemeval_file):

@@ -84,7 +84,7 @@ async def test_context_serves_dated_episode(client):
     )
     decisions = inspect.json()["decisions"]
     assert any(
-        d.get("episode_id") == episode["event_id"] and d["action"] == "included"
+        d.get("episode_id") == episode["episode_id"] and d["action"] == "included"
         for d in decisions
     )
 
@@ -114,6 +114,60 @@ async def test_episodes_respect_token_budget(client):
         d.get("episode_id") and d["reason_code"] == "over_budget"
         for d in inspect.json()["decisions"]
     )
+
+
+async def test_episode_budget_ceiling_limits_how_many_episodes_get_packed(client):
+    """Found 19 Aug 2026 via real measurement, not hypothesis: raising
+    budget_tokens 900->4000 on the same LoCoMo subset REGRESSED accuracy
+    31.4%->16.4%, because a wider budget let several large raw episodes
+    into the packet, crowding out precise facts that fit comfortably in a
+    tight budget. EPISODE_MAX_BUDGET_SHARE caps episodes' total share of
+    the budget once more than one qualifies -- the single best-ranked
+    episode is still always served on its own merits (see the token-budget
+    and context-window tests above), only a second/third/... piling on
+    top of it is capped.
+
+    Four episodes here individually cost far less than budget_tokens (so
+    the OLD total-budget-only check would have let all of them in) but
+    together exceed the 50% ceiling -- proving the ceiling is what stops
+    them, not the ordinary budget check.
+    """
+    subject = "usr_epicap"
+    # ~500 tokens once rendered (timestamp + kind + JSON-wrapped payload).
+    long_text = "roadmap " * 250
+    await _capture(
+        client,
+        [
+            _dated_event(subject, long_text, "2023-01-01T10:00:00Z"),
+            _dated_event(subject, long_text, "2023-02-01T10:00:00Z"),
+            _dated_event(subject, long_text, "2023-03-01T10:00:00Z"),
+            _dated_event(subject, long_text, "2023-04-01T10:00:00Z"),
+        ],
+    )
+    await _run_worker()
+
+    response = await client.post(
+        "/v1/context",
+        json={
+            "project_id": PROJECT,
+            "subject_id": subject,
+            "query": "roadmap",
+            "budget_tokens": 2000,  # ~4x one episode's cost; 50% ceiling = ~2x
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    episodes = body["packet"]["episodes"]
+    # All 4 fit individually under the plain 2000-token budget; the
+    # ceiling (~1000 tokens for episodes) must still stop it well short of 4.
+    assert 0 < len(episodes) < 4
+
+    inspect = await client.get(
+        f"/v1/inspect/{body['trace_id']}",
+        params={"project_id": PROJECT, "subject_id": subject},
+    )
+    decisions = inspect.json()["decisions"]
+    assert any(d["reason_code"] == "over_episode_budget" for d in decisions)
 
 
 async def test_episodes_are_scope_isolated(client):

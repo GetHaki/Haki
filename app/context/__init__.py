@@ -6,7 +6,7 @@ token budget, with a persisted decision trace.
 Hard filters BEFORE scoring: status = active, exact (project_id, subject_id)
 scope, valid_to IS NULL OR valid_to > now().
 
-Open conflicts (13 aout, "stop hiding real conflicts"): a genuine two-sided
+Open conflicts (13 Aug, "stop hiding real conflicts"): a genuine two-sided
 disagreement (an open ConflictSet with 2 members — the cap, see
 CONFLICT_SET_MAX_MEMBERS) is now SERVED, both facts together, each marked
 `contested`/`conflict_id` in the packet, rather than hidden. This relies on
@@ -22,18 +22,24 @@ not-yet-trusted or not-yet-a-real-conflict value: still blocked outright,
 reason_code conflict_open, exactly as before.
 Post-retrieval, a volatility check (M2) degrades a fact past its freshness
 horizon rather than hiding it: a slow fact is served flagged "unconfirmed",
-a volatile/ephemeral fact is served flagged "stale" (14 aout — see
+a volatile/ephemeral fact is served flagged "stale" (14 Aug — see
 `_fact_freshness`; hard exclusion is reserved for superseded/deleted facts
 and untrusted-origin instructions, never for "not recently reconfirmed").
 `as_of` controls what "now" means for every freshness/recency computation
 in one call — defaults to the real wall clock, unchanged for any caller
 that omits it; see `build_context`.
 
-Score = 0.6 * cosine similarity (pgvector embedding)
-      + 0.25 * full-text rank (ts_rank_cd over the GENERATED search_vector
-        column — computed once at write time, not re-parsed per query)
-      + 0.15 * recency (exponential decay, 30-day time constant, on
-        coalesce(valid_from, recorded_from)).
+Ranking (21 Aug, see app.context.ranking): similarity (pgvector cosine)
+and full-text rank (ts_rank_cd over the GENERATED search_vector column)
+are min-max normalized over the query's own candidate pool, then combined
+0.65/0.35. Recency (exponential decay, 30-day time constant, on
+coalesce(valid_from, recorded_from) for facts / occurred_at for episodes)
+is NOT part of that combination -- it is a tie-break only, applied after
+relevance decides the order. HAKI_RANKING=legacy restores the pre-21-Aug
+raw weighted sum (0.6/0.25/0.15, recency included as a relevance term) as
+a rollback path; see app.context.ranking for why that combination
+under-weighted the lexical axis by roughly an order of magnitude in
+practice and let recency dominate the ranking on off-topic queries.
 
 Multi-hop expansion (sprint 10): after the main pass, if budget remains,
 a second full-text-only lookup seeded by entities found in the facts just
@@ -53,11 +59,10 @@ neither in the vector top-K nor in the full-text top-K cannot be served even
 if recency would have lifted it — and facts beyond the cap are not traced.
 
 Budget: tokens estimated as max(1, len(text) // 4). Facts and episodes are
-packed from ONE ranked pool (key merging, 13 aout) — episodes scored on
-the same weighted formula as facts, similarity + recency, minus the
-full-text term facts get and episodes structurally can't yet (see
-EPISODE_W_SIMILARITY/EPISODE_W_RECENCY) — rather than two separately-
-budgeted pools merged by a fixed share (the interim fix shipped 12 aout,
+packed from ONE ranked pool (key merging, 13 Aug) — episodes ranked on
+the exact same similarity/full-text/recency axes as facts, fused by
+app.context.ranking (21 Aug) — rather than two separately-budgeted pools
+merged by a fixed share (the interim fix shipped 12 Aug,
 after the same question set/budget answered from raw episode text instead
 of extracted facts alone scored +46.6 points: a fact is compact and
 durable, but lossy; the source wording it was extracted from is not). The
@@ -80,17 +85,38 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import Float, literal, select
+from sqlalchemy import Float, Text, cast, literal, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import func
 
 from app import metrics
 from app.config import settings
+from app.context.fts import build_query_tsquery
+from app.context.ranking import legacy_weighted_sum, relevance
 from app.errors import ApiError
-from app.models import ConflictSet, ContextTrace, Event, Fact, FactStatus, SubjectAlias
+from app.models import (
+    ConflictSet,
+    ContextTrace,
+    EpisodeChunk,
+    Event,
+    Fact,
+    FactStatus,
+    SubjectAlias,
+)
 from app.providers import Embedder, Reranker, get_embedder, get_reranker
 
-# Scoring weights (documented; not part of the public contract).
+# Ranking mode names for settings.ranking (see app/config.py).
+# "normalized" is the default and the only one that should be chosen on
+# the merits; "legacy" is a rollback path, kept so that a ranking
+# regression in production is one environment variable away from being
+# undone. See app.context.ranking for the measurements and the rationale.
+RANKING_NORMALIZED = "normalized"
+RANKING_LEGACY = "legacy"
+
+# Legacy scoring weights -- used ONLY by RANKING_LEGACY now (documented;
+# never part of the public contract). The live weights live in
+# app.context.ranking, where they apply to NORMALIZED axes and therefore
+# mean what they say.
 W_SIMILARITY = 0.6
 W_FULLTEXT = 0.25
 W_RECENCY = 0.15
@@ -114,7 +140,24 @@ CANDIDATE_LIMIT = 256
 # score. 64 keeps recall comfortable while bounding the phase-2 work.
 RETRIEVAL_TOP_K = 64
 
-# Reranker (mechanism F-R, 15 aout): only the top RERANK_TOP_K candidates
+# Secondary sort keys for phase-1 candidate generation: they decide WHICH
+# rows survive the LIMIT above whenever the primary key ties. Kept next to
+# the K they bound, because the two only make sense together; see the block
+# above the CTEs in build_context for why an id-only tie-break was not
+# enough.
+_FACT_TIEBREAK = (
+    func.coalesce(Fact.valid_from, Fact.recorded_from).desc(),
+    Fact.predicate,
+    cast(Fact.value, Text),
+    Fact.id,
+)
+_EPISODE_TIEBREAK = (
+    EpisodeChunk.occurred_at.desc(),
+    EpisodeChunk.ordinal.desc(),
+    EpisodeChunk.id,
+)
+
+# Reranker (mechanism F-R, 15 Aug): only the top RERANK_TOP_K candidates
 # from the unified pool (by the existing hybrid score, facts and episodes
 # combined) get a cross-encoder pass -- a cross-encoder scores one
 # query-document PAIR per forward call, an order of magnitude slower than
@@ -129,9 +172,10 @@ RERANK_TOP_K = 50
 # M3 recall gate — floor on the SEMANTIC axis only (cosine distance of the
 # candidate to the query), never on the hybrid score: similarity is the only
 # bounded, embedder-calibratable term and carries the dominant weight (0.6);
-# ts_rank_cd is unbounded and the "simple" ts config keeps stopwords, so any
-# shared function word yields a nonzero rank (a lexical escape hatch would
-# let noise through); recency says nothing about relevance. Distinct from
+# ts_rank_cd is unbounded, and even with the 'english' config (migration
+# 0026) a shared content word alone can still yield a nonzero rank on a
+# query where the semantic match is weak (a lexical escape hatch would let
+# noise through); recency says nothing about relevance. Distinct from
 # SEMANTIC_MATCH_MAX_DISTANCE (0.28, fact<->fact paraphrases): query<->fact
 # distances are structurally larger. Calibrated for the LOCAL embedder with
 # scripts/check_recall_floor.py — re-run it before changing this value.
@@ -154,7 +198,7 @@ def estimate_tokens(text: str) -> int:
 EPISODE_TEXT_CHARS = 4000
 # Was 300 (~75 tokens) — a source excerpt that short is barely more than a
 # label, not enough to answer anything requiring the actual wording. Real
-# eval evidence (12-13 aout): the SAME 15-question LongMemEval sample,
+# eval evidence (12-13 Aug): the SAME 15-question LongMemEval sample,
 # SAME 4000-token budget, answered from raw source-session text instead of
 # extracted facts, scored 73.3% against 26.7% for facts alone (+46.6
 # points) — matches the published finding (LongMemEval, ICLR 2025, S5.2)
@@ -166,25 +210,50 @@ EPISODE_TEXT_CHARS = 4000
 # second, tighter, unconditional truncation applied before that check ever
 # runs.
 EPISODE_EXCERPT_CHARS = EPISODE_TEXT_CHARS
-# Top-K source events retrieved per context call (cosine, hnsw).
-EPISODE_TOP_K = 8
+# Episode candidates generated PER AXIS (top-K by vector distance, top-K
+# by full-text rank; the pool is their union, so at most 2 x this).
+#
+# Was 8, when one candidate was one whole event: hydrating eight 4 000-
+# character payloads was already the expensive part of the call. Since 21
+# Aug (migration 0024) a candidate is one turn-sized chunk, so eight of
+# them is a handful of sentences -- far too narrow to rank over, given a
+# single session produces ~20 chunks. Raised to RETRIEVAL_TOP_K so
+# episodes and facts get the same candidate depth. The rows are small:
+# 128 chunks of ~50 characters is less text than the 8 events this
+# replaces.
+EPISODE_TOP_K = RETRIEVAL_TOP_K
 
-# Episode scoring (key merging, 13 aout; full-text axis added by mechanism
-# E1a, 15 aout): facts and episodes are packed from ONE ranked pool, not
+# Episode scoring (key merging, 13 Aug; full-text axis added by mechanism
+# E1a, 15 Aug): facts and episodes are packed from ONE ranked pool, not
 # two separate budgets — the previous fixed EPISODE_MIN_BUDGET_SHARE floor
-# (12 aout) was an honest stopgap, not the real fix; this is the real fix.
-# Episodes now share the EXACT same weighted formula and weights as facts
-# (similarity + full-text + recency, W_SIMILARITY/W_FULLTEXT/W_RECENCY
-# above) — until 15 aout `events` had no search_vector column (facts did,
-# migration 0004), so this axis was left at zero and the other two
-# renormalized to keep the score on a comparable 0-1 scale; migration 0022
-# gives episodes their own search_vector (events.index_text), closing that
-# gap, so the renormalization this comment used to describe no longer
-# applies and episodes and facts are directly comparable on the same
-# formula.
-EPISODE_W_SIMILARITY = W_SIMILARITY
-EPISODE_W_FULLTEXT = W_FULLTEXT
-EPISODE_W_RECENCY = W_RECENCY
+# (12 Aug) was an honest stopgap, not the real fix; this is the real fix.
+# Episodes compute the exact same three axes as facts (similarity,
+# full-text, recency) -- until 15 Aug `events` had no search_vector
+# column (facts did, migration 0004), so the lexical axis was structurally
+# unavailable for episodes; migration 0019 gives episodes their own
+# search_vector (events.index_text), closing that gap. Since 21 Aug the
+# two axes that matter for ranking (similarity, full-text) are combined by
+# app.context.ranking on a pool that mixes facts and episodes together --
+# no per-kind weights needed any more, see the fusion block in
+# build_context.
+
+# Episode budget ceiling (19 Aug 2026): found via real measurement, not
+# hypothesis. Raising budget_tokens 900->4000 on the same 458-question
+# LoCoMo subset REGRESSED accuracy 31.4%->16.4%, not a plateau -- paired
+# per-question diff showed 106 answers correct at the tighter budget
+# became wrong at the wider one (eval/results/locomo_calibration_b4000_*).
+# Root cause: once a larger budget_tokens admits big raw episodes into the
+# unified score-ranked pool below, a single high-scoring episode can
+# consume most of the extra room and displace several small, precise facts
+# that fit comfortably in a tight budget -- worst for exact-value
+# questions, the majority of LoCoMo. This is a CEILING on episodes' share
+# of the budget, not the old EPISODE_MIN_BUDGET_SHARE floor (12 Aug,
+# removed 15 Aug when facts/episodes were unified into one ranked pool):
+# it never reserves space for episodes, it only stops them from crowding
+# out facts once a wider budget lets more of them qualify. 0.5 reuses the
+# exact value that floor used to hold -- a reasonable starting point, not
+# re-derived; revisit once a proper sweep across budgets/shares is run.
+EPISODE_MAX_BUDGET_SHARE = 0.5
 
 
 def episode_text(kind: str, payload: dict | None) -> str:
@@ -199,6 +268,32 @@ def episode_excerpt(kind: str, payload: dict | None) -> str:
     text as EPISODE_EXCERPT_CHARS allows; the token-budget packing loop is
     what actually decides how much of it gets served."""
     return episode_text(kind, payload)[:EPISODE_EXCERPT_CHARS]
+
+
+_OVERLAP_TOKEN_RE = re.compile(r"\w{3,}", re.UNICODE)
+
+
+def _overlap_words(text: str) -> set[str]:
+    """Lowercased words of 3+ characters, for cheap textual overlap.
+
+    Deliberately crude: it is only ever used to pick between the chunks of
+    ONE event (see the fact_source_turn selection in build_context), where
+    the candidate set is tiny and any reasonable overlap measure gives the
+    same answer. Nothing about ranking depends on it.
+    """
+    return {match.group(0).lower() for match in _OVERLAP_TOKEN_RE.finditer(text or "")}
+
+
+def episode_row_excerpt(row: Any) -> str:
+    """Verbatim text of one retrieved episode row.
+
+    Since 21 Aug (migration 0024) an episode row is an `episode_chunks`
+    row, so the excerpt is the chunk's own verbatim slice rather than a
+    re-serialisation of the whole parent payload. The cap stays: a single
+    chunk is already bounded by app.context.chunking, and the token budget
+    is what actually decides how much gets served.
+    """
+    return (row.text or "")[:EPISODE_EXCERPT_CHARS]
 
 
 def _render(predicate: str, value: dict[str, Any]) -> str:
@@ -243,7 +338,7 @@ def _candidate_entities(texts: list[str], exclude: set[str], limit: int) -> list
     return [token for token, _ in ranked[:limit]]
 
 
-# Pseudo-relevance feedback (PRF, mechanism "expansion", 15 aout Sprint 2 --
+# Pseudo-relevance feedback (PRF, mechanism "expansion", 15 Aug Sprint 2 --
 # livre de construction, Partie 3.2, pipeline step 3): "noms presents dans
 # >= 2 des 10 premiers passages" -- a name recurring across SEVERAL of the
 # top-ranked candidates is itself a signal the query's real subject hasn't
@@ -272,7 +367,7 @@ def _prf_seed_texts(pool_head: list[tuple[float, str, Any]]) -> list[str]:
         text = (
             _render(row.predicate, row.value)
             if kind == "fact"
-            else episode_excerpt(row.kind, row.payload)
+            else episode_row_excerpt(row)
         )
         seen_in_this_item = {
             t for t in _ENTITY_TOKEN_RE.findall(text) if t.lower() not in _ENTITY_STOPWORDS
@@ -302,7 +397,7 @@ async def _expand_via_entities(
     found: list[Any] = []
     seen: set[uuid.UUID] = set(exclude_ids)
     for entity in entities:
-        entity_query = func.websearch_to_tsquery("simple", entity)
+        entity_query = func.websearch_to_tsquery("english", entity)
         stmt = (
             select(
                 Fact.id,
@@ -325,6 +420,7 @@ async def _expand_via_entities(
                 Fact.subject_id == subject_id,
                 Fact.status == FactStatus.active,
                 (Fact.valid_to.is_(None)) | (Fact.valid_to > now),
+                func.coalesce(Fact.valid_from, Fact.recorded_from) <= now,
                 Fact.search_vector.op("@@")(entity_query),
             )
             .order_by(func.ts_rank_cd(Fact.search_vector, entity_query).desc(), Fact.id)
@@ -338,7 +434,7 @@ async def _expand_via_entities(
     return found
 
 
-# Entity-aware fact scoring (13 aout, LoCoMo diagnostic): a conversation
+# Entity-aware fact scoring (13 Aug, LoCoMo diagnostic): a conversation
 # involving two named people (LoCoMo's structure — the tracked subject and
 # whoever else appears in it) gets ingested under ONE shared subject; the
 # extraction prompt already tags a fact about someone other than the
@@ -361,21 +457,85 @@ async def _expand_via_entities(
 # exclude: a mismatched-person fact can still win if nothing else is
 # remotely relevant, same principle as the recall gate never forcing a
 # hard zero.
-ENTITY_MATCH_BOOST = 1.3
-ENTITY_MISMATCH_PENALTY = 0.3
+#
+# Recalibrated by measurement (22 Aug). Neither magnitude had ever been
+# measured; both were wrong. On eval.retrieval_bench (LoCoMo conversations
+# 1-2, n=231, budget 2000, gold served -- reproducible to the packet since
+# the determinism fix of the same day):
+#
+#     boost 1.3 / penalty 0.3   (as shipped)      86.6 %
+#     boost 1.3 / penalty 1.0                     86.6 %
+#     boost 1.0 / penalty 1.0   (mechanism off)   87.9 %
+#     boost 1.0 / penalty 0.85                    88.3 %
+#     boost 1.0 / penalty 0.7   (this)            88.3 %
+#     boost 1.0 / penalty 0.5                     88.3 %
+#
+# The BOOST is what cost the points: -1.3 on its own, the largest single
+# term in the table. Promoting a fact because it carries the queried name
+# pushes it above candidates that are simply more relevant, and a person's
+# name in a question is a FILTER, not a relevance signal. It is gone --
+# 1.0, a no-op -- rather than merely reduced, because there is no evidence
+# for any promotion at all.
+#
+# The PENALTY earns its 0.4 point and is flat from 0.5 to 0.85, so this is
+# not knife-edge calibration. 0.3 was not a re-ranking at all: on a score
+# bounded in [0, 1] it is a near-exclusion, which is the opposite of what
+# the paragraph above says the mechanism wants.
+ENTITY_MATCH_BOOST = 1.0
+ENTITY_MISMATCH_PENALTY = 0.7
 
 
 def _query_entities(query: str) -> set[str]:
     return {t for t in _ENTITY_TOKEN_RE.findall(query) if t.lower() not in _ENTITY_STOPWORDS}
 
 
+def _content_tiebreak(kind: str, row: Any) -> tuple[float, str]:
+    """What separates two rows that the score and the recency cannot.
+
+    Uniform types across both kinds, because facts and episodes are sorted in
+    ONE pool: a float first, then a string. For an episode the later turn
+    wins (negated ordinal) -- the same preference recency expresses one key
+    earlier, and one that recency cannot express here since every chunk of a
+    session shares its `occurred_at`. A fact has no such order, so its key is
+    purely its content, and content is the point: it does not change when the
+    same corpus is ingested again.
+    """
+    if kind == "episode":
+        return (-float(getattr(row, "ordinal", 0) or 0), str(getattr(row, "text", "")))
+    content = (
+        f"{getattr(row, 'predicate', '')}\x00"
+        f"{json.dumps(getattr(row, 'value', None), sort_keys=True, default=str)}"
+    )
+    return (0.0, content)
+
+
 def _entity_adjusted_score(score: float, value: Any, query_entities: set[str]) -> float:
+    """Demote a fact explicitly about someone the query does not name.
+
+    Matching is TOKEN OVERLAP, not string equality (22 Aug). The previous
+    rule compared a whole tagged name against `query_entities`, a set that
+    only ever holds SINGLE capitalised tokens because that is what
+    `_query_entities` extracts -- so a fact tagged "John Smith" could not
+    match any query, ever, and was demoted as if it were about somebody
+    else. That is precisely the failure this mechanism exists to prevent,
+    inverted.
+
+    A name too short for `_ENTITY_TOKEN_RE` (it needs a capital and two
+    lowercase letters) tokenises to nothing and falls back to equality, so
+    overlap is a strict superset of the old rule: it can add a match, never
+    remove one. Instrumented over the whole retrieval bench the two rules
+    disagreed on ZERO candidate/query pairs -- every LoCoMo speaker name is
+    one token, and a one-token name tokenises to itself -- so the bench
+    could not decide this and did not have to.
+    """
     if not query_entities or not isinstance(value, dict):
         return score
     person = value.get("person")
     if not isinstance(person, str) or not person:
         return score
-    return score * (ENTITY_MATCH_BOOST if person in query_entities else ENTITY_MISMATCH_PENALTY)
+    tokens = set(_ENTITY_TOKEN_RE.findall(person))
+    matched = bool(tokens & query_entities) if tokens else person in query_entities
+    return score * (ENTITY_MATCH_BOOST if matched else ENTITY_MISMATCH_PENALTY)
 
 
 # Volatility (M2): freshness horizon per class, read from config at call
@@ -400,7 +560,7 @@ def _fact_freshness(row: Any, now: datetime) -> str:
     against `now` (real wall-clock time, or the caller's `as_of` — see
     `build_context`).
 
-    14 aout (mecanisme D, research/Diagnostic_Couverture_2026-08-14.md): a
+    14 Aug (mechanism D, research/Diagnostic_Couverture_2026-08-14.md): a
     volatile/ephemeral fact past its horizon used to be excluded outright
     ("expired", hard gate) -- changed to served, flagged "stale", same
     honest-degradation treatment a "slow" fact already got as "unconfirmed".
@@ -427,7 +587,7 @@ def _fact_freshness(row: Any, now: datetime) -> str:
 
 def _relative_to_now(dt: datetime, now: datetime) -> str:
     """Render `dt` as an exact, precomputed offset from `now` (mechanism
-    F1, 15 aout): "N days/weeks before/after the question". Deterministic
+    F1, 15 Aug): "N days/weeks before/after the question". Deterministic
     Python arithmetic, not left for the reader to derive — the point of
     dual-date rendering (Partie 3.6): the reader VERIFIES a number that is
     already in the text instead of calculating one from two ISO dates,
@@ -462,7 +622,7 @@ def _packet_fact(
         "value": row.value,
         "confidence": row.confidence,
         "valid_from": row.valid_from.isoformat() if row.valid_from else None,
-        # Dual-date rendering (mechanism F1, 15 aout): exact offset from the
+        # Dual-date rendering (mechanism F1, 15 Aug): exact offset from the
         # temporal point of view (`as_of`, defaulting to real "now" -- see
         # `now_dt` in build_context), so the reader reads a number instead
         # of computing one. None only when valid_from itself is None.
@@ -475,7 +635,21 @@ def _packet_fact(
         # valid_from (always the MESSAGE's own timestamp). See
         # app.providers.base.ExtractedFact.temporal_range.
         "temporal_range": getattr(row, "temporal_range", None),
-        # Reclassification safety net (found by code review, 16 aout): True
+        # When the fact is ABOUT (21 Aug), as a normalised instant --
+        # distinct from valid_from, which is when it was SAID. A reader
+        # answering "when did X happen?" had to pick it out of free-form
+        # `value` JSON or out of `temporal_range`, in two different shapes;
+        # this is the same information in one, always the same, place.
+        # None for the many facts that are about no particular instant.
+        "observed_at": (
+            row.observed_at.isoformat() if getattr(row, "observed_at", None) else None
+        ),
+        "observed_at_relative": (
+            _relative_to_now(row.observed_at, now)
+            if getattr(row, "observed_at", None) and now
+            else None
+        ),
+        # Reclassification safety net (found by code review, 16 Aug): True
         # when this fact was activated by the automatic overflow
         # reclassification (a 3rd competing "state" value flipping the
         # whole identity to "event") rather than an extractor declaring
@@ -494,7 +668,7 @@ def _packet_fact(
         # and who actually said it when a third party did.
         "origin_trust": row.origin_trust or "trusted",
         "attributed_to": (row.qualifiers or {}).get("attributed_to"),
-        # Open conflicts (13 aout): set together with its sibling(s) from the
+        # Open conflicts (13 Aug): set together with its sibling(s) from the
         # same open ConflictSet when this fact is one half of a genuine
         # two-sided disagreement being served rather than hidden — see
         # CONTESTED_CONFLICT_MIN_MEMBERS. None for an ordinary fact.
@@ -556,7 +730,7 @@ async def build_context(
     appended to the packet warnings BEFORE the trace is persisted, so the
     inspection trace shows exactly what the API returned.
 
-    `as_of` (14 aout, mecanisme D): the point in time "now" means for every
+    `as_of` (14 Aug, mechanism D): the point in time "now" means for every
     freshness computation in this call -- volatility horizons, the
     valid_to scope filter, and the recency term of both scoring formulas.
     Defaults to the real wall clock (`func.now()`), unchanged behavior for
@@ -571,13 +745,13 @@ async def build_context(
     for the measured effect (~38% of facts hidden on every query on the
     LoCoMo/LongMemEval harnesses before this parameter existed).
 
-    `reranker` (mechanism F-R, 15 aout, Sprint 2): only consulted, and only
+    `reranker` (mechanism F-R, 15 Aug, Sprint 2): only consulted, and only
     ever instantiated, when `settings.rerank_enabled` -- omitted here, an
     unset flag means the cross-encoder pass never runs and every candidate
     keeps its hybrid-formula score exactly as before this mechanism
     existed. See RERANK_TOP_K below for what actually gets reranked.
 
-    `budget_tokens` default (2000, was 900, 15 aout Sprint 2): external
+    `budget_tokens` default (2000, was 900, 15 Aug Sprint 2): external
     accuracy-vs-budget curves cited in research/Haki_Livre_Construction_
     2026-08-15.md agree the gain from more served context flattens well
     before 4000 tokens with a gpt-4o-mini-class reader -- ~1500-2500 is
@@ -601,59 +775,102 @@ async def build_context(
     stage_timings: dict[str, int] = {}
 
     embed_start = time.perf_counter()
-    query_embedding = (await embedder.embed([query]))[0]
+    # embed_query, not embed: see app.providers.base.Embedder. getattr
+    # rather than a hard call so an embedder written before this split (a
+    # self-hosted custom provider) keeps working -- for those, symmetric is
+    # both the previous behaviour and the safe assumption.
+    embed_query = getattr(embedder, "embed_query", embedder.embed)
+    query_embedding = (await embed_query([query]))[0]
     stage_timings["embed"] = round((time.perf_counter() - embed_start) * 1000)
 
     # A bound literal (not just a Python datetime) so it can take part in
     # SQL arithmetic (`now - Fact.valid_from`) exactly like func.now() does.
     now = literal(as_of) if as_of is not None else func.now()
     similarity = func.coalesce(1 - Fact.embedding.cosine_distance(query_embedding), 0.0)
-    # websearch_to_tsquery accepts arbitrary user text (plain to_tsquery would
-    # raise on queries without &/| operators). search_vector is a GENERATED
-    # column: the tsvector is built once at write time (migration 0004).
-    ts_query = func.websearch_to_tsquery("simple", query)
+    # Lexical axis (20 Aug, upgraded same day): an OR tsquery built from
+    # the query's own lexemes, in the configuration the search_vector
+    # columns were GENERATED with -- see app.context.fts for the full
+    # rationale and the verified measurements. websearch_to_tsquery joins
+    # terms with AND, which -- combined with even a stemmed/stopword-aware
+    # config -- still requires every remaining content word to be present;
+    # the OR form lets ranking, not a filter, decide relevance. Matching
+    # facts.search_vector / events.search_vector's own to_tsvector config
+    # is still required, or the query and column lexemes stop lining up
+    # and NO match ever fires (app.db.verify_fts_config guards this at
+    # startup).
+    # The debug text (the assembled tsquery, e.g. "'carolin' | 'go'") is
+    # not wired into the context trace yet -- a real but separate piece of
+    # work (a new ContextTrace column + migration). Discarded here rather
+    # than left unused.
+    ts_query, _ts_query_text = await build_query_tsquery(session, query)
     fulltext = func.coalesce(func.ts_rank_cd(Fact.search_vector, ts_query), 0.0)
+    # `greatest(..., 0)` (20 Aug, bug): without it, a fact whose
+    # valid_from is AFTER the point of view (`as_of`, always set by the
+    # eval harness) would make the exponent POSITIVE -- exp() returning
+    # 2.72 at 30 days ahead, 20 at 90 days, instead of a value in [0, 1].
+    # With W_RECENCY = 0.15 that single term would outweigh similarity and
+    # full-text combined and pin future-dated facts at the top of the
+    # ranking. The scope filter below (valid_from <= now) already removes
+    # those facts outright; this clamp is the second line of defence for
+    # rows it does not cover (recorded_from NULL edge cases).
     recency = func.exp(
-        -func.extract(
-            "epoch", now - func.coalesce(Fact.valid_from, Fact.recorded_from)
+        -func.greatest(
+            func.extract(
+                "epoch", now - func.coalesce(Fact.valid_from, Fact.recorded_from)
+            ),
+            0.0,
         )
         / RECENCY_TAU_SECONDS
     )
-    score = (
-        W_SIMILARITY * similarity + W_FULLTEXT * fulltext + W_RECENCY * recency
-    ).cast(Float)
+    # No composite score in SQL any more (21 Aug): the three axes are
+    # returned as they are and combined in Python by app.context.ranking,
+    # so that facts and episodes -- two separate queries -- are ranked
+    # against each other on ONE consistent scale, and so that the
+    # combination is unit-testable without a database.
 
     # Hard filters first: exact scope, active only, still valid.
+    #
+    # The lower bound (valid_from <= now) matters for more than correctness
+    # of the window: without it, a fact whose effective date sits after
+    # `now`/`as_of` doesn't just leak into scope early -- the recency term
+    # above, exp(-(now - valid_from) / TAU), goes POSITIVE for that negative
+    # elapsed time (exponential growth instead of decay), so the fact's
+    # score can run away and crowd out genuinely relevant facts from the
+    # packet. Found via external code audit, confirmed 20 Aug 2026.
     scope_filters = [
         Fact.project_id == project_id,
         Fact.subject_id == subject_id,
         Fact.status == FactStatus.active,
         (Fact.valid_to.is_(None)) | (Fact.valid_to > now),
+        func.coalesce(Fact.valid_from, Fact.recorded_from) <= now,
     ]
 
     # Phase 1 — candidate generation with the indexes (hnsw + GIN). Without
     # this, phase 2 would score every active fact of the scope (~200 ms at
     # 10k facts in the sprint-3 benchmark).
     #
-    # Every ORDER BY below carries `Fact.id` as a secondary key (see the
-    # same reasoning at the phase-2 query): ties on the primary key are a
-    # real, common case here, not a theoretical one -- with no secondary
-    # key, Postgres is free to return a tied group in whatever order its
-    # query plan happens to produce, which can and does shift between
-    # otherwise-identical calls (confirmed: scripts/
+    # Every ORDER BY below carries `_FACT_TIEBREAK` as a secondary key, not
+    # a bare `Fact.id` (22 Aug). A random id was still A key -- ties on the
+    # primary axis never crashed anything -- but it is a random one: two
+    # otherwise-identical calls that both hit a tied group can keep a
+    # DIFFERENT subset of it, because which uuid4 sorts first has nothing to
+    # do with the facts themselves. Ingest the same corpus twice and the two
+    # installs' packets can differ purely from that (confirmed: scripts/
     # check_retrieval_discrimination.py, run twice against the same
     # project/subject/query/budget, returned two DIFFERENT fact sets).
+    # `_FACT_TIEBREAK` breaks ties on recency then content instead, so the
+    # same facts always win the same LIMIT.
     vector_top = (
         select(Fact.id)
         .where(*scope_filters)
-        .order_by(Fact.embedding.cosine_distance(query_embedding), Fact.id)
+        .order_by(Fact.embedding.cosine_distance(query_embedding), *_FACT_TIEBREAK)
         .limit(RETRIEVAL_TOP_K)
         .cte("vector_top")
     )
     fts_top = (
         select(Fact.id)
         .where(*scope_filters, Fact.search_vector.op("@@")(ts_query))
-        .order_by(func.ts_rank_cd(Fact.search_vector, ts_query).desc(), Fact.id)
+        .order_by(func.ts_rank_cd(Fact.search_vector, ts_query).desc(), *_FACT_TIEBREAK)
         .limit(RETRIEVAL_TOP_K)
         .cte("fts_top")
     )
@@ -665,24 +882,20 @@ async def build_context(
     # the sprint-3 benchmark). The cap keeps the work flat no matter how many
     # facts the scope holds.
     #
-    # `Fact.id` as a secondary sort key (13 aout, "Bug 2" diagnostic, 11
-    # aout): a fact's recency score depends only on coalesce(valid_from,
-    # recorded_from) -- facts written in the same consolidation batch
-    # routinely share that value down to the minute. For an off-topic
-    # query (similarity and full-text both exactly 0), recency is the
-    # ENTIRE score, so every fact in such a batch ties EXACTLY, not just
-    # approximately. `score.desc()` alone leaves that tie's order to
-    # Postgres's query plan, which is not guaranteed stable between two
-    # otherwise-identical calls -- confirmed empirically (see
-    # scripts/check_retrieval_discrimination.py): the same project,
-    # subject, query and budget returned two different fact sets on
-    # consecutive runs, purely from tie order, not from any real
-    # relevance signal. This was the ACTUAL mechanism behind the
-    # originally-reported "Bug 2" symptom (five different questions
-    # returning an identical packet) once budget headroom alone was ruled
-    # out on a high-volume subject (see the same script): a low-signal
-    # query hits a wide tie, and without a stable tiebreaker, "which facts
-    # win" is not reproducible even for the SAME query run twice.
+    # `Fact.id` as a secondary sort key (13 Aug, "Bug 2" diagnostic, 11
+    # Aug): facts written in the same consolidation batch routinely share
+    # their recency value down to the minute, so for an off-topic query a
+    # whole batch can tie exactly on every axis. Without a stable secondary
+    # key, Postgres's query plan is free to return a tied group in a
+    # different order between two otherwise-identical calls -- confirmed
+    # empirically (scripts/check_retrieval_discrimination.py): the same
+    # project, subject, query and budget returned two different fact sets
+    # on consecutive runs, purely from tie order. This was the ACTUAL
+    # mechanism behind the originally-reported "Bug 2" symptom (five
+    # different questions returning an identical packet) once budget
+    # headroom alone was ruled out. This ORDER BY is generation-stage only
+    # now (21 Aug) -- the same reasoning applies, more directly, to the
+    # final fusion sort below (`pool.sort`, id as its own last tie-break).
     stmt = (
         select(
             Fact.id,
@@ -699,18 +912,34 @@ async def build_context(
             Fact.qualifiers,
             Fact.temporal_range,
             Fact.reclassified_at,
+            # When the fact is ABOUT, normalised (migration 0026) -- see
+            # _packet_fact for the rendering.
+            Fact.observed_at,
+            # Exact fact-to-turn provenance (migration 0025). Used by the
+            # context window below to serve the turn a fact was actually
+            # extracted from, instead of guessing among the turns of its
+            # source event.
+            Fact.source_chunk_id,
             Fact.embedding.cosine_distance(query_embedding).label("distance"),
-            score.label("score"),
+            similarity.cast(Float).label("similarity"),
+            fulltext.cast(Float).label("fulltext"),
+            recency.cast(Float).label("recency"),
         )
         .where(Fact.id.in_(select(candidates.c.id)))
-        .order_by(score.desc(), Fact.id)
+        # Generation-stage ordering only. `candidates` is the union of two
+        # LIMIT RETRIEVAL_TOP_K CTEs, so it holds at most 2 x
+        # RETRIEVAL_TOP_K ids and CANDIDATE_LIMIT cannot bite; the final
+        # ordering is the fusion below, not this ORDER BY. `Fact.id` keeps
+        # it deterministic anyway -- exact ties on an axis are routine
+        # here (see the tie-break note on the fusion sort below).
+        .order_by(similarity.desc(), Fact.id)
         .limit(CANDIDATE_LIMIT)
     )
     retrieval_start = time.perf_counter()
     rows = (await session.execute(stmt)).all()
     stage_timings["retrieval"] = round((time.perf_counter() - retrieval_start) * 1000)
 
-    # Split open conflicts (13 aout): a genuine 2-member disagreement is
+    # Split open conflicts (13 Aug): a genuine 2-member disagreement is
     # served, contested, sibling alongside sibling; a single-member set (a
     # held/quarantined candidate) stays fully blocked — see
     # CONTESTED_CONFLICT_MIN_MEMBERS and the module docstring.
@@ -760,7 +989,7 @@ async def build_context(
                 }
             )
             continue
-        # 14 aout (mecanisme D): "stale" (volatile/ephemeral past horizon) is
+        # 14 Aug (mechanism D): "stale" (volatile/ephemeral past horizon) is
         # no longer excluded here -- it is served like "unconfirmed" always
         # was, annotated in the packet via freshness_by_id/_packet_fact.
         freshness_by_id[row.id] = _fact_freshness(row, now_dt)
@@ -769,7 +998,7 @@ async def build_context(
     # A held/quarantined candidate is blocked too (it is not active, so it
     # never entered the scored `rows` above at all) — traced regardless of
     # whether it would otherwise have matched this query, same as before
-    # 13 aout. Only single-member sets: a contested pair's candidate side
+    # 13 Aug. Only single-member sets: a contested pair's candidate side
     # is handled separately, packed alongside its active sibling below.
     if quarantined_ids:
         quarantined_candidates = (
@@ -793,60 +1022,109 @@ async def build_context(
                 }
             )
 
-    # Episodic memory (sprint 10, key merging 13 aout): the most relevant
-    # SOURCE EVENTS of the same scope, scored on the SAME weighted formula
-    # as facts — similarity + recency, see EPISODE_W_SIMILARITY/
-    # EPISODE_W_RECENCY — so they compete fairly in ONE ranked pool below,
-    # not two separately-budgeted ones. This is what answers "what
-    # happened / when" questions, and (12-13 aout finding) carries
-    # information a compact fact loses entirely: the extractor keeps
-    # durable facts only, episodes keep the dated events in their own
-    # words.
+    # Episodic memory (sprint 10, key merging 13 Aug): the most relevant
+    # turn-sized SLICES of the same scope, on the SAME three axes as facts
+    # (similarity, full-text, recency), so they compete fairly in ONE
+    # ranked pool below (app.context.ranking, 21 Aug), not two
+    # separately-budgeted ones. This is what answers "what happened /
+    # when" questions, and (12-13 Aug finding) carries information a
+    # compact fact loses entirely: the extractor keeps durable facts only,
+    # episodes keep the dated events in their own words.
+    #
+    # Episodes are read from `episode_chunks`, not from `events` (21 Aug,
+    # migration 0024): one turn-sized slice per row instead of one whole
+    # payload. An event was costing 810 tokens of a 900-token budget to
+    # serve and had 87.6 % of itself outside the embedder's ~128-token
+    # window -- see app.context.chunking for the measurements. `events`
+    # remains the ledger; this table is derived from it and rebuildable at
+    # any time.
     episode_similarity = func.coalesce(
-        1 - Event.embedding.cosine_distance(query_embedding), 0.0
+        1 - EpisodeChunk.embedding.cosine_distance(query_embedding), 0.0
     )
-    # Full-text axis (mechanism E1a, 15 aout): same ts_query already built
-    # for facts above (the same user query — one lexical query, two search_
-    # vector columns), reusing the identical websearch_to_tsquery/ts_rank_cd
-    # pattern migration 0004 established for facts. NULL-safe: an event
-    # ingested before migration 0022, or whose index_text the consolidator
-    # hasn't (re)computed yet, has search_vector NULL and just scores 0 on
-    # this axis, same as a fact with no lexical match today.
-    episode_fulltext = func.coalesce(func.ts_rank_cd(Event.search_vector, ts_query), 0.0)
+    # Full-text axis (mechanism E1a, 15 Aug): the same ts_query already
+    # built for facts above -- one lexical query, several search_vector
+    # columns. NULL-safe: a chunk whose embedding or index_text is missing
+    # scores 0 on the axis rather than dropping out of the pool.
+    episode_fulltext = func.coalesce(
+        func.ts_rank_cd(EpisodeChunk.search_vector, ts_query), 0.0
+    )
+    # Same clamp as the fact recency above (20 Aug): a chunk dated after
+    # the point of view would otherwise score exp(+x). The `occurred_at <=
+    # now` filter below is the primary fix; this keeps the expression
+    # well-defined regardless.
     episode_recency = func.exp(
-        -func.extract("epoch", now - Event.occurred_at) / RECENCY_TAU_SECONDS
+        -func.greatest(func.extract("epoch", now - EpisodeChunk.occurred_at), 0.0)
+        / RECENCY_TAU_SECONDS
     )
-    episode_score = (
-        EPISODE_W_SIMILARITY * episode_similarity
-        + EPISODE_W_FULLTEXT * episode_fulltext
-        + EPISODE_W_RECENCY * episode_recency
-    ).cast(Float)
     episodes_start = time.perf_counter()
+    # Candidate generation mirrors the two-CTE shape facts have had since
+    # sprint 3: top-K by vector distance UNION top-K by full-text rank, on
+    # IDS ONLY. Before 21 Aug episodes were generated by the composite
+    # score itself, so a broken composite silently broke generation too --
+    # an episode only the lexical axis could find never entered the pool,
+    # whatever the ranking did afterwards.
+    episode_scope = (
+        EpisodeChunk.project_id == project_id,
+        EpisodeChunk.subject_id == subject_id,
+        EpisodeChunk.embedding.is_not(None),
+        # Point of view (20 Aug): a chunk of a conversation that happens
+        # after `as_of` has not happened yet as far as this call is
+        # concerned.
+        EpisodeChunk.occurred_at <= now,
+        # Provenance guard (M8): untrusted-origin content is never served
+        # as an episode -- an episode is a VERBATIM excerpt replayed into
+        # the agent's context, i.e. a direct injection channel. Facts
+        # extracted from it already go through the quarantine path; the raw
+        # text must not bypass it. Denormalised onto the chunk so this
+        # filter stays index-friendly.
+        EpisodeChunk.origin_trust != "untrusted",
+    )
+    episode_vector_top = (
+        select(EpisodeChunk.id)
+        .where(*episode_scope)
+        .order_by(
+            EpisodeChunk.embedding.cosine_distance(query_embedding), *_EPISODE_TIEBREAK
+        )
+        .limit(EPISODE_TOP_K)
+        .cte("episode_vector_top")
+    )
+    episode_fts_top = (
+        select(EpisodeChunk.id)
+        .where(*episode_scope, EpisodeChunk.search_vector.op("@@")(ts_query))
+        .order_by(
+            func.ts_rank_cd(EpisodeChunk.search_vector, ts_query).desc(), *_EPISODE_TIEBREAK
+        )
+        .limit(EPISODE_TOP_K)
+        .cte("episode_fts_top")
+    )
+    episode_candidates = (
+        select(episode_vector_top.c.id)
+        .union(select(episode_fts_top.c.id))
+        .cte("episode_candidates")
+    )
     episode_rows = (
         (
             await session.execute(
                 select(
-                    Event.id,
+                    EpisodeChunk.id,
+                    EpisodeChunk.event_id,
+                    EpisodeChunk.ordinal,
+                    EpisodeChunk.occurred_at,
+                    EpisodeChunk.text,
                     Event.kind,
-                    Event.occurred_at,
-                    Event.payload,
-                    Event.embedding.cosine_distance(query_embedding).label("distance"),
-                    episode_score.label("score"),
+                    EpisodeChunk.embedding.cosine_distance(query_embedding).label(
+                        "distance"
+                    ),
+                    episode_similarity.cast(Float).label("similarity"),
+                    episode_fulltext.cast(Float).label("fulltext"),
+                    episode_recency.cast(Float).label("recency"),
                 )
-                .where(
-                    Event.project_id == project_id,
-                    Event.subject_id == subject_id,
-                    Event.embedding.is_not(None),
-                    # Provenance guard (M8): untrusted-origin events are
-                    # never served as episodes — an episode is a VERBATIM
-                    # payload excerpt replayed into the agent's context,
-                    # i.e. a direct injection channel for ingested content.
-                    # Their extracted facts already go through the
-                    # quarantine path; the raw payload must not bypass it.
-                    Event.origin_trust != "untrusted",
-                )
-                .order_by(episode_score.desc(), Event.id)
-                .limit(EPISODE_TOP_K)
+                .join(Event, Event.id == EpisodeChunk.event_id)
+                .where(EpisodeChunk.id.in_(select(episode_candidates.c.id)))
+                # Generation-stage ordering, like the facts query above: the
+                # union of two LIMIT EPISODE_TOP_K CTEs holds at most
+                # 2 x EPISODE_TOP_K ids. The final ordering is the ranking.
+                .order_by(episode_similarity.desc(), EpisodeChunk.id)
             )
         )
         .all()
@@ -854,14 +1132,15 @@ async def build_context(
     stage_timings["episodes"] = round((time.perf_counter() - episodes_start) * 1000)
 
     # Unified ranked pool (key merging): facts and episodes, both filtered
-    # by the SAME recall floor (M3, semantic/distance axis only — never the
-    # composite score, see its module-level comment), merged into one list
-    # by their comparable score, packed greedily against budget_tokens in a
-    # SINGLE pass. A fact and an episode compete on their actual merits now,
-    # not on which separately-budgeted pool they happened to land in.
+    # by the SAME recall floor (M3, semantic/distance axis only -- never
+    # the relevance score, see RECOMMENDED_RECALL_MAX_DISTANCE's comment),
+    # then ranked together (fusion below) and packed greedily against
+    # budget_tokens in a SINGLE pass. A fact and an episode compete on
+    # their actual merits now, not on which separately-budgeted pool they
+    # happened to land in.
     recall_max_distance = settings.recall_max_distance
     query_entities = _query_entities(query)
-    pool: list[tuple[float, str, Any]] = []
+    survivors: list[tuple[str, Any]] = []
     for row in eligible:
         if recall_max_distance > 0 and (
             row.distance is None or row.distance > recall_max_distance
@@ -874,7 +1153,7 @@ async def build_context(
                 }
             )
             continue
-        pool.append((_entity_adjusted_score(row.score, row.value, query_entities), "fact", row))
+        survivors.append(("fact", row))
     for row in episode_rows:
         if recall_max_distance > 0 and (
             row.distance is None or row.distance > recall_max_distance
@@ -887,15 +1166,78 @@ async def build_context(
                 }
             )
             continue
-        pool.append((row.score, "episode", row))
-    pool.sort(key=lambda item: item[0], reverse=True)
+        survivors.append(("episode", row))
 
-    # PRF (mechanism "expansion", 15 aout Sprint 2): computed on the pool
+    # Ordering (21 Aug). Two changes, both measured -- see
+    # app.context.ranking for the numbers and for why RRF, tried first,
+    # was rejected:
+    #
+    #   * the two relevance axes are min-max normalized over THIS query's
+    #     pool before being combined, so a fact's ts_rank_cd (over ~50
+    #     characters of search_text) and an episode's (over up to 4 000)
+    #     become comparable, and the declared weights are the applied ones;
+    #   * recency leaves the relevance score entirely and becomes a
+    #     tie-break. It was never a relevance signal: weighted 0.15 against
+    #     a similarity spread of ~0.1, it pulled the most recent candidates
+    #     to the top whatever the query, and they then ate the budget. As a
+    #     tie-break it still does the one job it was wanted for -- between
+    #     two candidates the query cannot separate, the newer one wins.
+    #
+    # Entity affinity stays a multiplier on the relevance score, unchanged:
+    # the score it multiplies is now bounded in [0, 1], which is the scale
+    # ENTITY_MATCH_BOOST/ENTITY_MISMATCH_PENALTY were calibrated against in
+    # the first place.
+    pool: list[tuple[float, str, Any]] = []
+    tiebreak: dict[int, float] = {}
+    if survivors:
+        similarity_axis = [float(row.similarity or 0.0) for _, row in survivors]
+        fulltext_axis = [float(row.fulltext or 0.0) for _, row in survivors]
+        recency_axis = [float(row.recency or 0.0) for _, row in survivors]
+        if settings.ranking == RANKING_LEGACY:
+            scores = legacy_weighted_sum(
+                similarity_axis,
+                fulltext_axis,
+                recency_axis,
+                (W_SIMILARITY, W_FULLTEXT, W_RECENCY),
+            )
+        else:
+            scores = relevance(similarity_axis, fulltext_axis)
+        scores = [
+            _entity_adjusted_score(score, getattr(row, "value", None), query_entities)
+            for score, (_, row) in zip(scores, survivors)
+        ]
+        pool = [(score, kind, row) for score, (kind, row) in zip(scores, survivors)]
+        tiebreak = {
+            id(row): recency_value
+            for (_, row), recency_value in zip(survivors, recency_axis)
+        }
+    # Sort key, in order: relevance, then recency, then CONTENT, then id
+    # (22 Aug, added the content key). `row.id` alone used to be the last
+    # tie-break -- not decoration, exact ties are routine (a low-signal
+    # query ties a whole consolidation batch) and Postgres gives no stable
+    # order for tied rows between two identical calls, confirmed
+    # empirically in scripts/check_retrieval_discrimination.py -- but a
+    # uuid4 is RANDOM: which of two tied rows keeps the last budget slot
+    # then depended on nothing about the rows themselves, so the same
+    # corpus ingested twice could keep a different subset of a tied group.
+    # `_content_tiebreak` sorts on what the fact/episode actually says
+    # first; `str(item[2].id)` only remains to make the order total when
+    # even the content is identical.
+    pool.sort(
+        key=lambda item: (
+            -item[0],
+            -tiebreak.get(id(item[2]), 0.0),
+            *_content_tiebreak(item[1], item[2]),
+            str(item[2].id),
+        )
+    )
+
+    # PRF (mechanism "expansion", 15 Aug Sprint 2): computed on the pool
     # BEFORE reranking/packing commit to a selection -- see _prf_seed_texts.
     # Consumed below, once the multi-hop expansion pass runs.
     prf_seed_texts = _prf_seed_texts(pool)
 
-    # Reranker (mechanism F-R, 15 aout): re-order only the top RERANK_TOP_K
+    # Reranker (mechanism F-R, 15 Aug): re-order only the top RERANK_TOP_K
     # candidates (already sorted by the hybrid score above) with a
     # cross-encoder pass, then keep that block strictly ahead of the
     # untouched tail. Cross-encoder scores are NOT on the same scale as the
@@ -909,7 +1251,7 @@ async def build_context(
         head_items = pool[:RERANK_TOP_K]
         tail = pool[RERANK_TOP_K:]
         documents = [
-            _render(row.predicate, row.value) if kind == "fact" else episode_text(row.kind, row.payload)
+            _render(row.predicate, row.value) if kind == "fact" else episode_row_excerpt(row)
             for _score, kind, row in head_items
         ]
         rerank_scores = await reranker.rerank(query, documents)
@@ -926,20 +1268,41 @@ async def build_context(
 
     packet_facts: list[dict[str, Any]] = []
     packet_episodes: list[dict[str, Any]] = []
+    # fact_id -> the chunk it was extracted from, when the extractor's
+    # evidence_span could be resolved to one (migration 0025). Kept beside
+    # packet_facts rather than inside it: it is retrieval plumbing for the
+    # context window below, not part of the public packet.
+    source_chunk_by_fact_id: dict[str, uuid.UUID | None] = {}
     packed_fact_ids: set[uuid.UUID] = set()
-    # Context window (mechanism F2, 15 aout): raw (id, occurred_at) of every
+    # Context window (mechanism F2, 15 Aug): raw (id, occurred_at) of every
     # episode packed by score in the loop below, kept here rather than
     # re-parsed from packet_episodes' ISO strings afterwards -- the
     # neighbor pass right after this loop needs the real datetime to query
     # against, not its string rendering.
-    packed_episode_meta: list[tuple[uuid.UUID, datetime]] = []
+    packed_episode_meta: list[tuple[uuid.UUID, datetime, int]] = []
     token_count = 0
+    episode_token_count = 0
+    episode_budget = budget_tokens * EPISODE_MAX_BUDGET_SHARE
+    episodes_packed = 0
     for _score, kind, row in pool:
         if kind == "fact":
             cost = estimate_tokens(_render(row.predicate, row.value))
         else:
-            excerpt = episode_excerpt(row.kind, row.payload)
+            excerpt = episode_row_excerpt(row)
             cost = estimate_tokens(f"{row.occurred_at:%Y-%m-%d %H:%M} {row.kind} {excerpt}")
+        if kind == "episode" and episodes_packed > 0 and episode_token_count + cost > episode_budget:
+            # Ceiling hit -- this episode would eat into facts' share of the
+            # budget. Never blocks the single best-ranked episode (that one
+            # is still worth serving on its own merits at any budget size,
+            # same as before this ceiling existed) -- only kicks in once a
+            # SECOND or later episode would pile on top of it. Skip (not
+            # break: lower-ranked facts further down the pool still deserve
+            # a shot at the room this leaves free) rather than count it
+            # against the total budget at all.
+            decisions.append(
+                {"episode_id": str(row.id), "action": "excluded", "reason_code": "over_episode_budget"}
+            )
+            continue
         if token_count + cost > budget_tokens:
             if kind == "fact":
                 decisions.append(
@@ -951,8 +1314,12 @@ async def build_context(
                 )
             continue
         token_count += cost
+        if kind == "episode":
+            episode_token_count += cost
+            episodes_packed += 1
         if kind == "fact":
             conflict = contested_conflict_by_fact.get(row.id)
+            source_chunk_by_fact_id[str(row.id)] = getattr(row, "source_chunk_id", None)
             packet_facts.append(
                 _packet_fact(
                     row,
@@ -971,7 +1338,7 @@ async def build_context(
             )
             if conflict is not None:
                 # Serve the sibling(s) of this genuine disagreement right
-                # alongside it (13 aout): the losing side never entered the
+                # alongside it (13 Aug): the losing side never entered the
                 # scored pool on its own (still `candidate`, filtered out of
                 # phase 2 above) — without this, the pool would only ever
                 # surface the winning/active half, defeating the point of
@@ -1013,10 +1380,15 @@ async def build_context(
         else:
             packet_episodes.append(
                 {
-                    "event_id": str(row.id),
+                    # The PARENT event id, not the chunk id: it is what
+                    # /v1/timeline and /v1/inspect address, and what the
+                    # packet has always exposed. The chunk id stays
+                    # internal to ranking and tracing.
+                    "event_id": str(row.event_id),
+                    "episode_id": str(row.id),
                     "kind": row.kind,
                     "occurred_at": row.occurred_at.isoformat() if row.occurred_at else None,
-                    # Dual-date rendering (mechanism F1, 15 aout) -- see
+                    # Dual-date rendering (mechanism F1, 15 Aug) -- see
                     # _relative_to_now / PacketFact.valid_from_relative.
                     "occurred_at_relative": (
                         _relative_to_now(row.occurred_at, now_dt) if row.occurred_at else None
@@ -1026,7 +1398,7 @@ async def build_context(
                 }
             )
             if row.occurred_at is not None:
-                packed_episode_meta.append((row.id, row.occurred_at))
+                packed_episode_meta.append((row.id, row.occurred_at, row.ordinal))
             decisions.append(
                 {"episode_id": str(row.id), "action": "included", "reason_code": "top_score"}
             )
@@ -1078,7 +1450,7 @@ async def build_context(
                     }
                 )
 
-    # Context window (mechanism F2, 15 aout): a packed slot never stands
+    # Context window (mechanism F2, 15 Aug): a packed slot never stands
     # alone. An episode packed by score carries its immediate temporal
     # neighbor (radius 1 -- one event right before and one right after, in
     # the same scope) so the agent gets the surrounding turn, not just an
@@ -1092,71 +1464,150 @@ async def build_context(
     # instead of being re-merged into the ranked pool.
     if token_count < budget_tokens and (packed_episode_meta or packet_facts):
         context_window_start = time.perf_counter()
-        packed_episode_ids = {event_id for event_id, _ in packed_episode_meta}
+        packed_chunk_ids = {chunk_id for chunk_id, _, _ in packed_episode_meta}
         neighbor_reason: dict[uuid.UUID, str] = {}
 
-        for event_id, occurred_at in packed_episode_meta:
+        neighbor_scope = (
+            EpisodeChunk.project_id == project_id,
+            EpisodeChunk.subject_id == subject_id,
+            EpisodeChunk.origin_trust != "untrusted",
+        )
+        # Since 21 Aug the neighbour of an episode is the adjacent CHUNK,
+        # not the adjacent event -- which is what this mechanism always
+        # meant by "the surrounding turn". Ordering is (occurred_at,
+        # ordinal): every chunk of one event shares its timestamp, so the
+        # ordinal is what puts turn 4 between turn 3 and turn 5.
+        position = tuple_(EpisodeChunk.occurred_at, EpisodeChunk.ordinal)
+        for chunk_id, occurred_at, ordinal in packed_episode_meta:
+            here = tuple_(literal(occurred_at), literal(ordinal))
             before_id = (
                 await session.execute(
-                    select(Event.id)
-                    .where(
-                        Event.project_id == project_id,
-                        Event.subject_id == subject_id,
-                        Event.origin_trust != "untrusted",
-                        Event.occurred_at < occurred_at,
-                    )
-                    .order_by(Event.occurred_at.desc(), Event.id.desc())
+                    select(EpisodeChunk.id)
+                    .where(*neighbor_scope, position < here)
+                    .order_by(EpisodeChunk.occurred_at.desc(), EpisodeChunk.ordinal.desc())
                     .limit(1)
                 )
             ).scalar_one_or_none()
             after_id = (
                 await session.execute(
-                    select(Event.id)
+                    select(EpisodeChunk.id)
                     .where(
-                        Event.project_id == project_id,
-                        Event.subject_id == subject_id,
-                        Event.origin_trust != "untrusted",
-                        Event.occurred_at > occurred_at,
+                        *neighbor_scope,
+                        position > here,
+                        # Point of view (20 Aug): the "after" neighbour is
+                        # the one place in this module that deliberately
+                        # looks FORWARD in time, so it is also the one that
+                        # must be bounded by `as_of` explicitly. Without
+                        # it, a packet answering a question dated T could
+                        # carry the verbatim text of a conversation that
+                        # has not happened yet -- the same leak the primary
+                        # episode query was fixed for, reintroduced by a
+                        # bolt-on that never competes on score.
+                        EpisodeChunk.occurred_at <= now,
                     )
-                    .order_by(Event.occurred_at.asc(), Event.id.asc())
+                    .order_by(EpisodeChunk.occurred_at.asc(), EpisodeChunk.ordinal.asc())
                     .limit(1)
                 )
             ).scalar_one_or_none()
             for neighbor_id in (before_id, after_id):
                 if (
                     neighbor_id is not None
-                    and neighbor_id not in packed_episode_ids
+                    and neighbor_id not in packed_chunk_ids
                     and neighbor_id not in neighbor_reason
                 ):
                     neighbor_reason[neighbor_id] = "episode_neighbor"
 
-        for fact in packet_facts:
-            if not fact["source_event_ids"]:
-                continue
-            source_id = uuid.UUID(fact["source_event_ids"][0])
-            if source_id not in packed_episode_ids and source_id not in neighbor_reason:
-                neighbor_reason[source_id] = "fact_source_turn"
+        # A packed fact carries the moment it was extracted from. Facts
+        # that resolved an exact `source_chunk_id` at write time (migration
+        # 0028) say so here first -- no guessing needed. Only the rest
+        # (evidence_span absent, or matching no single chunk) fall through
+        # to the word-overlap heuristic below: bounded and honest, the
+        # candidate set is only ever the chunks of the event the fact
+        # actually came from, so the worst case is the wrong turn of the
+        # right conversation.
+        for chunk_id in {
+            source_chunk_by_fact_id.get(fact["id"]) for fact in packet_facts
+        }:
+            if (
+                chunk_id is not None
+                and chunk_id not in packed_chunk_ids
+                and chunk_id not in neighbor_reason
+            ):
+                neighbor_reason[chunk_id] = "fact_source_turn"
+
+        source_event_ids = {
+            uuid.UUID(fact["source_event_ids"][0])
+            for fact in packet_facts
+            if fact["source_event_ids"]
+            and source_chunk_by_fact_id.get(fact["id"]) is None
+        }
+        if source_event_ids:
+            source_chunks: dict[uuid.UUID, list[tuple[int, uuid.UUID, str]]] = {}
+            for chunk in (
+                (
+                    await session.execute(
+                        select(
+                            EpisodeChunk.event_id,
+                            EpisodeChunk.ordinal,
+                            EpisodeChunk.id,
+                            EpisodeChunk.text,
+                        ).where(
+                            *neighbor_scope,
+                            EpisodeChunk.event_id.in_(source_event_ids),
+                            EpisodeChunk.occurred_at <= now,
+                        )
+                    )
+                )
+                .all()
+            ):
+                source_chunks.setdefault(chunk.event_id, []).append(
+                    (chunk.ordinal, chunk.id, chunk.text)
+                )
+            for fact in packet_facts:
+                if not fact["source_event_ids"]:
+                    continue
+                if source_chunk_by_fact_id.get(fact["id"]) is not None:
+                    continue  # already handled exactly, above
+                candidates = source_chunks.get(uuid.UUID(fact["source_event_ids"][0]))
+                if not candidates:
+                    continue
+                fact_words = _overlap_words(_render(fact["predicate"], fact["value"]))
+                _ordinal, chunk_id, _text = min(
+                    candidates,
+                    key=lambda c: (
+                        -len(fact_words & _overlap_words(c[2])),
+                        c[0],
+                    ),
+                )
+                if chunk_id not in packed_chunk_ids and chunk_id not in neighbor_reason:
+                    neighbor_reason[chunk_id] = "fact_source_turn"
 
         if neighbor_reason:
             neighbor_rows = (
-                (
-                    await session.execute(
-                        select(Event)
-                        .where(
-                            Event.id.in_(neighbor_reason.keys()),
-                            # M8 guard, same as the primary episode query
-                            # above: a fact's source turn can be an
-                            # untrusted-origin event (the fact itself went
-                            # through quarantine) -- its raw payload must
-                            # never be served as an episode either.
-                            Event.origin_trust != "untrusted",
-                        )
-                        .order_by(Event.occurred_at, Event.id)
+                await session.execute(
+                    select(
+                        EpisodeChunk.id,
+                        EpisodeChunk.event_id,
+                        EpisodeChunk.occurred_at,
+                        EpisodeChunk.text,
+                        Event.kind,
                     )
+                    .join(Event, Event.id == EpisodeChunk.event_id)
+                    .where(
+                        EpisodeChunk.id.in_(neighbor_reason.keys()),
+                        # M8 guard, same as the primary episode query
+                        # above: a fact's source turn can come from an
+                        # untrusted-origin event (the fact itself went
+                        # through quarantine) -- its raw text must never be
+                        # served as an episode either.
+                        EpisodeChunk.origin_trust != "untrusted",
+                        # Same point-of-view bound as every other episode
+                        # read in this module.
+                        EpisodeChunk.occurred_at <= now,
+                    )
+                    .order_by(EpisodeChunk.occurred_at, EpisodeChunk.ordinal, EpisodeChunk.id)
                 )
-                .scalars()
-                .all()
-            )
+            ).all()
             for row in neighbor_rows:
                 if token_count >= budget_tokens:
                     decisions.append(
@@ -1167,7 +1618,7 @@ async def build_context(
                         }
                     )
                     continue
-                excerpt = episode_excerpt(row.kind, row.payload)
+                excerpt = episode_row_excerpt(row)
                 cost = estimate_tokens(f"{row.occurred_at:%Y-%m-%d %H:%M} {row.kind} {excerpt}")
                 if token_count + cost > budget_tokens:
                     decisions.append(
@@ -1181,7 +1632,8 @@ async def build_context(
                 token_count += cost
                 packet_episodes.append(
                     {
-                        "event_id": str(row.id),
+                        "event_id": str(row.event_id),
+                        "episode_id": str(row.id),
                         "kind": row.kind,
                         "occurred_at": row.occurred_at.isoformat() if row.occurred_at else None,
                         "occurred_at_relative": (
@@ -1253,7 +1705,7 @@ async def build_context(
             "conflicting value alongside them — apply the most recent "
             "'valid from' date to determine which is current"
         )
-    # 14 aout (mecanisme D): volatility no longer hides anything -- past its
+    # 14 Aug (mechanism D): volatility no longer hides anything -- past its
     # horizon a fact is served flagged "stale" (see _fact_freshness), same
     # silent-in-warnings treatment "unconfirmed" already got. No aggregate
     # warning here on purpose, for the same reason: it is per-fact honest

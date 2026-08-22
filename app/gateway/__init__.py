@@ -227,9 +227,17 @@ async def capture_turn(
         kind="conversation.turn",
         occurred_at=datetime.now(timezone.utc),
         payload={
+            # The assistant message is omitted rather than carried as null
+            # when there is none (a streamed exchange, whose assistant side
+            # is never read back): the chunker and the extractor both see a
+            # turn list, and a message with no content is noise in both.
             "messages": [
                 {"role": "user", "content": user_text},
-                {"role": "assistant", "content": assistant_text},
+                *(
+                    [{"role": "assistant", "content": assistant_text}]
+                    if assistant_text is not None
+                    else []
+                ),
             ],
             "model": model,
             "trace_id": str(trace_id) if trace_id else None,

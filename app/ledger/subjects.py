@@ -8,11 +8,13 @@ Design rules (PRD coherence):
 - Registration is race-safe: INSERT .. ON CONFLICT DO NOTHING + re-select
   (same pattern as ledger.write_events), so two concurrent captures of the
   same brand-new alias converge on one row.
-- A merge re-scopes events, facts, conflict_sets and context_traces in the
-  caller's transaction, journals a SubjectMergeReceipt (counters + exact
-  moved ids), re-points every alias of the source and leaves a
-  "subject"-kind tombstone so the old id stays resolvable and the
-  fragmentation detector can warn about it.
+- A merge re-scopes events, episode_chunks, facts, conflict_sets and
+  context_traces in the caller's transaction, journals a
+  SubjectMergeReceipt (counters + exact moved ids for events/facts/
+  conflicts/traces; episode_chunks is derived data and moves silently,
+  see the merge_subjects body), re-points every alias of the source and
+  leaves a "subject"-kind tombstone so the old id stays resolvable and
+  the fragmentation detector can warn about it.
 """
 
 import uuid
@@ -23,7 +25,15 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import ApiError
-from app.models import ConflictSet, ContextTrace, Event, Fact, SubjectAlias, SubjectMergeReceipt
+from app.models import (
+    ConflictSet,
+    ContextTrace,
+    EpisodeChunk,
+    Event,
+    Fact,
+    SubjectAlias,
+    SubjectMergeReceipt,
+)
 
 # Reserved kind for merge tombstones: after merging src -> tgt, the row
 # (kind="subject", value=src) -> tgt keeps the old id resolvable.
@@ -165,6 +175,20 @@ async def merge_subjects(
             )
         ).all()
     ]
+    # Episode chunks carry a denormalised subject_id (see
+    # app.models.episode_chunk for why retrieval needs it on the row). A
+    # merge is the ONE operation that rewrites a subject after the fact, so
+    # it is the one place that has to keep the copy in step. Not returning
+    # ids: chunks are derived data, they are not part of the receipt --
+    # their parent events already are.
+    await session.execute(
+        update(EpisodeChunk)
+        .where(
+            EpisodeChunk.project_id == project_id,
+            EpisodeChunk.subject_id == source_subject_id,
+        )
+        .values(subject_id=target_subject_id)
+    )
     moved_facts = [
         str(row_id)
         for (row_id,) in (

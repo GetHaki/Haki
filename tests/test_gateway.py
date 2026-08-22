@@ -290,13 +290,26 @@ async def test_gateway_memory_and_capture_stay_in_the_keys_project(
     )
 
 
-# -- streaming: pure pass-through, memory disabled (documented choice) ---------
+# -- streaming: memory injected, user turn captured, assistant turn not -------
+#
+# Until 22 aout streaming was a pure pass-through: no memory, no capture,
+# and the only signal was an X-Haki-Memory: disabled header that no
+# OpenAI-compatible SDK reads. Streaming is the DEFAULT mode of nearly
+# every integration, so a large share of gateway traffic had no memory at
+# all and no way to find out.
 
 
-async def test_gateway_streaming_is_passthrough_disabled(
+async def test_gateway_streaming_injects_memory_into_the_request(
     client, auth_required, make_api_key, monkeypatch
 ):
-    key = await make_api_key(project_id="prj_a")
+    """Injection never needed the response.
+
+    The memory block goes into the REQUEST; only reading the assistant's
+    reply back needs the stream. Conflating the two is what cost streaming
+    callers their memory.
+    """
+    key = await make_api_key(project_id="prj_a", org_id="org_a")
+    await seed_active_fact("prj_a", "org_a", "invoice_language", {"language": "fr"})
     sent: dict = {}
 
     async def fake_open_stream(payload: dict):
@@ -306,12 +319,14 @@ async def test_gateway_streaming_is_passthrough_disabled(
             yield b"data: {}\n\n"
 
         stream_client = httpx.AsyncClient()
-        response = httpx.Response(
-            200,
-            headers={"content-type": "text/event-stream"},
-            content=chunks(),
+        return (
+            httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=chunks(),
+            ),
+            stream_client,
         )
-        return response, stream_client
 
     monkeypatch.setattr("app.gateway.open_upstream_stream", fake_open_stream)
 
@@ -322,7 +337,52 @@ async def test_gateway_streaming_is_passthrough_disabled(
     )
 
     assert response.status_code == 200
-    assert response.headers["x-haki-memory"] == "disabled"
     assert response.content == b"data: {}\n\n"
-    # The body was forwarded untouched (no memory injection on streams).
-    assert all(m["role"] != "system" for m in sent["payload"]["messages"])
+    assert response.headers["x-haki-memory"] == "active"
+    system = sent["payload"]["messages"][0]
+    assert system["role"] == "system"
+    assert "invoice_language" in system["content"]
+
+
+async def test_gateway_streaming_captures_the_user_turn_and_says_so(
+    client, auth_required, make_api_key, monkeypatch
+):
+    """The subject said it whatever the model replies.
+
+    The assistant side genuinely cannot be stored without buffering the
+    stream -- i.e. without giving up the property the caller asked for --
+    so the header states it rather than leaving it to be discovered.
+    """
+    key = await make_api_key(project_id="prj_a", org_id="org_a")
+    await seed_active_fact("prj_a", "org_a", "invoice_language", {"language": "fr"})
+
+    async def fake_open_stream(payload: dict):
+        async def chunks():
+            yield b"data: {}\n\n"
+
+        return (
+            httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, content=chunks()
+            ),
+            httpx.AsyncClient(),
+        )
+
+    monkeypatch.setattr("app.gateway.open_upstream_stream", fake_open_stream)
+
+    response = await client.post(
+        CHAT_URL,
+        json={**chat_body(), "stream": True},
+        headers=auth(key, **{"X-Haki-Subject-Id": "usr_42"}),
+    )
+    assert response.status_code == 200
+    assert response.headers["x-haki-capture"] == "user_turn_only"
+
+    turns = [
+        e for e in await events_for("prj_a", "usr_42") if e.kind == "conversation.turn"
+    ]
+    assert len(turns) == 1
+    messages = turns[0].payload["messages"]
+    assert messages[0]["content"] == "rédige ma facture"
+    # No null assistant message: a turn with no content is noise for the
+    # chunker and for the extractor alike.
+    assert len(messages) == 1

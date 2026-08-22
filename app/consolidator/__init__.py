@@ -93,21 +93,24 @@ import json
 import logging
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
 from pydantic import ValidationError
-from sqlalchemy import Text, literal, select
+from sqlalchemy import Text, and_, cast, func, literal, or_, select, update
 from sqlalchemy.dialects.postgresql import JSONB, insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import metrics
 from app.ledger.core import acquire_subject_write_lock, create_fact, transition_fact_status
 from app.context import episode_text
+from app.consolidator.temporal import observed_at_of
+from app.context.chunking import chunk_payload
 from app.models import (
     ConflictSet,
     ContextTrace,
+    EpisodeChunk,
     Event,
     Fact,
     FactStatus,
@@ -738,6 +741,208 @@ def _reinforce_or_count_duplicate(
     result["reinforced"] += 1
 
 
+async def _write_episode_chunks(
+    session: AsyncSession, events: list[Event], embedder: Embedder
+) -> int:
+    """Cut every not-yet-chunked event into retrievable slices and embed them.
+
+    Idempotent: an event that already has chunks is skipped entirely rather
+    than re-chunked, so a replayed job is a no-op here. That check is on
+    (event_id) and not on content because chunking is deterministic --
+    same payload, same chunks -- so "has chunks" and "has the right chunks"
+    are the same statement. Re-chunking after a change to
+    app.context.chunking is a backfill, not a side effect of replay: see
+    scripts/backfill_episode_chunks.py.
+
+    Returns the number of chunks written, for the caller's metrics.
+    """
+    if not events:
+        return 0
+    already_chunked = set(
+        (
+            await session.execute(
+                select(EpisodeChunk.event_id).where(
+                    EpisodeChunk.event_id.in_([event.id for event in events])
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    pending: list[tuple[Event, int, str]] = []
+    for event in events:
+        if event.id in already_chunked:
+            continue
+        for ordinal, text in enumerate(chunk_payload(event.kind, event.payload)):
+            pending.append((event, ordinal, text))
+    if not pending:
+        return 0
+
+    # One batched call for every chunk of every event in the job: the
+    # embedder's own batching is what keeps this from becoming N round
+    # trips, and the local ONNX provider caches identical texts.
+    embeddings = await embedder.embed([text for _, _, text in pending])
+    session.add_all(
+        [
+            EpisodeChunk(
+                event_id=event.id,
+                ordinal=ordinal,
+                project_id=event.project_id,
+                subject_id=event.subject_id,
+                occurred_at=event.occurred_at,
+                origin_trust=event.origin_trust,
+                text=text,
+                # index_text == text until the fact-to-chunk link lands
+                # (K = V + fact); the two columns stay distinct so that a
+                # fact folded into the index can never leak into what the
+                # agent reads as a verbatim quote.
+                index_text=text,
+                embedding=embedding,
+            )
+            for (event, ordinal, text), embedding in zip(pending, embeddings)
+        ]
+    )
+    await session.flush()
+    return len(pending)
+
+
+# A verbatim quote from an LLM is verbatim in intention, not in bytes:
+# whitespace collapses, quotes get curled, case drifts. Matching is done on
+# a normalised form, and only an EXACT containment counts as a match. The
+# alternative -- accepting the best fuzzy candidate -- would attribute a
+# fact to a turn it did not come from and silently pollute that turn's
+# index, which is worse than attributing nothing: `source_chunk_id` stays
+# NULL and every consumer falls back to what it did before.
+_WHITESPACE_RUN = re.compile(r"\s+")
+
+
+def _normalize_for_span_match(text: str) -> str:
+    return _WHITESPACE_RUN.sub(" ", (text or "").replace("’", "'")).strip().casefold()
+
+
+async def _resolve_source_chunk(
+    session: AsyncSession, event: Event, evidence_span: str | None
+) -> uuid.UUID | None:
+    """Which turn of this event the extractor quoted, if it can be known.
+
+    Two ways to know, both exact, no heuristic:
+
+    1. The event has a single chunk. Then there is nothing to disambiguate
+       -- whatever the fact came from, it came from there. This is the
+       common case for `conversation.message` events, i.e. most of the
+       product's traffic.
+    2. The normalised evidence span is contained in exactly one chunk.
+
+    Anything else returns None. A fact with no attributable turn is a fact
+    that enriches no chunk's index and whose source turn is guessed by the
+    context window's fallback -- both strictly the pre-21-Aug behaviour.
+    """
+    chunks = (
+        (
+            await session.execute(
+                select(EpisodeChunk.id, EpisodeChunk.text)
+                .where(EpisodeChunk.event_id == event.id)
+                .order_by(EpisodeChunk.ordinal)
+            )
+        )
+        .all()
+    )
+    if not chunks:
+        return None
+    if len(chunks) == 1:
+        return chunks[0].id
+    span = _normalize_for_span_match(evidence_span or "")
+    if not span:
+        return None
+    matches = [
+        chunk.id for chunk in chunks if span in _normalize_for_span_match(chunk.text)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+async def _merge_facts_into_chunk_index(
+    session: AsyncSession, event: Event, embedder: Embedder
+) -> None:
+    """Key merging (E3), at the granularity that makes it work.
+
+    A chunk's `index_text` becomes its verbatim text concatenated with the
+    facts extracted FROM THAT CHUNK -- LongMemEval's K = V + fact: the
+    compressed signal folded into the raw key at INDEX time, so a turn can
+    be found through what was understood of it and still be SERVED as its
+    own words. `text` is never touched, which is what keeps a fact from
+    leaking into a quote.
+
+    Until this mechanism, key merging ran against the whole event, so a
+    fact extracted from turn 3 of a twenty-turn session was folded into the
+    index of all twenty -- and into an embedding that only ever saw the
+    first 128 tokens of the concatenation anyway.
+
+    Facts with no `source_chunk_id` enrich nothing: attributing them to
+    every chunk of the event is exactly the pollution this replaces.
+    """
+    facts = (
+        (
+            await session.execute(
+                select(Fact)
+                .where(
+                    Fact.source_event_ids.any(event.id),
+                    Fact.source_chunk_id.is_not(None),
+                )
+                # Fully specified order, on purpose (22 aout). Without it
+                # Postgres returns the rows in whatever order the plan and the
+                # physical heap happen to produce -- which shifts as soon as a
+                # tuple is rewritten -- so the SAME facts on the SAME chunk
+                # produced a DIFFERENT `index_text`, hence a different embedding
+                # and a different ts_rank_cd cover density. Two identical
+                # ingestions of one conversation then retrieved differently
+                # (measured: 86 of 231 packets differed between two runs of
+                # eval.retrieval_bench with nothing changed), and the equality
+                # guard below could never fire on a replayed job, so every
+                # replay paid for a re-embedding that changed nothing.
+                #
+                # `recorded_from` first because chronological is the one order
+                # that means something here; the rest of the key exists so that
+                # the SAME SET of facts always renders to the SAME STRING --
+                # predicate and value are content, `id` only makes it total.
+                .order_by(Fact.recorded_from, Fact.predicate, cast(Fact.value, Text), Fact.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not facts:
+        return
+    by_chunk: dict[uuid.UUID, list[Fact]] = {}
+    for fact in facts:
+        by_chunk.setdefault(fact.source_chunk_id, []).append(fact)
+
+    chunks = (
+        (
+            await session.execute(
+                select(EpisodeChunk).where(EpisodeChunk.id.in_(by_chunk.keys()))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    updated = []
+    for chunk in chunks:
+        facts_text = "; ".join(
+            _search_text(fact.predicate, fact.value) for fact in by_chunk[chunk.id]
+        )
+        index_text = f"{chunk.text} FACTS: {facts_text}"
+        if index_text == chunk.index_text:
+            # Replayed job, or a re-assertion that changed nothing:
+            # re-embedding identical text costs a call for no change.
+            continue
+        chunk.index_text = index_text
+        updated.append(chunk)
+    if updated:
+        embeddings = await embedder.embed([chunk.index_text for chunk in updated])
+        for chunk, embedding in zip(updated, embeddings):
+            chunk.embedding = embedding
+
+
 async def _apply_candidate(
     session: AsyncSession,
     candidate: ExtractedFact,
@@ -756,6 +961,11 @@ async def _apply_candidate(
     # silently created a fact under an orphan subject_id that no /v1/context
     # call could ever reach again - a real, confirmed data-loss bug found
     # while auditing the sprint-10 eval results at scale.
+    # Resolved once for this candidate: both write paths below carry it,
+    # and it is what makes key merging chunk-accurate (see
+    # _resolve_source_chunk / _merge_facts_into_chunk_index).
+    source_chunk_id = await _resolve_source_chunk(session, event, candidate.evidence_span)
+
     duplicate = await _find_duplicate(
         session,
         project_id=event.project_id,
@@ -765,9 +975,36 @@ async def _apply_candidate(
         qualifiers=candidate.qualifiers,
     )
     if duplicate is not None:
-        _reinforce_or_count_duplicate(duplicate, event=event, result=result)
-        await session.flush()
-        return
+        # A value coming BACK after being superseded is an update, not a
+        # duplicate (21 aout). A -> B -> A: `_find_duplicate` matches the
+        # superseded A (it searches every non-deleted status),
+        # `_reinforce_or_count_duplicate` sees a non-active fact, counts a
+        # duplicate and returns -- and B stays active. The subject said
+        # they went back to A and the ledger kept serving B, with a counter
+        # as the only trace. This is exactly the knowledge-update failure
+        # mode LongMemEval's category of the same name is built to catch.
+        #
+        # It is only an update if something else is actually active for
+        # this identity. A superseded value re-asserted with nothing active
+        # to replace stays a plain duplicate, as before.
+        superseded_return = duplicate.status is not FactStatus.active and (
+            await _resolve_existing_fact(
+                session,
+                project_id=event.project_id,
+                subject_id=event.subject_id,
+                predicate=candidate.supersedes_predicate or candidate.predicate,
+                qualifiers=candidate.qualifiers,
+                embedding=embedding,
+            )
+        ) is not None
+        if not superseded_return:
+            _reinforce_or_count_duplicate(duplicate, event=event, result=result)
+            await session.flush()
+            return
+        # Treated as the supersede it is, whatever the extractor labelled
+        # it: the extractor sees one message, not the identity's history,
+        # so it has no way to know this value was held before.
+        candidate = candidate.model_copy(update={"action": "supersede"})
 
     target_predicate = candidate.supersedes_predicate or candidate.predicate
     # The candidate's own qualifiers, before this module stamps provenance
@@ -824,6 +1061,17 @@ async def _apply_candidate(
     inherit = candidate.action == "supersede" and existing is not None
     fact_kind = candidate.fact_kind or (existing.fact_kind if inherit else "attribute")
     volatility = candidate.volatility or (existing.volatility if inherit else "stable")
+    # `temporal_range` inherits for exactly the same reason (21 Aug) and
+    # was the one field of the three that did not. A status-only update
+    # ("pre-approved" -> "approved") whose candidate does not restate the
+    # range it was anchored on -- and the extraction prompt does not ask it
+    # to -- silently destroyed the anchoring: the fact stopped being about
+    # August and became about the message's own timestamp. Same class of
+    # loss as the value carry-forward below, on the field the temporal
+    # questions depend on.
+    temporal_range = candidate.temporal_range or (
+        existing.temporal_range if inherit else None
+    )
 
     # Memory form (mechanism C, 15 aout): unlike fact_kind/volatility above,
     # ALWAYS inherited whenever an existing identity was matched -- on
@@ -887,7 +1135,10 @@ async def _apply_candidate(
             volatility=volatility,
             origin_trust=event.origin_trust or "trusted",
             memory_form=memory_form,
-            temporal_range=candidate.temporal_range,
+            temporal_range=temporal_range,
+            observed_at=observed_at_of(candidate.value, temporal_range),
+            evidence_span=candidate.evidence_span,
+            source_chunk_id=source_chunk_id,
         )
         held_fact.embedding = embedding
         held_fact.search_text = _search_text(candidate.predicate, candidate.value)
@@ -933,6 +1184,18 @@ async def _apply_candidate(
         # superseded (never served) version. Keys the candidate DOES set
         # always win — that is the actual update.
         value = {**existing.value, **candidate.value}
+        # ...and an explicit null REMOVES a key (21 aout). Without it, the
+        # carry-forward above has no inverse: once a key is in a value, no
+        # later update can take it out, so a fact accumulates keys that
+        # stopped being true and are served as if they still were. Making
+        # the merge opt-in instead would give back the loss it was written
+        # to fix (a status-only update dropping the fact's target, the
+        # measured adoption_agency_research case); a delete sentinel adds
+        # the missing direction without taking that away.
+        #
+        # `{"key": null}` carried no meaning before this -- it stored a
+        # null, which says nothing -- so nothing that used to work changes.
+        value = {key: item for key, item in value.items() if item is not None}
 
     fact = await create_fact(
         session,
@@ -951,7 +1214,12 @@ async def _apply_candidate(
         volatility=volatility,
         origin_trust=event.origin_trust or "trusted",
         memory_form=memory_form,
-        temporal_range=candidate.temporal_range,
+        temporal_range=temporal_range,
+        # Computed from the FINAL value: the supersede carry-forward above
+        # may have restored a date the candidate did not restate.
+        observed_at=observed_at_of(value, temporal_range),
+        evidence_span=candidate.evidence_span,
+        source_chunk_id=source_chunk_id,
     )
     fact.embedding = embedding
     fact.search_text = _search_text(candidate.predicate, value)
@@ -1163,6 +1431,24 @@ async def _process_job(
             event.embedding = embedding
             event.index_text = episode_text(event.kind, event.payload)
 
+    # Episode chunks (21 Aug, migration 0024): the unit episodic retrieval
+    # actually reads. An event is indexed and served in turn-sized slices
+    # instead of whole -- see app.context.chunking for why (a whole session
+    # cost 810 of the eval's 900-token budget, and the embedder saw 12.4 %
+    # of it).
+    #
+    # Derived data, like the event embedding above: reconstructible from
+    # the payload at any time, which is what makes it safe to write here on
+    # an append-only table. Idempotent by (event_id, ordinal) so a replayed
+    # job re-chunks nothing.
+    #
+    # Note on cost: this adds one embedding call per CHUNK on top of the one
+    # per event above. The event-level embedding is no longer read by
+    # retrieval after this change -- its only remaining readers are the E3
+    # key-merging pass below and scripts/backfill_episode_index_text.py --
+    # and dropping it is a follow-up, deliberately not bundled here.
+    await _write_episode_chunks(session, events, embedder)
+
     # Locks acquired up front, before any extraction — earlier than before
     # (see the loop below for why) but the lock's actual job is unchanged:
     # serializing two JOBS for the same subject across workers, never
@@ -1266,11 +1552,31 @@ async def _process_job(
             # reach the ledger — this is what stops a served fact from
             # being echoed back, re-extracted, and re-stored without
             # bound.
-            echo_reason = await _echo_reject_reason(
-                session,
-                project_id=event.project_id,
-                subject_id=event.subject_id,
-                embedding=embedding,
+            #
+            # ...but ONLY for a candidate that claims to add something
+            # (21 aout). An action="supersede" candidate says explicitly
+            # that it REPLACES a value, which is the one thing an echo can
+            # never be: an agent repeating a fact back produces the same
+            # fact, not a replacement for it.
+            #
+            # This matters because the two populations are not separable by
+            # distance. This module's own measurement says so
+            # (_reinforce_or_count_duplicate, from
+            # scripts/check_semantic_threshold.py): rephrased-same-value
+            # pairs land at 0.002-0.187 and genuine value updates at
+            # 0.030-0.158 -- fully overlapping, and both under the 0.28
+            # gate. So every legitimate update to a fact that had been
+            # served in the last 20 packets was being destroyed here, with
+            # a counter as its only trace.
+            echo_reason = (
+                await _echo_reject_reason(
+                    session,
+                    project_id=event.project_id,
+                    subject_id=event.subject_id,
+                    embedding=embedding,
+                )
+                if candidate.action != "supersede"
+                else None
             )
             if echo_reason is not None:
                 _record_rejection(result, echo_reason, job_id=job.id, source="anti-echo")
@@ -1306,7 +1612,85 @@ async def _process_job(
                 f"{episode_text(event.kind, event.payload)} FACTS: {facts_text}"
             )
             event.embedding = (await embedder.embed([event.index_text]))[0]
+        # The same mechanism at the granularity retrieval actually reads
+        # (21 Aug, migration 0025). The event-level pass above is kept for
+        # now -- it is what scripts/backfill_episode_index_text.py and the
+        # /v1/timeline lineage still look at -- but nothing in the
+        # retrieval path reads it any more, and removing it is a follow-up.
+        await _merge_facts_into_chunk_index(session, event, embedder)
     return result
+
+
+# How long a claim stays valid before another worker may take the job back.
+# A worker killed mid-job (deploy, OOM, SIGKILL) never gets to mark it
+# failed, so without a reclaim window the job would sit in `running`
+# forever -- trading a duplicate-processing bug for a stuck-job bug. Two
+# minutes is far longer than any observed consolidation (seconds, dominated
+# by one LLM call) and far shorter than a human noticing a stalled queue.
+STALE_CLAIM_AFTER = timedelta(minutes=2)
+
+
+async def claim_jobs(session: AsyncSession, job_ids: list[uuid.UUID]) -> list[Job]:
+    """Take exclusive ownership of jobs, atomically. Returns what was won.
+
+    `FOR UPDATE SKIP LOCKED` inside the subquery is what makes two workers
+    safe: each locks the rows it selects, and skips rows another
+    transaction already holds instead of blocking on them. The UPDATE then
+    flips the winner's rows to `running`, so they are invisible to the next
+    poll of either worker.
+
+    Until 22 aout nothing did this. `JobStatus.running` existed and was
+    never assigned; every caller selected `pending` rows and processed them.
+    Two workers -- or one worker and one POST /v1/consolidate -- therefore
+    picked up the same job and extracted the same events twice. The
+    per-subject advisory lock serialised the writes, but the second
+    extraction is a second LLM call, non-deterministic even at temperature
+    0: it can produce a slightly different value and open a conflict set
+    against the fact the first pass just wrote. A customer sees that.
+
+    Losing a job to another worker is not an error and not logged as one:
+    it is the mechanism working.
+    """
+    if not job_ids:
+        return []
+    claimable = (
+        select(Job.id)
+        .where(
+            Job.id.in_(job_ids),
+            or_(
+                Job.status.in_([JobStatus.pending, JobStatus.failed]),
+                and_(
+                    Job.status == JobStatus.running,
+                    Job.started_at < func.now() - STALE_CLAIM_AFTER,
+                ),
+            ),
+        )
+        .order_by(Job.created_at)
+        .with_for_update(skip_locked=True)
+    )
+    claimed_ids = (
+        (
+            await session.execute(
+                update(Job)
+                .where(Job.id.in_(claimable.scalar_subquery()))
+                .values(status=JobStatus.running, started_at=func.now())
+                .returning(Job.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not claimed_ids:
+        return []
+    return list(
+        (
+            await session.execute(
+                select(Job).where(Job.id.in_(claimed_ids)).order_by(Job.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
 
 
 async def run_pending_consolidations(
@@ -1319,13 +1703,19 @@ async def run_pending_consolidations(
     Returns the number of jobs completed successfully. Failed jobs keep their
     payload (plus an "error" key) and are retried on the next run.
     """
-    jobs = (
+    candidates = (
         (
             await session.execute(
-                select(Job)
+                select(Job.id)
                 .where(
                     Job.kind == "consolidate",
-                    Job.status.in_([JobStatus.pending, JobStatus.failed]),
+                    or_(
+                        Job.status.in_([JobStatus.pending, JobStatus.failed]),
+                        and_(
+                            Job.status == JobStatus.running,
+                            Job.started_at < func.now() - STALE_CLAIM_AFTER,
+                        ),
+                    ),
                 )
                 .order_by(Job.created_at)
             )
@@ -1333,6 +1723,7 @@ async def run_pending_consolidations(
         .scalars()
         .all()
     )
+    jobs = await claim_jobs(session, list(candidates))
     return await _run_jobs(session, jobs, extractor, embedder)
 
 
@@ -1369,7 +1760,13 @@ async def run_pending_consolidations_for_subject(
                 select(Job)
                 .where(
                     Job.kind == "consolidate",
-                    Job.status.in_([JobStatus.pending, JobStatus.failed]),
+                    or_(
+                        Job.status.in_([JobStatus.pending, JobStatus.failed]),
+                        and_(
+                            Job.status == JobStatus.running,
+                            Job.started_at < func.now() - STALE_CLAIM_AFTER,
+                        ),
+                    ),
                 )
                 .order_by(Job.created_at)
             )
@@ -1377,13 +1774,19 @@ async def run_pending_consolidations_for_subject(
         .scalars()
         .all()
     )
-    jobs = [
-        job
-        for job in candidate_jobs
-        if subject_event_ids.intersection(
-            uuid.UUID(e) for e in job.payload.get("event_ids", [])
-        )
-    ]
+    # Filter to this subject FIRST, then claim: claiming a job only to
+    # discover it belongs to another subject would take it away from the
+    # worker that should have it.
+    jobs = await claim_jobs(
+        session,
+        [
+            job.id
+            for job in candidate_jobs
+            if subject_event_ids.intersection(
+                uuid.UUID(e) for e in job.payload.get("event_ids", [])
+            )
+        ],
+    )
     return await _run_jobs(session, jobs, extractor, embedder)
 
 

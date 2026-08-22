@@ -181,8 +181,14 @@ async def create_fact(
     origin_trust: str = "trusted",
     memory_form: str = "state",
     temporal_range: dict | None = None,
+    evidence_span: str | None = None,
+    source_chunk_id: uuid.UUID | None = None,
+    observed_at: datetime | None = None,
 ) -> Fact:
     fact = Fact(
+        observed_at=observed_at,
+        evidence_span=evidence_span,
+        source_chunk_id=source_chunk_id,
         org_id=org_id,
         project_id=project_id,
         subject_type=subject_type,

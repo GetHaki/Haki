@@ -479,7 +479,9 @@ async def run(args: argparse.Namespace) -> int:
     questions = datasets.LOADERS[config["dataset"]["loader"]](dataset_path)
     types = args.types.split(",") if args.types else config.get("selection", {}).get("types")
     subset = args.subset if args.subset is not None else config.get("selection", {}).get("subset")
-    selected = datasets.select(questions, subset=subset, types=types)
+    selected = datasets.select(
+        questions, subset=subset, types=types, seed=args.seed, stratify=not args.no_stratify
+    )
     if args.shard_count and args.shard_count > 1:
         selected = datasets.shard(selected, args.shard_index, args.shard_count)
     if not selected:
@@ -490,6 +492,14 @@ async def run(args: argparse.Namespace) -> int:
     config["selection"] = {
         "subset": subset,
         "types": types,
+        # What was ACTUALLY sampled, not just what was asked for. Two runs
+        # whose composition differs are not comparable, and until 21 Aug
+        # nothing in the report said what the composition was -- the
+        # published 17.1 % / 30.6 % / 31.4 % trajectory came from three
+        # samples with three different type mixes.
+        "seed": args.seed,
+        "stratified": not args.no_stratify,
+        "composition": datasets.composition(selected),
         "shard": f"{args.shard_index}/{args.shard_count}" if args.shard_count and args.shard_count > 1 else None,
     }
     config["run_id"] = run_id
@@ -790,7 +800,25 @@ async def run(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Haki public benchmark harness")
     parser.add_argument("--config", required=True, help="eval/configs/<benchmark>.json")
-    parser.add_argument("--subset", type=int, default=None, help="N premières questions (déterministe)")
+    parser.add_argument(
+        "--subset",
+        type=int,
+        default=None,
+        help="stratified sample of N questions (dataset composition preserved)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=datasets.DEFAULT_SEED,
+        help=f"sample seed (default {datasets.DEFAULT_SEED}); "
+        "a different seed = an independent sample, same composition",
+    )
+    parser.add_argument(
+        "--no-stratify",
+        action="store_true",
+        help="fall back to the first N questions in dataset order "
+        "(pre-21-Aug behaviour, to reproduce an old number)",
+    )
     parser.add_argument("--types", default=None, help="filtre CSV, ex: knowledge-update,temporal-reasoning")
     parser.add_argument("--systems", default="haki,baseline", help="haki,baseline | haki | baseline")
     parser.add_argument("--api-url", default="http://localhost:8000")

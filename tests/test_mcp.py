@@ -164,7 +164,11 @@ async def _seed_convention(base_url: str) -> None:
             },
         )
         assert response.status_code == 202
-        response = await http.post("/v1/consolidate")
+        # /v1/consolidate drains EVERY project's queue, so it is admin-gated
+        # (22 aout). A customer key uses /v1/consolidate/subject instead.
+        response = await http.post(
+            "/v1/consolidate", headers={"Authorization": f"Bearer {ADMIN_KEY}"}
+        )
         assert response.status_code == 200
         assert response.json()["processed"] == 1
 
@@ -220,7 +224,9 @@ async def test_mcp_full_scenario(mcp_server):
             context_data = _tool_data(context_result)
             assert CONVENTION in context_data["context"]
             assert "tests avant toute modification" in context_data["context"]
-            assert "source:" in context_data["context"]
+            # Provenance reaches the model: the SDK renderer (shared with
+            # the gateway since 22 aout) cites the source event per fact.
+            assert "sources:" in context_data["context"]
             trace_id = context_data["trace_id"]
             predicates = [fact["predicate"] for fact in context_data["facts"]]
             assert CONVENTION in predicates
@@ -285,7 +291,7 @@ async def test_mcp_ignores_a_client_supplied_subject_id(mcp_server):
     result = await _call(
         mcp_server, "haki_context", {"query": "x", "subject_id": "attacker_chosen"}
     )
-    assert f"sujet {SUBJECT}" in result["context"]
+    assert f"subject {SUBJECT}" in result["context"]
     assert "attacker_chosen" not in result["context"]
 
 
@@ -333,7 +339,11 @@ async def test_mcp_correct_matches_direct_feedback_call(mcp_server):
             },
         )
         assert response.status_code == 202
-        response = await http.post("/v1/consolidate")
+        # /v1/consolidate drains EVERY project's queue, so it is admin-gated
+        # (22 aout). A customer key uses /v1/consolidate/subject instead.
+        response = await http.post(
+            "/v1/consolidate", headers={"Authorization": f"Bearer {ADMIN_KEY}"}
+        )
         assert response.status_code == 200
         assert response.json()["processed"] == 1
 

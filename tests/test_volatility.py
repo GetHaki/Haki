@@ -237,6 +237,44 @@ async def test_as_of_reads_freshness_from_the_callers_point_of_view(client):
     assert as_of_fact["freshness"] == "current"
 
 
+async def test_facts_from_after_as_of_are_excluded_from_scope(client):
+    """Found 20 Aug 2026 via external code audit, confirmed by direct
+    inspection: build_context's scope_filters checked valid_to > now but
+    never checked valid_from <= now. A fact whose effective date (valid_from,
+    or recorded_from when unset) is AFTER the caller's as_of doesn't just
+    slip into an EARLY packet -- the recency term
+    exp(-(now - valid_from) / TAU) goes POSITIVE (exponential growth, not
+    decay) for a negative elapsed time, so the fact's score can run away and
+    dominate the ranked pool ahead of every genuinely relevant fact. This
+    matters most on exactly the workload that exercises `as_of` on purpose:
+    LoCoMo/LongMemEval questions asked from a point in time inside the
+    conversation, not the real wall clock."""
+    await capture(
+        client,
+        [
+            make_memory_event(
+                [mock_fact("future_project", {"name": "Atlas"})],
+                occurred_at="2023-06-01T00:00:00Z",
+            )
+        ],
+    )
+    await run_worker()
+
+    # as_of BEFORE the fact's own date: from this point of view the fact
+    # doesn't exist yet and must not be served -- let alone dominate.
+    response = await client.post(
+        "/v1/context",
+        json={
+            "project_id": "prj_support",
+            "subject_id": "usr_42",
+            "query": "future_project",
+            "as_of": "2023-01-01T00:00:00Z",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["packet"]["facts"] == []
+
+
 async def test_volatile_fact_within_horizon_is_served_current(client):
     await capture(
         client,

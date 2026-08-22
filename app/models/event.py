@@ -6,6 +6,7 @@ from sqlalchemy import Computed, DateTime, Index, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.config import settings
 from app.models.base import Base
 
 # Origin-trust levels (M8 — provenance as authority). Declared by the
@@ -109,12 +110,21 @@ class Event(Base):
     index_text: Mapped[str | None] = mapped_column(String)
     # Precomputed tsvector of index_text (generated column, mechanism E1a,
     # migration 0022): same pattern as facts.search_vector (migration
-    # 0004) -- an episode can now be found by an exact lexical match (a
-    # name, an identifier) even when it is not the closest embedding
-    # neighbour, the same axis facts already had and episodes did not.
+    # 0004). Since 21 Aug (migration 0024) retrieval reads episode_chunks'
+    # own search_vector, not this one directly -- this column stays for
+    # the event-level embedding's remaining readers (E3 key merging,
+    # scripts/backfill_episode_index_text.py). Interpolated from
+    # settings.fts_config, like facts.search_vector: the text search
+    # configuration is a SCHEMA decision, frozen into the generated column
+    # by whichever migration built it, and this declaration must not drift
+    # away from that -- app.db.verify_fts_config enforces the match at
+    # startup.
     search_vector: Mapped[str | None] = mapped_column(
         TSVECTOR,
-        Computed("to_tsvector('simple', coalesce(index_text, ''))", persisted=True),
+        Computed(
+            f"to_tsvector('{settings.fts_config}', coalesce(index_text, ''))",
+            persisted=True,
+        ),
     )
 
     # Origin trust (M8): declared by the authenticated caller or derived

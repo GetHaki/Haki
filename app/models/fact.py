@@ -8,6 +8,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from pgvector.sqlalchemy import Vector
 
+from app.config import settings
 from app.models.base import Base
 
 
@@ -150,6 +151,48 @@ class Fact(Base):
     # DESCRIBED event's.
     temporal_range: Mapped[dict | None] = mapped_column(JSONB)
 
+    # When the fact is ABOUT (21 Aug), as opposed to when it became true
+    # (`valid_from`, the message's own timestamp) or when Haki learned it
+    # (`recorded_from`). "I got pre-approved back in August", said on 30
+    # November: valid_from and recorded_from are November, observed_at is
+    # August, and the answer to "when did you get pre-approved?" is
+    # August.
+    #
+    # Derived at write time from `temporal_range.start` or from a single
+    # unambiguous ISO date inside `value` -- see
+    # app.consolidator.temporal. NULL for the many facts that are about no
+    # particular instant ("I have a dog"), which is a real answer rather
+    # than a failure: inventing one for them would make the column
+    # meaningless for the facts that do have one.
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # Provenance, down to the turn (21 Aug). The extraction prompt has
+    # REQUIRED a verbatim quote from the source event since the write gate
+    # (M1) landed -- a candidate that cannot produce one must be rejected
+    # with reason "no_evidence_span" rather than written. Until now the
+    # consolidator asked for it, validated it, and threw it away: the gate
+    # demanded the proof and kept none of it.
+    #
+    # Persisting it buys three things at once: provenance a caller can
+    # actually verify, the exact fact-to-turn link `source_chunk_id` below
+    # needs, and a way to measure extraction quality per fact instead of
+    # only in aggregate.
+    evidence_span: Mapped[str | None] = mapped_column(String)
+    # The episode chunk this fact was extracted from, resolved from
+    # `evidence_span` at write time (app.consolidator._resolve_source_
+    # chunk). NULL when the extractor produced no span, or when no chunk of
+    # the source event contains it -- exact or absent, never approximate:
+    # attributing a fact to the wrong turn would pollute that turn's index
+    # (see app.consolidator._merge_facts_into_chunk_index), which is worse
+    # than attributing nothing.
+    #
+    # ON DELETE SET NULL, not CASCADE: chunks are derived data that can be
+    # rebuilt (scripts/backfill_episode_chunks.py), and losing a
+    # rebuildable pointer must never take a ledger fact with it.
+    source_chunk_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("episode_chunks.id", ondelete="SET NULL")
+    )
+
     # Retrieval (sprint 2): dense embedding + pre-rendered full-text column.
     # vector(384) since migration 0003 (default embedder: local fastembed,
     # paraphrase-multilingual-MiniLM-L12-v2).
@@ -157,7 +200,19 @@ class Fact(Base):
     search_text: Mapped[str | None] = mapped_column(String)
     # Precomputed tsvector of search_text (generated column, migration 0004):
     # ts_rank_cd reads it directly instead of re-parsing text on every query.
+    # 'english', not 'simple' (migration 0023): 'simple' has no stopword
+    # list, so a plain AND-tsquery over a natural-language question
+    # requires "what"/"is"/"the" to literally appear in search_text (a
+    # compact "predicate value" string that essentially never contains
+    # them). Interpolated from settings.fts_config rather than hardcoded:
+    # the text search configuration is a SCHEMA decision, frozen into the
+    # generated column by whichever migration built it, and this
+    # declaration must not drift away from that -- app.db.verify_fts_config
+    # enforces the match at startup.
     search_vector: Mapped[str | None] = mapped_column(
         TSVECTOR,
-        Computed("to_tsvector('simple', coalesce(search_text, ''))", persisted=True),
+        Computed(
+            f"to_tsvector('{settings.fts_config}', coalesce(search_text, ''))",
+            persisted=True,
+        ),
     )

@@ -48,7 +48,6 @@ agent when to call these tools; coverage is measured, never promised.
 """
 
 import hashlib
-import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -61,6 +60,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from app import ledger, metrics
 from app.auth import resolve_api_key
 from app.config import settings
+from haki.runtime import build_prompt_context
 from app.context import build_context, failed_packet, get_trace
 from app.db import async_session
 from app.schemas import EventIn
@@ -80,43 +80,34 @@ mcp = MCPServer(
 
 
 def _format_packet(subject_id: str, packet: dict[str, Any]) -> str:
-    """Render a ContextPacket as a text block ready to inject in a prompt."""
-    lines = [f"# Memoire projet Haki (sujet {subject_id})"]
-    status = packet.get("status", "ok")
-    if status != "ok":
-        lines.append(
-            f"[memoire {status}] la memoire peut etre incomplete pour cet appel."
+    """Render a ContextPacket as a text block ready to inject in a prompt.
+
+    Delegates to the SDK's `build_prompt_context` -- the SAME renderer the
+    gateway and every SDK user already get (22 aout). This module used to
+    carry its own, poorer copy: facts only, no episodes, no `stale`, no
+    `contested` and none of its resolution instructions, no relative dates.
+    So half the mechanisms shipped in August never reached a model through
+    MCP -- which is precisely the surface being pushed into the MCP
+    registries as an acquisition channel. Two renderers of one packet is
+    also two places for the next mechanism to be forgotten in.
+
+    Kept local, because a tool result is not a prompt block: MCP must say
+    something rather than return an empty string, and the subject is worth
+    naming since one MCP server can be scoped to several.
+    """
+    block = build_prompt_context(packet)
+    header = f"# Haki memory (subject {subject_id})"
+    if block:
+        return f"{header}\n{block}"
+    # build_prompt_context returns "" for an ok packet with nothing in it --
+    # correct for a prompt (an empty block is a distractor), wrong for a
+    # tool result, which must be able to say "nothing here" out loud.
+    if packet.get("empty_reason") == "no_relevant_memory":
+        return (
+            f"{header}\nNo memory relevant enough for this query "
+            "(facts exist for this subject; none clears the relevance floor)."
         )
-    facts = packet.get("facts", [])
-    if not facts:
-        if packet.get("empty_reason") == "no_relevant_memory":
-            lines.append(
-                "Aucune memoire suffisamment pertinente pour cette requete "
-                "(des faits existent pour ce sujet, aucun ne franchit le "
-                "plancher de pertinence)."
-            )
-        else:
-            lines.append("Aucun fait memorise pour ce sujet dans ce projet.")
-    for fact in facts:
-        value = json.dumps(fact["value"], ensure_ascii=False, sort_keys=True)
-        when = fact.get("valid_from") or "date inconnue"
-        sources = ", ".join(fact.get("source_event_ids") or []) or "aucune"
-        suffix = ""
-        if fact.get("freshness") == "unconfirmed":
-            last = fact.get("last_confirmed") or "date inconnue"
-            suffix = f" [A RECONFIRMER — derniere confirmation {last}]"
-        if fact.get("attributed_to"):
-            suffix += (
-                f" [rapporte par un tiers ({fact['attributed_to']}) — "
-                "pas une affirmation du sujet]"
-            )
-        lines.append(
-            f"- {fact['predicate']} = {value} (valide depuis {when}; "
-            f"source: {sources}){suffix}"
-        )
-    for warning in packet.get("warnings", []):
-        lines.append(f"Attention: {warning}")
-    return "\n".join(lines)
+    return f"{header}\nNo memory recorded for this subject in this project."
 
 
 class _Scope:

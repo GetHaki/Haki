@@ -51,11 +51,39 @@ def get_embedder() -> Embedder:
     if settings.embed_provider == "local":
         from app.providers.local import LocalEmbedder
 
-        _embedder = LocalEmbedder()
+        embedder = LocalEmbedder()
+        # Same refusal as the openai branch below, generalised (22 aout):
+        # the model is configuration now, so a model whose vectors do not
+        # fit the `vector(N)` columns has to fail HERE and say why, not at
+        # the first INSERT of a consolidation job. Changing the model is a
+        # migration -- every stored embedding was produced by the previous
+        # one and none of them are comparable to the new one.
+        if embedder.spec.dim != EMBEDDING_DIM:
+            raise RuntimeError(
+                f"HAKI_EMBED_MODEL={settings.embed_model!r} produces "
+                f"{embedder.spec.dim}-dimensional vectors and the embedding "
+                f"columns are vector({EMBEDDING_DIM}). Adopting it needs a "
+                "migration that widens those columns AND re-embeds every "
+                "stored row: vectors from two different models cannot be "
+                "compared, so a swap without a backfill silently empties the "
+                "vector axis for all existing data."
+            )
+        _embedder = embedder
     elif settings.embed_provider == "openai":
-        from app.providers.openai import OpenAIProvider
-
-        _embedder = OpenAIProvider()
+        # Refused, loudly, rather than accepted and failed at INSERT time
+        # (22 aout). text-embedding-3-small returns 1536 dimensions and
+        # `facts.embedding` is vector(384) since migration 0003, so this
+        # selection has never been able to work -- it was documented in a
+        # docstring nobody reads before setting an environment variable,
+        # and the failure surfaced as a database error in the middle of a
+        # consolidation job.
+        raise RuntimeError(
+            "HAKI_EMBED_PROVIDER=openai is not supported: this provider "
+            "returns 1536-dimensional vectors and facts.embedding is "
+            "vector(384) (migration 0003). Use HAKI_EMBED_PROVIDER=local. "
+            "OpenAI remains available as an EXTRACTOR "
+            "(HAKI_LLM_PROVIDER=openai)."
+        )
     elif settings.embed_provider == "fake":
         _embedder = FakeProvider()
     else:

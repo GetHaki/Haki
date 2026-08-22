@@ -39,6 +39,31 @@ def main() -> int:
         print(f"refusing to merge shards from different datasets: {dataset_names}")
         return 1
 
+    # Shards of ONE run, or nothing. Merging shards drawn from different
+    # samples produces a number that describes no experiment: the parts do
+    # not add up to a whole, and the merged report would nonetheless look
+    # exactly like a real one. Checked on the three things that define the
+    # sample -- the file it was drawn from, the filter, and how it was
+    # drawn.
+    signatures = {
+        json.dumps(
+            {
+                "sha256": shard.get("config", {}).get("dataset", {}).get("sha256"),
+                "subset": shard.get("config", {}).get("selection", {}).get("subset"),
+                "types": sorted(shard.get("config", {}).get("selection", {}).get("types") or []),
+                "seed": shard.get("config", {}).get("selection", {}).get("seed"),
+                "stratified": shard.get("config", {}).get("selection", {}).get("stratified"),
+            },
+            sort_keys=True,
+        )
+        for shard in shards
+    }
+    if len(signatures) > 1:
+        print("refusing to merge shards drawn from different samples:")
+        for signature in sorted(signatures):
+            print(f"  {signature}")
+        return 1
+
     records: list[dict] = []
     seen_qids: set[str] = set()
     for shard in shards:
@@ -54,8 +79,16 @@ def main() -> int:
             records.append(record)
 
     config = shards[0]["config"]
+    composition: dict[str, int] = {}
+    for record in records:
+        qtype = record.get("qtype", "unknown")
+        composition[qtype] = composition.get(qtype, 0) + 1
     config["selection"] = {
         **config.get("selection", {}),
+        # Recomputed from the merged records rather than copied from a
+        # shard: what the merged report describes is what it actually
+        # contains.
+        "composition": dict(sorted(composition.items())),
         "shard": f"merged from {len(shards)} shards",
     }
     summary = aggregate(records)

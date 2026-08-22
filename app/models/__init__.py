@@ -2,6 +2,7 @@ from app.models.api_key import ApiKey
 from app.models.base import Base
 from app.models.conflict import ConflictSet
 from app.models.credit_transaction import CreditTransaction
+from app.models.episode_chunk import EpisodeChunk
 from app.models.event import Event
 from app.models.fact import FACT_KINDS, MEMORY_FORMS, VOLATILITY_CLASSES, Fact, FactStatus
 from app.models.feedback import Feedback
@@ -18,6 +19,7 @@ __all__ = [
     "ConflictSet",
     "ContextTrace",
     "CreditTransaction",
+    "EpisodeChunk",
     "Event",
     "FACT_KINDS",
     "Fact",

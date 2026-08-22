@@ -37,6 +37,12 @@ class FakeProvider:
     async def embed(self, texts: list[str]) -> list[list[float]]:
         return [_embed_one(text) for text in texts]
 
+    async def embed_query(self, texts: list[str]) -> list[list[float]]:
+        # Symmetric by construction: the sha256 stand-in has no notion of a
+        # query side, and tests depend on a query and its matching document
+        # hashing to the same vector.
+        return await self.embed(texts)
+
     async def rerank(self, query: str, documents: list[str]) -> list[float]:
         """Deterministic stand-in for a cross-encoder (mechanism F-R):
         word-overlap count between query and document, lowercased. Not a

@@ -13,7 +13,7 @@
   "answer_model": "openai/gpt-4o-mini",
   "judge_model": "openai/gpt-4o-mini",
   "temperature": 0,
-  "context_budget_tokens": 900,
+  "context_budget_tokens": 2000,
   "baseline_max_context_tokens": null,
   "prompts": {
     "answer": "eval/prompts/answer_v3.txt",

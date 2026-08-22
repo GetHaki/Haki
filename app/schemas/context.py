@@ -65,6 +65,12 @@ class PacketFact(BaseModel):
     # relative time expression the extractor resolved -- see
     # app.providers.base.ExtractedFact.temporal_range. None otherwise.
     temporal_range: dict[str, str] | None = None
+    # When the fact is ABOUT, normalised to one instant (migration 0026) --
+    # distinct from valid_from, which is when it was SAID. Derived from
+    # temporal_range.start or from a single unambiguous ISO date inside
+    # `value`; None for the many facts about no particular instant.
+    observed_at: str | None = None
+    observed_at_relative: str | None = None
     # Reclassification safety net (16 aout): True when this fact was
     # activated by the automatic overflow reclassification (mechanism C)
     # rather than an extractor declaring memory_form="event" up front --
@@ -98,7 +104,15 @@ class PacketEpisode(BaseModel):
     """Source event excerpt served in the packet (episodic memory, sprint
     10): what happened, with its date and provenance id."""
 
+    # The parent event: stable, addressable through /v1/timeline, and what
+    # this field has always meant. Unchanged by the move to chunked
+    # episodes (21 Aug, migration 0024).
     event_id: str
+    # The ranked unit -- one turn-sized chunk of that event. Matches the
+    # `episode_id` of the corresponding decision in the trace, so a served
+    # episode can be correlated with the reason it was served. Additive:
+    # every existing consumer reads `event_id` and is unaffected.
+    episode_id: str | None = None
     kind: str
     occurred_at: str | None
     # Dual-date rendering (mechanism F1, 15 aout) -- see

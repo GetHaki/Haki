@@ -15,11 +15,14 @@ Two formats are supported:
   5 adversarial/abstention).
 
 Both loaders return a uniform list of `Question`. Selection (`select`) is
-deterministic: dataset order, optional type filter, then first N.
+deterministic: optional type filter, then a proportional stratified sample
+by question type (seeded, same sample in every process) -- see `select`'s
+own docstring for why this replaced plain first-N on 21 Aug.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -246,18 +249,93 @@ def load_locomo(path: str | Path) -> list[Question]:
 LOADERS = {"longmemeval": load_longmemeval, "locomo": load_locomo}
 
 
+# Default sampling seed. Pinned rather than random: two runs of the same
+# config must select the same questions, or their numbers are not
+# comparable and a trajectory made of them means nothing.
+DEFAULT_SEED = 42
+
+
+def _stable_order_key(seed: int, qid: str) -> str:
+    """A per-question shuffle key that is the same in every process.
+
+    sha1, not Python's `hash()`: hash() is randomised per interpreter
+    unless PYTHONHASHSEED is pinned, so it would reshuffle the sample on
+    every run -- the exact bug this function exists to prevent (and one
+    this project has already been bitten by, see eval/retrieval_bench.py).
+    """
+    return hashlib.sha1(f"{seed}:{qid}".encode()).hexdigest()
+
+
+def composition(questions: list[Question]) -> dict[str, int]:
+    """How many questions of each type -- what a run must publish about its sample."""
+    counts: dict[str, int] = {}
+    for question in questions:
+        counts[question.qtype] = counts.get(question.qtype, 0) + 1
+    return dict(sorted(counts.items()))
+
+
 def select(
     questions: list[Question],
     subset: int | None = None,
     types: list[str] | None = None,
+    *,
+    seed: int = DEFAULT_SEED,
+    stratify: bool = True,
 ) -> list[Question]:
-    """Deterministic selection: dataset order, optional type filter, first N."""
+    """Select `subset` questions, keeping the type mix of the full set.
+
+    Why this is not "the first N"
+    -----------------------------
+    Until 21 Aug it was: `questions[:subset]`, i.e. dataset order. On
+    LoCoMo, dataset order is conversation order -- so a 180-question run
+    and a 458-question run did not sample the same conversations, did not
+    sample the same question types, and were not comparable to each other
+    or to a full run. This project published a trajectory (17.1 % ->
+    30.6 % -> 31.4 %) built from exactly those three incomparable samples.
+
+    Proportional stratified sampling by `qtype`, with the remainder
+    apportioned largest-first so the totals add up exactly. Within a
+    stratum the order is a stable sha1 shuffle keyed by `seed`, so the same
+    (seed, subset) always yields the same questions, in every process, on
+    every machine -- and a different seed gives an independent sample,
+    which is what makes a variance estimate possible at all.
+
+    The returned list is in DATASET order, not sample order: shards are cut
+    from it by history_id (see `shard`), and ingestion cost depends on
+    keeping a history's questions together.
+
+    `stratify=False` restores the old first-N behaviour, for reproducing a
+    pre-21-Aug number on purpose.
+    """
     if types:
         wanted = {t.strip() for t in types if t.strip()}
         questions = [q for q in questions if q.qtype in wanted]
-    if subset is not None:
-        questions = questions[:subset]
-    return questions
+    if subset is None or subset >= len(questions):
+        return questions
+    if not stratify:
+        return questions[:subset]
+
+    by_type: dict[str, list[Question]] = {}
+    for question in questions:
+        by_type.setdefault(question.qtype, []).append(question)
+
+    # Largest-remainder apportionment: floor every quota, then hand the
+    # leftover places to the largest remainders. Guarantees the quotas sum
+    # to `subset` exactly, and that no non-empty stratum is silently
+    # dropped when its share rounds to zero.
+    total = len(questions)
+    exact = {qtype: len(group) * subset / total for qtype, group in by_type.items()}
+    quotas = {qtype: int(value) for qtype, value in exact.items()}
+    for qtype in sorted(
+        exact, key=lambda t: (-(exact[t] - quotas[t]), t)
+    )[: subset - sum(quotas.values())]:
+        quotas[qtype] += 1
+
+    chosen: set[str] = set()
+    for qtype, group in by_type.items():
+        ordered = sorted(group, key=lambda q: _stable_order_key(seed, q.qid))
+        chosen.update(q.qid for q in ordered[: quotas[qtype]])
+    return [q for q in questions if q.qid in chosen]
 
 
 def shard(

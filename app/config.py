@@ -40,6 +40,19 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4o-mini"
     llm_embed_model: str = "text-embedding-3-small"
 
+    # Which local embedding model, by name from app.providers.local.MODELS
+    # (22 aout). Was hardcoded; it is configuration because the choice is a
+    # product trade -- retrieval quality against latency, image size and the
+    # languages the deployment actually serves -- and because a wrong value
+    # must fail at startup rather than at the first INSERT, which is what
+    # MODELS and the dimension check in get_embedder are for.
+    #
+    # The default stays the model every existing install already has vectors
+    # from: changing it invalidates every stored embedding, so it is a
+    # migration, not a setting flip. See the measurements in
+    # app.providers.local.MODELS.
+    embed_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+
     # Reranker (mechanism F-R, Sprint 2, 15 aout): a cross-encoder re-scoring
     # pass over the top candidates already selected by the hybrid formula --
     # see app.context.RERANK_TOP_K. Off by default: extra latency (a local
@@ -49,6 +62,22 @@ class Settings(BaseSettings):
     # only -- there is no remote/paid reranker provider (see app.providers.
     # base.Reranker; local uses fastembed's TextCrossEncoder, same ONNX/CPU
     # runtime already used for embeddings).
+    # MEASURED, 21 Aug (external audit, not reproduced in this repo's own
+    # bench): once the lexical axis was repaired (app.context.fts), the
+    # composite score replaced by a normalized fusion (app.context.
+    # ranking) and episodes served as turn-sized chunks (episode_chunks),
+    # reranking the top RERANK_TOP_K candidates with the local
+    # cross-encoder moved gold evidence served from 85.1% to 86.0% on a
+    # 308-question sample -- McNemar p = 0.68, indistinguishable from
+    # noise. Reported cost: ~1.1s p50 / ~1.4s p95 of CPU per call. An
+    # earlier measurement had credited the reranker with a much larger
+    # gain; that number was measured on top of the pre-21-Aug ranking --
+    # a reranker's job is to repair the order it is given, and once the
+    # order is mostly right there is little left to repair.
+    #
+    # Stays off by default. Worth re-measuring (not re-assuming) after any
+    # change that alters the candidate set; kept available for offline/eval
+    # use where latency does not matter.
     rerank_enabled: bool = False  # HAKI_RERANK_ENABLED
     rerank_provider: str = "local"  # HAKI_RERANK_PROVIDER=local|fake
 
@@ -174,6 +203,37 @@ class Settings(BaseSettings):
     # scripts/check_recall_floor.py (local embedder recommendation:
     # RECOMMENDED_RECALL_MAX_DISTANCE in app/context).
     recall_max_distance: float = 0.0  # HAKI_RECALL_MAX_DISTANCE
+
+    # Text search configuration for the lexical retrieval axis (20 Aug,
+    # app.context.fts). It applies to BOTH sides of the match and they must
+    # agree: the `search_vector` columns of `facts` and `events` are
+    # GENERATED, so their configuration is fixed by the migration that
+    # built them (0004/0019 -> 'simple', 0023 -> 'english'), while the
+    # query side reads this setting at request time. A mismatch does not
+    # raise on its own -- it silently matches nothing, which is exactly
+    # the failure this axis already suffered for weeks with every test
+    # green. `app.db.verify_fts_config` compares the two at startup and
+    # refuses to serve on disagreement.
+    #
+    # Changing this value requires rebuilding both GENERATED columns --
+    # see `scripts/set_fts_config.py`, which performs that DDL directly
+    # (a language change is an ops action, not a new migration per swap).
+    fts_config: str = "english"  # HAKI_FTS_CONFIG=simple|english|french
+
+    # How the unified candidate pool is ordered (21 Aug).
+    # "normalized" (default): the two relevance axes (similarity,
+    # full-text) are min-max normalized over the query's own candidate
+    # pool and combined by app.context.ranking.relevance; recency leaves
+    # the relevance score and becomes a tie-break only. See
+    # app.context.ranking for the full rationale, including why RRF --
+    # tried first -- was rejected.
+    #
+    # "legacy" restores the pre-21-Aug weighted sum exactly
+    # (app.context.ranking.legacy_weighted_sum). It is a rollback path for
+    # a ranking change landing in production and a way to reproduce old
+    # eval numbers -- not a supported alternative. Remove it once the
+    # retrieval bench has run in CI for a while.
+    ranking: str = "normalized"  # HAKI_RANKING=normalized|legacy
 
 
 settings = Settings()

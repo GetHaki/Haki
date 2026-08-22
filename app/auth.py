@@ -128,6 +128,19 @@ class ApiKeyAuthMiddleware:
         # whole point of the flow) and approve authenticates itself with
         # the console service secret, same pattern as /v1/orgs — see
         # app/api/routes/cli_auth.py.
+        #
+        # POST /v1/consolidate (22 aout) joins that list ONLY when an admin
+        # key is configured: it then authenticates itself against
+        # HAKI_ADMIN_KEY, exactly like /v1/keys, because it drains every
+        # project's queue and a customer hk_ key must not reach it. Matched
+        # exactly, never by prefix -- /v1/consolidate/subject is the
+        # customer-facing, project-scoped endpoint and stays protected
+        # here. With no admin key configured (self-hosted, local), it stays
+        # behind the ordinary key requirement rather than becoming open:
+        # excluding it unconditionally would LOOSEN that deployment.
+        unscoped_consolidate = bool(settings.admin_key) and path.rstrip("/") == (
+            "/v1/consolidate"
+        )
         protected = path.startswith("/gateway/v1/") or (
             path.startswith("/v1/")
             and not path.startswith("/v1/keys")
@@ -135,6 +148,7 @@ class ApiKeyAuthMiddleware:
             and not path.startswith("/v1/billing")
             and not path.startswith("/v1/webhooks")
             and not path.startswith("/v1/cli/device")
+            and not unscoped_consolidate
         )
         if scope["type"] != "http" or not settings.auth_required or not protected:
             await self.app(scope, receive, send)

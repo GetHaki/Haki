@@ -10,6 +10,8 @@ dev/ops endpoint, to be protected with auth when principals land).
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import constant_time_bearer_match
+from app.config import settings
 from app.consolidator import run_pending_consolidations, run_pending_consolidations_for_subject
 from app.db import get_session, get_session_ops
 from app.errors import ApiError
@@ -19,9 +21,38 @@ router = APIRouter()
 
 
 @router.post("/consolidate")
-async def consolidate(session: AsyncSession = Depends(get_session_ops)) -> dict[str, int]:
-    # Ops session without RLS context: this dev/ops endpoint processes
-    # pending jobs across projects by design (documented in the README).
+async def consolidate(
+    request: Request, session: AsyncSession = Depends(get_session_ops)
+) -> dict[str, int]:
+    """Process the pending consolidation queue ACROSS every project.
+
+    Ops session without RLS context -- by design, and that is exactly why
+    it is admin-gated (22 aout). Before, any valid customer `hk_` key
+    reached it, and the auth middleware's project binding did not apply
+    because this session carries no RLS context: one tenant could drain
+    (and pay the LLM cost of) every other tenant's queue, and see nothing
+    of it. The scoped, rate-limited `/consolidate/subject` below is the
+    endpoint a customer key is meant to use.
+
+    When HAKI_ADMIN_KEY is unset the endpoint stays open, exactly like
+    /v1/keys: that is the documented self-hosted/local bootstrap, where
+    "every project" and "my project" are the same thing. docs/DEPLOY.md
+    already treats a set admin key as the signal for "this is a real
+    deployment".
+    """
+    if settings.admin_key and not constant_time_bearer_match(
+        request.headers.get("authorization"), settings.admin_key
+    ):
+        raise ApiError(
+            type="unauthorized",
+            message=(
+                "POST /v1/consolidate processes every project's queue and "
+                "requires the admin key. Use POST /v1/consolidate/subject "
+                "for a single subject with a normal key."
+            ),
+            field="Authorization",
+            status_code=401,
+        )
     processed = await run_pending_consolidations(session)
     await session.commit()
     return {"processed": processed}

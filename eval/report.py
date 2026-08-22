@@ -21,6 +21,21 @@ def _num(value: float | None, digits: int = 0) -> str:
     return f"{value:.{digits}f}"
 
 
+def _sampling_line(selection: dict) -> str:
+    """One line describing HOW the sample was drawn, and what it contains."""
+    if selection.get("subset") is None:
+        return "full corpus"
+    how = (
+        f"stratified by type, seed {selection.get('seed', '?')}"
+        if selection.get("stratified", False)
+        else "**first N questions in dataset order** "
+        "(not stratified -- not comparable to a stratified run)"
+    )
+    composition = selection.get("composition") or {}
+    detail = ", ".join(f"{qtype} {count}" for qtype, count in sorted(composition.items()))
+    return f"{how} -- actual composition: {detail or 'not recorded'}"
+
+
 def write_reports(
     results_dir: str | Path,
     dataset_name: str,
@@ -58,8 +73,9 @@ def write_reports(
         "",
         f"- Dataset : `{dataset_cfg.get('file')}` (sha256 `{dataset_cfg.get('sha256', '?')[:16]}…`)",
         f"- Source : {dataset_cfg.get('url')}",
-        f"- Subset : {config.get('selection', {}).get('subset', 'complet')} "
+        f"- Subset : {config.get('selection', {}).get('subset') or 'complet'} "
         f"(types : {', '.join(config.get('selection', {}).get('types') or ['tous'])})",
+        f"- Sampling: {_sampling_line(config.get('selection', {}))}",
         f"- Modèle réponse : `{config.get('answer_model')}` — modèle juge : `{config.get('judge_model')}` "
         f"(temperature {config.get('temperature', 0)})",
         f"- Budget ContextPacket : {config.get('context_budget_tokens')} tokens — "

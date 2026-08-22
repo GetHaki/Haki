@@ -55,6 +55,90 @@ jobs:
       - name: Run tests
         run: uv run pytest -v
 
+  retrieval-bench:
+    runs-on: ubuntu-latest
+    # The gate the eight retrieval mechanisms shipped between 15 and 20
+    # August did not have: a deterministic, LLM-free, 0 $ measurement of
+    # whether the served packet actually contains the evidence. Every one
+    # of them was merged with the whole suite green, against a packet that
+    # held the evidence 6.8 % of the time.
+    #
+    # Two conversations (CI-sized, a few minutes) on every PR; the full
+    # dataset is a manual run (`--all`). See eval/retrieval_bench.py.
+    #
+    # Only a postgres service, no redis: this job calls eval.retrieval_bench
+    # directly against the database and never starts the API, so it never
+    # exercises the redis-backed rate limiter the `python` job above needs.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: haki
+          POSTGRES_PASSWORD: haki
+          POSTGRES_DB: haki
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U haki -d haki"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      # The REAL embedder: with fake (sha256) embeddings the vector axis is
+      # noise and the number measures nothing.
+      HAKI_EMBED_PROVIDER: local
+      # The oracle extractor: the bench feeds LoCoMo's own observations
+      # through FakeProvider's mock_facts, so no LLM and no API key.
+      HAKI_LLM_PROVIDER: fake
+      # The ephemeral postgres service above only ever creates the `haki`
+      # user (see POSTGRES_USER above) -- the app's own default
+      # database_url connects as `haki_app`, which does not exist here.
+      HAKI_DATABASE_URL: postgresql+asyncpg://haki:haki@localhost:5433/haki
+      HAKI_MIGRATION_DATABASE_URL: postgresql+asyncpg://haki:haki@localhost:5433/haki
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Cache the local embedding model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/fastembed
+          key: fastembed-paraphrase-multilingual-MiniLM-L12-v2
+
+      - name: Cache the LoCoMo dataset
+        uses: actions/cache@v4
+        with:
+          # Pinned by sha256 in the config; the downloader re-verifies it
+          # on every run, so a poisoned cache fails loudly rather than
+          # silently feeding the bench a different dataset.
+          path: eval/data
+          key: locomo10-79fa87e9
+
+      - name: Download the dataset
+        run: uv run python -m eval.download eval/configs/locomo_calibration.json
+
+      - name: Run migrations
+        run: uv run alembic upgrade head
+
+      - name: Retrieval bench
+        # The threshold is a REGRESSION gate, not a target: set from a real
+        # measurement on this project's own data, with a few points of
+        # margin so a legitimate ranking change does not break the build,
+        # not enough to let a real regression through. Raise it when the
+        # measured number rises; never lower it without saying why in the
+        # PR.
+        run: uv run python -m eval.retrieval_bench --conversations 2 --min-served 80
+
   typescript:
     runs-on: ubuntu-latest
     # sdk/typescript/test/sdk.test.mjs tests against a REAL running Haki API

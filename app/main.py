@@ -13,7 +13,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from app.api.routes import api_router
 from app.auth import ApiKeyAuthMiddleware
 from app.config import settings
-from app.db import install_tcp_nodelay
+from app.db import install_tcp_nodelay, verify_fts_config
 from app.errors import error_body, register_error_handlers
 from app.mcp_server import mcp as mcp_server
 from app.rate_limit import limiter, rate_limit_exceeded_handler
@@ -58,11 +58,36 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     # Postgres clients; asyncpg exposes no socket option).
     install_tcp_nodelay()
     logger.info(
-        "startup: llm_provider=%s embed_provider=%s auth_required=%s",
+        "startup: llm_provider=%s embed_provider=%s fts_config=%s auth_required=%s",
         settings.llm_provider,
         settings.embed_provider,
+        settings.fts_config,
         settings.auth_required,
     )
+    # Refuses to serve when the queried and indexed text search
+    # configurations disagree — see app.db.verify_fts_config.
+    await verify_fts_config()
+    # `fake` is the DEFAULT extractor, which is right for tests and wrong
+    # for anything else: FakeProvider reads `payload["mock_facts"]` and
+    # returns [] otherwise. A self-hosted install that forgets
+    # HAKI_LLM_PROVIDER therefore extracts nothing, raises nothing, and
+    # builds a silently empty memory -- the worst possible default for a
+    # product whose argument is reliability. Loud at startup instead.
+    #
+    # Paired with auth_required rather than with a "is this production?"
+    # guess: HAKI_AUTH_REQUIRED=false is already documented as OPEN dev
+    # mode, never for production, and warns two lines below. "Open dev mode
+    # AND a fake extractor" is a coherent development box; "authentication
+    # on AND a fake extractor" is someone about to store nothing for real
+    # users.
+    if settings.llm_provider == "fake" and settings.auth_required:
+        raise RuntimeError(
+            "HAKI_LLM_PROVIDER=fake extracts nothing outside tests: "
+            "FakeProvider only reads mock_facts from the payload, so every "
+            "captured event would produce an empty memory, silently. Set "
+            "HAKI_LLM_PROVIDER=openai (and HAKI_LLM_API_KEY), or set "
+            "HAKI_AUTH_REQUIRED=false for the documented local dev mode."
+        )
     if not settings.auth_required:
         logger.warning(
             "HAKI_AUTH_REQUIRED=false: OPEN dev mode — every /v1 endpoint is "

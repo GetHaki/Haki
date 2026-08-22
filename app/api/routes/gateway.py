@@ -65,17 +65,6 @@ async def chat_completions(
         "x-haki-idempotency-key"
     ) or gateway.default_idempotency_key(raw_body)
 
-    # Streaming: pure pass-through, no memory, no capture (documented choice).
-    if payload.get("stream"):
-        metrics.increment("gateway.memory.disabled")
-        upstream, stream_client = await gateway.open_upstream_stream(payload)
-        return StreamingResponse(
-            gateway.stream_body(upstream, stream_client),
-            status_code=upstream.status_code,
-            media_type=upstream.headers.get("content-type"),
-            headers={"X-Haki-Memory": "disabled"},
-        )
-
     memory = "disabled"
     trace_id = None
     context_ms: float | None = None
@@ -114,6 +103,57 @@ async def chat_completions(
             )
 
     metrics.increment(f"gateway.memory.{memory}")
+
+    # Streaming (22 aout). It used to be a pure pass-through -- no memory,
+    # no capture -- and the only signal was an X-Haki-Memory: disabled
+    # header no OpenAI-compatible SDK reads. Streaming is the DEFAULT mode
+    # of nearly every integration, so in practice a large share of gateway
+    # traffic had no memory at all and no way to find out.
+    #
+    # Injection never needed the response: the memory block goes into the
+    # REQUEST, and it has just been added above like on any other call. The
+    # user turn is captured too, before forwarding -- the subject said it
+    # whatever the model ends up replying, and the subject's own words are
+    # where facts come from.
+    #
+    # What genuinely cannot be done here is capturing the ASSISTANT turn:
+    # it would mean buffering the stream to read it back, i.e. giving up
+    # the property the caller asked for. X-Haki-Capture says so explicitly
+    # instead of leaving it to be discovered.
+    if payload.get("stream"):
+        if memory == "active":
+            try:
+                await gateway.capture_turn(
+                    session,
+                    org_id=org_id,
+                    project_id=project_id,
+                    subject_id=subject_id,
+                    user_text=user_text,
+                    assistant_text=None,
+                    model=payload.get("model"),
+                    trace_id=trace_id,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    idempotency_key=idempotency_key,
+                )
+                await session.commit()
+            except Exception:  # never change what the client receives
+                logger.exception(
+                    "gateway streaming capture failed (project=%s subject=%s)",
+                    project_id,
+                    subject_id,
+                )
+        upstream, stream_client = await gateway.open_upstream_stream(payload)
+        return StreamingResponse(
+            gateway.stream_body(upstream, stream_client),
+            status_code=upstream.status_code,
+            media_type=upstream.headers.get("content-type"),
+            headers={
+                "X-Haki-Memory": memory,
+                # The assistant side of a streamed exchange is never stored.
+                "X-Haki-Capture": "user_turn_only",
+            },
+        )
 
     try:
         upstream = await gateway.forward_upstream(payload)

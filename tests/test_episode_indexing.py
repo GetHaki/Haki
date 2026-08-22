@@ -18,7 +18,7 @@ from sqlalchemy import select, text
 
 from app.consolidator import run_pending_consolidations
 from app.db import async_session
-from app.models import Event
+from app.models import EpisodeChunk, Event
 from app.providers.fake import FakeProvider, mock_fact
 
 ORG = "org_acme"
@@ -63,12 +63,27 @@ async def _tie_embeddings_and_recency(event_ids: list[uuid.UUID]) -> None:
     module tests -- same isolation technique as test_context.py's
     _collide_embedding for facts."""
     async with async_session() as session:
-        rows = [await session.get(Event, event_id) for event_id in event_ids]
-        shared_embedding = rows[0].embedding
-        shared_occurred_at = rows[0].occurred_at
-        for row in rows[1:]:
-            row.embedding = shared_embedding
-            row.occurred_at = shared_occurred_at
+        # Ties are forced on the CHUNKS, since 21 Aug (migration 0024) the
+        # unit episodic retrieval ranks -- tying the parent events would
+        # leave the chunks free to differ on exactly the axes this isolates.
+        chunk_groups = [
+            (
+                await session.execute(
+                    select(EpisodeChunk)
+                    .where(EpisodeChunk.event_id == event_id)
+                    .order_by(EpisodeChunk.ordinal)
+                )
+            )
+            .scalars()
+            .all()
+            for event_id in event_ids
+        ]
+        shared_embedding = chunk_groups[0][0].embedding
+        shared_occurred_at = chunk_groups[0][0].occurred_at
+        for group in chunk_groups[1:]:
+            for chunk in group:
+                chunk.embedding = shared_embedding
+                chunk.occurred_at = shared_occurred_at
         await session.commit()
 
 
@@ -101,7 +116,10 @@ async def test_episode_found_by_exact_keyword_over_a_similarity_tied_rival(clien
             "project_id": PROJECT,
             "subject_id": subject,
             "query": "Zolgorvex",
-            "budget_tokens": 40,
+            # One chunk and no more: date + kind + a ~50-character turn
+            # comes to ~20 estimated tokens each. Recalibrated on 21 Aug,
+            # when the served unit became a turn instead of a whole event.
+            "budget_tokens": 25,
         },
     )
     assert response.status_code == 200
@@ -145,7 +163,7 @@ async def test_episode_index_text_folds_in_its_own_extracted_facts(client):
                 select(Event.id).where(
                     Event.id == event.id,
                     text(
-                        "search_vector @@ websearch_to_tsquery('simple', 'Bandersnatch42')"
+                        "search_vector @@ websearch_to_tsquery('english', 'Bandersnatch42')"
                     ),
                 )
             )

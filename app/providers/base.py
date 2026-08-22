@@ -226,7 +226,21 @@ class Extractor(Protocol):
 @runtime_checkable
 class Embedder(Protocol):
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        """Embed texts into EMBEDDING_DIM-dimensional vectors."""
+        """Embed texts as PASSAGES, into EMBEDDING_DIM-dimensional vectors."""
+        ...
+
+    async def embed_query(self, texts: list[str]) -> list[list[float]]:
+        """Embed texts as QUERIES (22 aout).
+
+        Separate from `embed` because a retrieval-trained model is trained
+        asymmetrically -- a different prefix on the question side and on the
+        passage side -- and using the passage form for a question loses
+        recall without raising anything (measured: 89.6 % against 87.4 % on
+        the retrieval bench with snowflake-arctic-embed-s). For a symmetric
+        model this is the same function; implementing it is still required,
+        so that "which side is this text on?" is answered by the embedder
+        rather than assumed by every caller.
+        """
         ...
 
 

@@ -21,14 +21,24 @@ artificiellement plus strict de 900 tokens utilisé pour la mesure
 précédente (voir la note sous le tableau de trajectoire).
 
 Pour la première fois, cette moyenne est au niveau ou au-dessus du chiffre
-que le secteur utilise comme référence : le papier de Mem0 rapporte 66,9 %
-sur ce même dataset
-([arXiv:2504.19413](https://arxiv.org/abs/2504.19413)). On rapporte une
-fourchette plutôt qu'un seul run flatteur parce que c'est ce que trois
+que le papier d'origine de Mem0 rapporte sur ce même dataset
+([arXiv:2504.19413](https://arxiv.org/abs/2504.19413), 66,9 %). On rapporte
+une fourchette plutôt qu'un seul run flatteur parce que c'est ce que trois
 seeds indépendantes ont réellement montré -- sur la plus faible des trois
-(66,0 %), on est à peu près à parité avec le chiffre publié de Mem0, pas
-clairement devant, et cette nuance nous importe plus qu'un seul meilleur
-chiffre.
+(66,0 %), on est à peu près à parité avec ce chiffre, pas clairement devant.
+
+Transparence totale, parce que l'alternative c'est que quelqu'un d'autre le
+signale avant nous : Mem0 a depuis publié un nouvel algorithme
+« token-efficient » (juillet 2026) qui rapporte 92,5 % sur LoCoMo et 94,4 %
+sur LongMemEval --
+[mem0.ai/blog](https://mem0.ai/blog/mem0-the-token-efficient-memory-algorithm).
+On n'a pas reproduit ces chiffres sous notre propre harnais, et selon la
+description de cet article eux-mêmes, ils viennent d'un montage single-pass
+différent et reflètent la plateforme managée de Mem0, pas son SDK
+open-source -- donc on ne prend position ni pour ni contre. Ce qu'on peut
+affirmer et défendre, c'est la parité avec le seul protocole Mem0 qu'on a
+réellement reproduit de bout en bout, baseline full-context publiée
+incluse, ci-dessous.
 
 Ce qu'on a, c'est une trajectoire réellement mesurée sur un protocole figé,
 et un harnais assez honnête pour montrer ses propres points faibles.
@@ -51,7 +61,10 @@ et un harnais assez honnête pour montrer ses propres points faibles.
   cherche pas à les séparer. On est aussi passés d'un run rapporté à trois
   (seeds 42, 1, 2) : un seul échantillon de 300 questions variait jusqu'à 6
   points d'écart entre seeds sur ce protocole, ce qu'un run unique aurait
-  caché.
+  caché. Une différence de plus : la ligne du 17/08/2026 tournait avec le
+  reranker cross-encoder actif ; celle du 22/08/2026 non (désactivé par
+  défaut -- voir « Ce qui est encore cassé » plus bas, sa contribution
+  mesurée n'a pas survécu à un re-test plus rigoureux).
 </Note>
 
 Pour référence, la baseline full-context de ce même protocole -- tout
@@ -60,9 +73,22 @@ le plafond contre lequel toute cette approche est mesurée -- obtient 73,7 %
 ici, à moins d'un point de la baseline full-context publiée par Mem0
 elle-même (72,90 +/- 0,19 %). Cette proximité confirme que le harnais
 reproduit bien le protocole publié plutôt que de mesurer autre chose sous
-le même nom. Haki atteint ce plafond à 3,7 points près en utilisant environ
-un quatorzième du contexte : ~2000 tokens contre ~27 300 pour la
-transcription brute.
+le même nom. Haki atteint ce plafond à 3,7 points près en utilisant
+nettement moins de contexte : ~27 300 tokens pour la transcription brute,
+un vrai comptage de ce que l'appel baseline a facturé.
+
+<Note>
+  On publie volontairement PAS de ratio de tokens précis pour le côté Haki
+  de cette comparaison pour l'instant. Le harnais enregistre actuellement
+  la taille du contexte Haki à partir de sa propre estimation budgétaire
+  interne, pas d'un comptage indépendant du prompt littéralement envoyé au
+  modèle -- alors que le chiffre baseline ci-dessus vient directement de
+  l'usage facturé par l'API. Ce ne sont pas le même type de mesure, et
+  c'est nous qui avons repéré cet écart en relisant cette page, pas en le
+  mesurant. Un vrai chiffre au tokenizer pour le côté Haki est la prochaine
+  chose qu'on doit à cette page, pas un titre qu'on est à l'aise de publier
+  sur une estimation.
+</Note>
 
 <Note>
   Les deux premiers runs utilisent des tailles d'échantillon différentes
@@ -100,8 +126,8 @@ silencieusement entre deux versions :
   <Card title="Open-domain : échantillon encore modeste" icon="calculator" href="https://github.com/GetHaki/Haki/issues/3">
     n=19 par seed -- mieux que le n=11 du run à 180 questions, toujours pas assez pour en tirer une conclusion isolée. (`count` et les catégories adversariales sont hors périmètre de `mem0_calibration` par construction, comme dans la méthodologie publiée par Mem0 elle-même.)
   </Card>
-  <Card title="Latence du reranker, pas encore isolée" icon="gauge" href="https://github.com/GetHaki/Haki/issues/4">
-    +33,4 points mesurés, mais opt-in car le coût de latence exact n'est pas quantifié isolément.
+  <Card title="Reranker : re-mesuré, et le gain n'a pas survécu" icon="gauge" href="https://github.com/GetHaki/Haki/issues/4">
+    Re-testé le 21/08 après la refonte du ranking : 85,1 % à 86,0 % de preuve-or servie sur 308 questions -- McNemar p=0,68, indistinguable du bruit. Le chiffre antérieur, plus élevé, avait été mesuré par-dessus le ranking d'avant le 21 août et n'a pas tenu une fois ce ranking corrigé. Désactivé par défaut ; le coût de ~1,1 s p50 / ~1,4 s p95 CPU est connu et n'est pas la raison pour laquelle il est resté désactivé.
   </Card>
   <Card title="La variance entre seeds est réelle, pas du bruit à ignorer">
     66,0 % à 72,0 % sur trois seeds du même protocole à 300 questions, porté surtout par le multi-hop (49,1 % à 72,7 %). Lisez tout chiffre Haki-contre-Mem0, le nôtre y compris, comme une fourchette tant que le contraire n'est pas prouvé.
@@ -131,6 +157,14 @@ listé :
   à côté d'un chiffre vitrine.
 - **Reproduisez-le vous-même** : commandes exactes dans
   [`eval/README.md`](https://github.com/GetHaki/Haki/blob/main/eval/README.md).
-  Aucun compte requis -- ça tourne contre votre propre instance auto-hébergée.
+  Aucun compte requis -- ça tourne contre votre propre instance
+  auto-hébergée. L'historique de migrations de ce dépôt a des trous dans sa
+  numérotation (des sauts comme `0026` à `0027`) par rapport à notre dépôt
+  interne : trois migrations pour les organisations/la facturation
+  (Cloud uniquement, jamais partie de ce cœur OSS) sont omises. Aucune des
+  trois ne touche une table que ce harnais lit ou écrit -- les chemins de
+  code retrieval et consolidation testés ici ne référencent ni la table
+  `organizations` ni les tables de facturation -- donc l'écart change des
+  numéros de migration, pas la reproductibilité.
 
 *Rapport généré le 22/08/2026. Prochaine révision au prochain run complet.*

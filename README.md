@@ -5,7 +5,7 @@
 ### Reliable memory for AI agents
 *Context with proof: every fact carries a date, a source, and a status.*
 
-![Tests](https://img.shields.io/badge/tests-376%20Python%20%2B%2014%20Node%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-472%20Python%20%2B%2014%20Node%20passing-brightgreen)
 ![Python](https://img.shields.io/badge/python-3.12-blue)
 ![PostgreSQL](https://img.shields.io/badge/postgresql-16%20%2B%20pgvector-336791)
 ![p95 context](https://img.shields.io/badge/p95%20context-249ms-orange)

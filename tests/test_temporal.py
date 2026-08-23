@@ -17,7 +17,11 @@ from datetime import datetime, timezone
 
 import pytest
 
-from app.consolidator.temporal import observed_at_of, parse_iso_instant
+from app.consolidator.temporal import (
+    observed_at_of,
+    parse_iso_instant,
+    resolve_relative_range,
+)
 from app.models import FactStatus
 from app.providers.fake import mock_fact
 from tests.test_consolidator import capture, facts_for, make_memory_event, run_worker
@@ -202,3 +206,127 @@ async def test_a_fact_about_no_instant_leaves_the_field_empty(client):
     await run_worker()
     [fact] = await facts_for("usr_42", "pet")
     assert fact.observed_at is None
+
+
+# --------------------------------------------------------------------------
+# Resolving a relative expression the extractor did not resolve (23 aout)
+# --------------------------------------------------------------------------
+#
+# The extraction prompt asks for relative expressions to come back resolved
+# into `temporal_range`. Measured on a real provider -- gpt-4o-mini over 10
+# LoCoMo conversations, 220 active facts -- it does that for 4 of them:
+# 1.8 %. "next month" arrives as the string the subject said, and every
+# mechanism built on the typed column sat on a field that was empty.
+
+ANCHOR = datetime(2023, 6, 14, 10, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(
+    "phrase, expected",
+    [
+        ("next month", {"start": "2023-07-01", "end": "2023-07-31"}),
+        ("last month", {"start": "2023-05-01", "end": "2023-05-31"}),
+        ("last week", {"start": "2023-06-05", "end": "2023-06-11"}),
+        ("yesterday", {"start": "2023-06-13", "end": "2023-06-13"}),
+        ("tomorrow", {"start": "2023-06-15", "end": "2023-06-15"}),
+        ("next year", {"start": "2024-01-01", "end": "2024-12-31"}),
+        ("3 weeks ago", {"start": "2023-05-22", "end": "2023-05-28"}),
+        ("in 2 months", {"start": "2023-08-01", "end": "2023-08-31"}),
+    ],
+)
+def test_an_exact_relative_expression_is_resolved_against_the_event(phrase, expected):
+    """The range, not just its first instant.
+
+    "next month" is about a month. Keeping the end is what lets a reader
+    answer "was it in July?" rather than only "was it on 1 July?".
+    """
+    value = {"description": f"going camping {phrase}", "activity": "camping"}
+    assert resolve_relative_range(value, ANCHOR) == expected
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    ["recently", "a few weeks ago", "a couple of months ago", "soon", "a while back"],
+)
+def test_a_vague_expression_resolves_to_nothing(phrase):
+    """The rule this module applies everywhere, applied where it matters most.
+
+    A date resolved from a vague phrase reaches the reader rendered as a
+    fact. There is no exact referent for "recently", and inventing one is
+    how a memory system starts lying confidently.
+    """
+    assert resolve_relative_range({"d": f"we spoke {phrase}"}, ANCHOR) is None
+
+
+def test_two_relative_expressions_resolve_to_nothing():
+    """Same reason as two ISO dates, and as an unresolvable evidence span."""
+    value = {"a": "we met last week", "b": "and I go back next month"}
+    assert resolve_relative_range(value, ANCHOR) is None
+
+
+def test_no_anchor_means_no_answer():
+    assert resolve_relative_range({"d": "next month"}, None) is None
+
+
+async def test_a_relative_date_the_extractor_left_alone_becomes_a_range(client):
+    """End to end: the case measured at 98 % of facts."""
+    await capture(
+        client,
+        [
+            make_memory_event(
+                [mock_fact("camping_trip", {"when": "next month", "activity": "camping"})],
+                occurred_at="2023-06-14T10:00:00Z",
+            )
+        ],
+    )
+    await run_worker()
+    [fact] = await facts_for("usr_42", "camping_trip")
+    assert fact.temporal_range == {"start": "2023-07-01", "end": "2023-07-31"}
+    assert fact.observed_at == datetime(2023, 7, 1, tzinfo=timezone.utc)
+
+
+async def test_an_explicit_date_in_the_value_is_never_overridden(client):
+    """A plain ISO date is more precise than any phrase, so it wins.
+
+    The resolver only fills a hole -- it is third in line behind what the
+    extractor resolved and what the value already states exactly.
+    """
+    await capture(
+        client,
+        [
+            make_memory_event(
+                [
+                    mock_fact(
+                        "dentist_visit",
+                        {"date": "2023-06-20", "note": "booked it last week"},
+                    )
+                ],
+                occurred_at="2023-06-14T10:00:00Z",
+            )
+        ],
+    )
+    await run_worker()
+    [fact] = await facts_for("usr_42", "dentist_visit")
+    assert fact.temporal_range is None
+    assert fact.observed_at == datetime(2023, 6, 20, tzinfo=timezone.utc)
+
+
+async def test_a_range_the_extractor_did_resolve_still_wins(client):
+    await capture(
+        client,
+        [
+            make_memory_event(
+                [
+                    mock_fact(
+                        "mortgage_preapproval",
+                        {"when": "next month"},
+                        temporal_range=AUGUST,
+                    )
+                ],
+                occurred_at="2023-06-14T10:00:00Z",
+            )
+        ],
+    )
+    await run_worker()
+    [fact] = await facts_for("usr_42", "mortgage_preapproval")
+    assert fact.temporal_range == AUGUST

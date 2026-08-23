@@ -83,7 +83,7 @@ Guarantees:
   Concurrency: the whole write phase is serialized per (project_id,
   subject_id) with a transaction-scoped advisory lock, and a partial
   unique index (migration 0015, widened to include identity qualifiers by
-  0016) makes two ACTIVE facts with the same identity impossible at the DB
+  0019) makes two ACTIVE facts with the same identity impossible at the DB
   level even if some future write path forgets the lock — legitimate
   re-assertions are absorbed as duplicates/reinforcements BEFORE
   insertion, so the index only ever fires on a genuine race.
@@ -105,7 +105,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import metrics
 from app.ledger.core import acquire_subject_write_lock, create_fact, transition_fact_status
 from app.context import episode_text
-from app.consolidator.temporal import observed_at_of
+from app.consolidator.temporal import _dates_in, observed_at_of, resolve_relative_range
 from app.context.chunking import chunk_payload
 from app.models import (
     ConflictSet,
@@ -196,7 +196,7 @@ def _identity_qualifiers(qualifiers: dict[str, Any] | None) -> dict[str, Any]:
     downstream able to tell two conditions of the same measure apart: they
     read as two unrelated strings to exact matching, and as the same
     concept to the semantic fallback. Mirrors the DB index of migration
-    0016 — the two must agree, or the write path and its backstop disagree
+    0019 — the two must agree, or the write path and its backstop disagree
     about what "the same fact" means.
     """
     return {
@@ -215,7 +215,7 @@ def _identity_qualifiers_match(fact: Fact, qualifiers: dict[str, Any] | None) ->
 def _identity_qualifiers_sql():
     """SQL mirror of `_identity_qualifiers`, for filtering inside a query.
 
-    Must stay in step with the expression indexed by migration 0016 — the
+    Must stay in step with the expression indexed by migration 0019 — the
     write path and its DB backstop have to agree on what identifies a fact,
     or one of them starts rejecting rows the other considers distinct.
     """
@@ -835,7 +835,7 @@ async def _resolve_source_chunk(
 
     Anything else returns None. A fact with no attributable turn is a fact
     that enriches no chunk's index and whose source turn is guessed by the
-    context window's fallback -- both strictly the pre-21-Aug behaviour.
+    context window's fallback -- both strictly the pre-21-aout behaviour.
     """
     chunks = (
         (
@@ -1061,7 +1061,7 @@ async def _apply_candidate(
     inherit = candidate.action == "supersede" and existing is not None
     fact_kind = candidate.fact_kind or (existing.fact_kind if inherit else "attribute")
     volatility = candidate.volatility or (existing.volatility if inherit else "stable")
-    # `temporal_range` inherits for exactly the same reason (21 Aug) and
+    # `temporal_range` inherits for exactly the same reason (21 aout) and
     # was the one field of the three that did not. A status-only update
     # ("pre-approved" -> "approved") whose candidate does not restate the
     # range it was anchored on -- and the extraction prompt does not ask it
@@ -1072,6 +1072,19 @@ async def _apply_candidate(
     temporal_range = candidate.temporal_range or (
         existing.temporal_range if inherit else None
     )
+    # Last resort, and the case that turns out to be the common one
+    # (23 aout): the extractor was asked to resolve relative expressions
+    # into `temporal_range` and, measured on a real provider, does it for
+    # 1.8 % of facts. "next month" comes back as the string the subject
+    # said. Resolved here instead, against the event's own timestamp --
+    # see app.consolidator.temporal.resolve_relative_range for why only
+    # expressions with an exact calendar meaning are accepted.
+    #
+    # Third in line on purpose: an extractor-resolved range says what the
+    # extractor understood, and a plain ISO date already inside `value` is
+    # more precise than any phrase. This only fills a hole.
+    if temporal_range is None and not _dates_in(candidate.value):
+        temporal_range = resolve_relative_range(candidate.value, event.occurred_at)
 
     # Memory form (mechanism C, 15 aout): unlike fact_kind/volatility above,
     # ALWAYS inherited whenever an existing identity was matched -- on
@@ -1431,7 +1444,7 @@ async def _process_job(
             event.embedding = embedding
             event.index_text = episode_text(event.kind, event.payload)
 
-    # Episode chunks (21 Aug, migration 0024): the unit episodic retrieval
+    # Episode chunks (21 aout, migration 0027): the unit episodic retrieval
     # actually reads. An event is indexed and served in turn-sized slices
     # instead of whole -- see app.context.chunking for why (a whole session
     # cost 810 of the eval's 900-token budget, and the embedder saw 12.4 %
@@ -1613,7 +1626,7 @@ async def _process_job(
             )
             event.embedding = (await embedder.embed([event.index_text]))[0]
         # The same mechanism at the granularity retrieval actually reads
-        # (21 Aug, migration 0025). The event-level pass above is kept for
+        # (21 aout, migration 0028). The event-level pass above is kept for
         # now -- it is what scripts/backfill_episode_index_text.py and the
         # /v1/timeline lineage still look at -- but nothing in the
         # retrieval path reads it any more, and removing it is a follow-up.

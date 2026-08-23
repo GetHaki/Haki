@@ -5,9 +5,18 @@
 
 What it measures
 -----------------
-One number: **gold served** -- for each question, after ingestion,
-consolidation, ranking and packing under a token budget, is the dialogue
-turn LoCoMo annotates as holding the answer actually in the packet?
+Two numbers, and the second is the one that matters. For each question,
+after ingestion, consolidation, ranking and packing under a token budget:
+
+- **any**: is at least one of the turns LoCoMo annotates as holding the
+  answer in the packet? This is what this bench has always reported.
+- **complete**: are they ALL in it?
+
+They are the same number for a single-hop question and wildly different for
+a multi-hop one, which needs to chain two distinct moments: 83.7 % against
+32.6 % on LoCoMo conversations 1-2. Reporting only `any` credited the packet
+for half an answer, and that is most of the reason this bench read 88.3 %
+while measured accuracy read 73 %.
 
 That number is the ceiling on everything downstream. If the evidence is
 not in front of the reader, no answer prompt, no judge and no model can
@@ -60,7 +69,7 @@ Extraction is the one thing that cannot run for free -- so the bench uses
 LoCoMo's own `observation` layer as an ORACLE extractor, fed through
 `FakeProvider`'s `mock_facts` with the source turn as `evidence_span`.
 That exercises the real consolidator, the real chunk attribution
-(migration 0022 -- `source_chunk_id`) and the real key merging,
+(migration 0025 -- `source_chunk_id`) and the real key merging,
 deterministically. It also makes every conclusion about storage
 architecture STRONGER, not weaker: an oracle extractor is the best case,
 so whatever the fact channel cannot do here, it cannot do at all.
@@ -337,7 +346,16 @@ async def run(conversations: int | None, budget: int, min_served: float | None) 
                 )
                 await session.commit()
             served = await _served_dias(packet, chunk_to_dia)
-            per_category[int(qa["category"])].append(bool(served & gold))
+            # TWO metrics, because for a question whose answer needs two
+            # distinct moments, "some evidence arrived" is not the question
+            # (22 aout). `any` is what this bench has always reported and is
+            # kept for continuity; `all` is the one that predicts whether the
+            # question is ANSWERABLE from the packet. On LoCoMo multi-hop they
+            # differ by 51 points -- 83.7 % against 32.6 % -- which is most of
+            # why this bench read 88.3 % while accuracy read 73 %.
+            per_category[int(qa["category"])].append(
+                (bool(served & gold), gold.issubset(served))
+            )
         done = sum(len(v) for v in per_category.values())
         print(
             f"[{position}/{len(samples)}] {sample_id}: {len(questions)} questions "
@@ -349,12 +367,19 @@ async def run(conversations: int | None, budget: int, min_served: float | None) 
     if not all_results:
         print("no question selected", file=sys.stderr)
         return 2
-    served_rate = 100 * sum(all_results) / len(all_results)
+    served_rate = 100 * sum(any_ok for any_ok, _ in all_results) / len(all_results)
+    complete_rate = 100 * sum(all_ok for _, all_ok in all_results) / len(all_results)
 
     print(f"\ngold served @{budget} tokens: {served_rate:.1f}%  (n={len(all_results)})")
+    print(f"  of which COMPLETE (every annotated turn): {complete_rate:.1f}%")
+    print(f"\n  {'category':<12} {'any':>7s} {'complete':>9s} {'n':>6s}")
     for category, results in sorted(per_category.items()):
-        rate = 100 * sum(results) / len(results)
-        print(f"  {CATEGORY_NAMES[category]:<12} {rate:5.1f}%  (n={len(results)})")
+        any_rate = 100 * sum(a for a, _ in results) / len(results)
+        all_rate = 100 * sum(b for _, b in results) / len(results)
+        print(
+            f"  {CATEGORY_NAMES[category]:<12} {any_rate:6.1f}% {all_rate:8.1f}% "
+            f"{len(results):6d}"
+        )
 
     if min_served is not None and served_rate < min_served:
         print(

@@ -97,7 +97,21 @@ class HakiClient:
         total = 0
         delay = 2.0
         for _ in range(max_rounds):
-            response = await self._post("/v1/consolidate", headers=self._auth(key))
+            # ADMIN key, not the project key (22 aout). /v1/consolidate
+            # drains the queue of EVERY project -- it runs on an ops session
+            # with no RLS context -- so it was gated behind the admin key
+            # the day that was found. Falls back to the project key so the
+            # documented empty-table bootstrap (no admin key at all) still
+            # works.
+            response = await self._post(
+                "/v1/consolidate", headers=self._auth(self.admin_key or key)
+            )
+            if response.status_code == 401:
+                raise RuntimeError(
+                    "consolidation refused: /v1/consolidate is admin-gated. Start "
+                    "the API with HAKI_ADMIN_KEY and pass the same value to the "
+                    "harness via HAKI_EVAL_ADMIN_KEY."
+                )
             response.raise_for_status()
             total += int(response.json().get("processed", 0))
             remaining = await pending_consolidation_jobs(project_id, dsn)

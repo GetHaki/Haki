@@ -6,7 +6,7 @@ token budget, with a persisted decision trace.
 Hard filters BEFORE scoring: status = active, exact (project_id, subject_id)
 scope, valid_to IS NULL OR valid_to > now().
 
-Open conflicts (13 Aug, "stop hiding real conflicts"): a genuine two-sided
+Open conflicts (13 aout, "stop hiding real conflicts"): a genuine two-sided
 disagreement (an open ConflictSet with 2 members — the cap, see
 CONFLICT_SET_MAX_MEMBERS) is now SERVED, both facts together, each marked
 `contested`/`conflict_id` in the packet, rather than hidden. This relies on
@@ -22,30 +22,32 @@ not-yet-trusted or not-yet-a-real-conflict value: still blocked outright,
 reason_code conflict_open, exactly as before.
 Post-retrieval, a volatility check (M2) degrades a fact past its freshness
 horizon rather than hiding it: a slow fact is served flagged "unconfirmed",
-a volatile/ephemeral fact is served flagged "stale" (14 Aug — see
+a volatile/ephemeral fact is served flagged "stale" (14 aout — see
 `_fact_freshness`; hard exclusion is reserved for superseded/deleted facts
 and untrusted-origin instructions, never for "not recently reconfirmed").
 `as_of` controls what "now" means for every freshness/recency computation
 in one call — defaults to the real wall clock, unchanged for any caller
 that omits it; see `build_context`.
 
-Ranking (21 Aug, see app.context.ranking): similarity (pgvector cosine)
+Ranking (21 aout, see app.context.ranking): similarity (pgvector cosine)
 and full-text rank (ts_rank_cd over the GENERATED search_vector column)
 are min-max normalized over the query's own candidate pool, then combined
 0.65/0.35. Recency (exponential decay, 30-day time constant, on
 coalesce(valid_from, recorded_from) for facts / occurred_at for episodes)
 is NOT part of that combination -- it is a tie-break only, applied after
-relevance decides the order. HAKI_RANKING=legacy restores the pre-21-Aug
+relevance decides the order. HAKI_RANKING=legacy restores the pre-21-aout
 raw weighted sum (0.6/0.25/0.15, recency included as a relevance term) as
 a rollback path; see app.context.ranking for why that combination
 under-weighted the lexical axis by roughly an order of magnitude in
 practice and let recency dominate the ranking on off-topic queries.
 
-Multi-hop expansion (sprint 10): after the main pass, if budget remains,
-a second full-text-only lookup seeded by entities found in the facts just
-packed pulls in evidence that never matched the ORIGINAL query but becomes
-relevant once the first hop is known (`reason_code=multi_hop_expansion`).
-No LLM call, no extra embedding — bounded and one hop deep.
+Multi-hop expansion (sprint 10, deleted 23 aout): used to run a second
+full-text-only lookup seeded by entities found in the facts just packed.
+Measured before being rebuilt to compete in the unified pool: for every
+question whose packet held part of its evidence, it found the missing turn
+in 0 of 22 cases. Not underfunded, aimed at the wrong thing -- see the
+block above the fragmentation detector in `build_context` for the full
+measurement and why nothing replaces it.
 
 Latency (sprint 3) — two-phase retrieval, standard candidate-generation +
 rerank: scoring ALL active facts of a scope costs ~200 ms at 10k facts, so
@@ -59,10 +61,10 @@ neither in the vector top-K nor in the full-text top-K cannot be served even
 if recency would have lifted it — and facts beyond the cap are not traced.
 
 Budget: tokens estimated as max(1, len(text) // 4). Facts and episodes are
-packed from ONE ranked pool (key merging, 13 Aug) — episodes ranked on
+packed from ONE ranked pool (key merging, 13 aout) — episodes ranked on
 the exact same similarity/full-text/recency axes as facts, fused by
-app.context.ranking (21 Aug) — rather than two separately-budgeted pools
-merged by a fixed share (the interim fix shipped 12 Aug,
+app.context.ranking (21 aout) — rather than two separately-budgeted pools
+merged by a fixed share (the interim fix shipped 12 aout,
 after the same question set/budget answered from raw episode text instead
 of extracted facts alone scored +46.6 points: a fact is compact and
 durable, but lossy; the source wording it was extracted from is not). The
@@ -85,7 +87,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import Float, Text, cast, literal, select, tuple_
+from sqlalchemy import Float, Text, cast, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import func
 
@@ -157,7 +159,7 @@ _EPISODE_TIEBREAK = (
     EpisodeChunk.id,
 )
 
-# Reranker (mechanism F-R, 15 Aug): only the top RERANK_TOP_K candidates
+# Reranker (mechanism F-R, 15 aout): only the top RERANK_TOP_K candidates
 # from the unified pool (by the existing hybrid score, facts and episodes
 # combined) get a cross-encoder pass -- a cross-encoder scores one
 # query-document PAIR per forward call, an order of magnitude slower than
@@ -198,7 +200,7 @@ def estimate_tokens(text: str) -> int:
 EPISODE_TEXT_CHARS = 4000
 # Was 300 (~75 tokens) — a source excerpt that short is barely more than a
 # label, not enough to answer anything requiring the actual wording. Real
-# eval evidence (12-13 Aug): the SAME 15-question LongMemEval sample,
+# eval evidence (12-13 aout): the SAME 15-question LongMemEval sample,
 # SAME 4000-token budget, answered from raw source-session text instead of
 # extracted facts, scored 73.3% against 26.7% for facts alone (+46.6
 # points) — matches the published finding (LongMemEval, ICLR 2025, S5.2)
@@ -215,7 +217,7 @@ EPISODE_EXCERPT_CHARS = EPISODE_TEXT_CHARS
 #
 # Was 8, when one candidate was one whole event: hydrating eight 4 000-
 # character payloads was already the expensive part of the call. Since 21
-# Aug (migration 0024) a candidate is one turn-sized chunk, so eight of
+# aout (migration 0027) a candidate is one turn-sized chunk, so eight of
 # them is a handful of sentences -- far too narrow to rank over, given a
 # single session produces ~20 chunks. Raised to RETRIEVAL_TOP_K so
 # episodes and facts get the same candidate depth. The rows are small:
@@ -223,21 +225,21 @@ EPISODE_EXCERPT_CHARS = EPISODE_TEXT_CHARS
 # replaces.
 EPISODE_TOP_K = RETRIEVAL_TOP_K
 
-# Episode scoring (key merging, 13 Aug; full-text axis added by mechanism
-# E1a, 15 Aug): facts and episodes are packed from ONE ranked pool, not
+# Episode scoring (key merging, 13 aout; full-text axis added by mechanism
+# E1a, 15 aout): facts and episodes are packed from ONE ranked pool, not
 # two separate budgets — the previous fixed EPISODE_MIN_BUDGET_SHARE floor
-# (12 Aug) was an honest stopgap, not the real fix; this is the real fix.
+# (12 aout) was an honest stopgap, not the real fix; this is the real fix.
 # Episodes compute the exact same three axes as facts (similarity,
-# full-text, recency) -- until 15 Aug `events` had no search_vector
+# full-text, recency) -- until 15 aout `events` had no search_vector
 # column (facts did, migration 0004), so the lexical axis was structurally
-# unavailable for episodes; migration 0019 gives episodes their own
-# search_vector (events.index_text), closing that gap. Since 21 Aug the
+# unavailable for episodes; migration 0022 gives episodes their own
+# search_vector (events.index_text), closing that gap. Since 21 aout the
 # two axes that matter for ranking (similarity, full-text) are combined by
 # app.context.ranking on a pool that mixes facts and episodes together --
 # no per-kind weights needed any more, see the fusion block in
 # build_context.
 
-# Episode budget ceiling (19 Aug 2026): found via real measurement, not
+# Episode budget ceiling (19 aout 2026): found via real measurement, not
 # hypothesis. Raising budget_tokens 900->4000 on the same 458-question
 # LoCoMo subset REGRESSED accuracy 31.4%->16.4%, not a plateau -- paired
 # per-question diff showed 106 answers correct at the tighter budget
@@ -247,8 +249,8 @@ EPISODE_TOP_K = RETRIEVAL_TOP_K
 # consume most of the extra room and displace several small, precise facts
 # that fit comfortably in a tight budget -- worst for exact-value
 # questions, the majority of LoCoMo. This is a CEILING on episodes' share
-# of the budget, not the old EPISODE_MIN_BUDGET_SHARE floor (12 Aug,
-# removed 15 Aug when facts/episodes were unified into one ranked pool):
+# of the budget, not the old EPISODE_MIN_BUDGET_SHARE floor (12 aout,
+# removed 15 aout when facts/episodes were unified into one ranked pool):
 # it never reserves space for episodes, it only stops them from crowding
 # out facts once a wider budget lets more of them qualify. 0.5 reuses the
 # exact value that floor used to hold -- a reasonable starting point, not
@@ -270,24 +272,10 @@ def episode_excerpt(kind: str, payload: dict | None) -> str:
     return episode_text(kind, payload)[:EPISODE_EXCERPT_CHARS]
 
 
-_OVERLAP_TOKEN_RE = re.compile(r"\w{3,}", re.UNICODE)
-
-
-def _overlap_words(text: str) -> set[str]:
-    """Lowercased words of 3+ characters, for cheap textual overlap.
-
-    Deliberately crude: it is only ever used to pick between the chunks of
-    ONE event (see the fact_source_turn selection in build_context), where
-    the candidate set is tiny and any reasonable overlap measure gives the
-    same answer. Nothing about ranking depends on it.
-    """
-    return {match.group(0).lower() for match in _OVERLAP_TOKEN_RE.finditer(text or "")}
-
-
 def episode_row_excerpt(row: Any) -> str:
     """Verbatim text of one retrieved episode row.
 
-    Since 21 Aug (migration 0024) an episode row is an `episode_chunks`
+    Since 21 aout (migration 0027) an episode row is an `episode_chunks`
     row, so the excerpt is the chunk's own verbatim slice rather than a
     re-serialisation of the whole parent payload. The cap stays: a single
     chunk is already bounded by app.context.chunking, and the token budget
@@ -300,18 +288,11 @@ def _render(predicate: str, value: dict[str, Any]) -> str:
     return f"{predicate} {json.dumps(value, sort_keys=True, ensure_ascii=False)}"
 
 
-# Multi-hop expansion (sprint 10, bounded/deterministic): a second full-text
-# pass seeded by entities mentioned in the facts already packed, discovering
-# evidence that isn't semantically close to the ORIGINAL query but becomes
-# relevant only once the first hop is known (two facts linked only by a
-# shared name, not by wording similarity to the question). No LLM call, no
-# extra embedding call — full-text only, reusing the existing GIN index.
-# Bounded to a small number of entities, one hop deep, never recurses.
-# Pattern: SmartSearch "index-free" (arXiv:2603.15599) — rule-based entity
-# discovery + reseeded search beats an unbounded/LLM-based hop.
-MULTI_HOP_MAX_ENTITIES = 2
-MULTI_HOP_MAX_PER_ENTITY = 5
-
+# Capitalised-token entity detection, rule-based and LLM-free. Written
+# for the multi-hop expansion, and outliving it (deleted 23 aout, see
+# the block in build_context): the entity-aware fact scoring below is
+# the live user now -- it tells a fact explicitly about someone the
+# query does not name.
 _ENTITY_TOKEN_RE = re.compile(r"[A-ZÀ-Ý][a-zà-ÿ]{2,}")
 # Capitalized words that are common sentence-starters, not proper nouns —
 # excluded so the heuristic doesn't seed expansion on noise.
@@ -322,119 +303,7 @@ _ENTITY_STOPWORDS = {
 }
 
 
-def _candidate_entities(texts: list[str], exclude: set[str], limit: int) -> list[str]:
-    """Rule-based entity discovery (no LLM, no NER model): capitalized
-    tokens across `texts`, ranked by frequency, excluding common
-    sentence-initial words and anything already covered by `exclude`
-    (typically the original query's own words)."""
-    counts: dict[str, int] = {}
-    for text in texts:
-        for token in _ENTITY_TOKEN_RE.findall(text):
-            key = token.lower()
-            if key in _ENTITY_STOPWORDS or key in exclude:
-                continue
-            counts[token] = counts.get(token, 0) + 1
-    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
-    return [token for token, _ in ranked[:limit]]
-
-
-# Pseudo-relevance feedback (PRF, mechanism "expansion", 15 Aug Sprint 2 --
-# livre de construction, Partie 3.2, pipeline step 3): "noms presents dans
-# >= 2 des 10 premiers passages" -- a name recurring across SEVERAL of the
-# top-ranked candidates is itself a signal the query's real subject hasn't
-# been isolated yet, even when NONE of those individual candidates score
-# high enough to survive into the packed set. Distinct from the multi-hop
-# seeds in build_context (which come only from what got PACKED): PRF looks
-# at the pool BEFORE packing/reranking commits to a selection, so it can
-# surface a name central to the topic even when budget forced its own
-# mentions out entirely. Cited gain: +9.2pts on long corpora, neutral (not
-# harmful) on short ones -- no corpus-size gate applied here, that would
-# need its own calibration data to set a threshold safely; "neutral" means
-# always running it costs nothing observed, not that it is untested.
-PRF_TOP_K = 10
-PRF_MIN_OCCURRENCES = 2
-
-
-def _prf_seed_texts(pool_head: list[tuple[float, str, Any]]) -> list[str]:
-    """Entity tokens appearing in at least PRF_MIN_OCCURRENCES of the top
-    PRF_TOP_K scored pool items (regardless of whether any of those items
-    end up packed). Each returned as its own single-word "text" so the
-    caller can simply append them to a `seed_texts` list already destined
-    for `_candidate_entities`, which re-extracts capitalized tokens from
-    free text -- no separate merge path needed."""
-    counts: dict[str, int] = {}
-    for _score, kind, row in pool_head[:PRF_TOP_K]:
-        text = (
-            _render(row.predicate, row.value)
-            if kind == "fact"
-            else episode_row_excerpt(row)
-        )
-        seen_in_this_item = {
-            t for t in _ENTITY_TOKEN_RE.findall(text) if t.lower() not in _ENTITY_STOPWORDS
-        }
-        for token in seen_in_this_item:
-            counts[token] = counts.get(token, 0) + 1
-    return [token for token, count in counts.items() if count >= PRF_MIN_OCCURRENCES]
-
-
-async def _expand_via_entities(
-    session: AsyncSession,
-    *,
-    project_id: str,
-    subject_id: str,
-    seed_texts: list[str],
-    query_words: set[str],
-    exclude_ids: set[uuid.UUID],
-    now: Any,
-) -> list[Any]:
-    """Second full-text pass seeded by entities found in `seed_texts`
-    (already-packed facts). Returns extra Fact rows (id/predicate/value/
-    confidence/valid_from/source_event_ids), ranked by ts_rank within each
-    entity's own query, never revisiting `exclude_ids`. Pure full-text
-    (GIN index) — no embedding call, so it stays cheap enough for the hot
-    path."""
-    entities = _candidate_entities(seed_texts, exclude=query_words, limit=MULTI_HOP_MAX_ENTITIES)
-    found: list[Any] = []
-    seen: set[uuid.UUID] = set(exclude_ids)
-    for entity in entities:
-        entity_query = func.websearch_to_tsquery("english", entity)
-        stmt = (
-            select(
-                Fact.id,
-                Fact.predicate,
-                Fact.value,
-                Fact.confidence,
-                Fact.valid_from,
-                Fact.source_event_ids,
-                Fact.recorded_from,
-                Fact.last_reinforced_at,
-                Fact.fact_kind,
-                Fact.volatility,
-                Fact.origin_trust,
-                Fact.qualifiers,
-                Fact.temporal_range,
-                Fact.reclassified_at,
-            )
-            .where(
-                Fact.project_id == project_id,
-                Fact.subject_id == subject_id,
-                Fact.status == FactStatus.active,
-                (Fact.valid_to.is_(None)) | (Fact.valid_to > now),
-                func.coalesce(Fact.valid_from, Fact.recorded_from) <= now,
-                Fact.search_vector.op("@@")(entity_query),
-            )
-            .order_by(func.ts_rank_cd(Fact.search_vector, entity_query).desc(), Fact.id)
-            .limit(MULTI_HOP_MAX_PER_ENTITY)
-        )
-        for row in (await session.execute(stmt)).all():
-            if row.id in seen:
-                continue
-            seen.add(row.id)
-            found.append(row)
-    return found
-
-
-# Entity-aware fact scoring (13 Aug, LoCoMo diagnostic): a conversation
+# Entity-aware fact scoring (13 aout, LoCoMo diagnostic): a conversation
 # involving two named people (LoCoMo's structure — the tracked subject and
 # whoever else appears in it) gets ingested under ONE shared subject; the
 # extraction prompt already tags a fact about someone other than the
@@ -458,7 +327,7 @@ async def _expand_via_entities(
 # remotely relevant, same principle as the recall gate never forcing a
 # hard zero.
 #
-# Recalibrated by measurement (22 Aug). Neither magnitude had ever been
+# Recalibrated by measurement (22 aout). Neither magnitude had ever been
 # measured; both were wrong. On eval.retrieval_bench (LoCoMo conversations
 # 1-2, n=231, budget 2000, gold served -- reproducible to the packet since
 # the determinism fix of the same day):
@@ -512,7 +381,7 @@ def _content_tiebreak(kind: str, row: Any) -> tuple[float, str]:
 def _entity_adjusted_score(score: float, value: Any, query_entities: set[str]) -> float:
     """Demote a fact explicitly about someone the query does not name.
 
-    Matching is TOKEN OVERLAP, not string equality (22 Aug). The previous
+    Matching is TOKEN OVERLAP, not string equality (22 aout). The previous
     rule compared a whole tagged name against `query_entities`, a set that
     only ever holds SINGLE capitalised tokens because that is what
     `_query_entities` extracts -- so a fact tagged "John Smith" could not
@@ -560,7 +429,7 @@ def _fact_freshness(row: Any, now: datetime) -> str:
     against `now` (real wall-clock time, or the caller's `as_of` — see
     `build_context`).
 
-    14 Aug (mechanism D, research/Diagnostic_Couverture_2026-08-14.md): a
+    14 aout (mecanisme D, research/Diagnostic_Couverture_2026-08-14.md): a
     volatile/ephemeral fact past its horizon used to be excluded outright
     ("expired", hard gate) -- changed to served, flagged "stale", same
     honest-degradation treatment a "slow" fact already got as "unconfirmed".
@@ -587,7 +456,7 @@ def _fact_freshness(row: Any, now: datetime) -> str:
 
 def _relative_to_now(dt: datetime, now: datetime) -> str:
     """Render `dt` as an exact, precomputed offset from `now` (mechanism
-    F1, 15 Aug): "N days/weeks before/after the question". Deterministic
+    F1, 15 aout): "N days/weeks before/after the question". Deterministic
     Python arithmetic, not left for the reader to derive — the point of
     dual-date rendering (Partie 3.6): the reader VERIFIES a number that is
     already in the text instead of calculating one from two ISO dates,
@@ -622,7 +491,7 @@ def _packet_fact(
         "value": row.value,
         "confidence": row.confidence,
         "valid_from": row.valid_from.isoformat() if row.valid_from else None,
-        # Dual-date rendering (mechanism F1, 15 Aug): exact offset from the
+        # Dual-date rendering (mechanism F1, 15 aout): exact offset from the
         # temporal point of view (`as_of`, defaulting to real "now" -- see
         # `now_dt` in build_context), so the reader reads a number instead
         # of computing one. None only when valid_from itself is None.
@@ -635,7 +504,7 @@ def _packet_fact(
         # valid_from (always the MESSAGE's own timestamp). See
         # app.providers.base.ExtractedFact.temporal_range.
         "temporal_range": getattr(row, "temporal_range", None),
-        # When the fact is ABOUT (21 Aug), as a normalised instant --
+        # When the fact is ABOUT (21 aout), as a normalised instant --
         # distinct from valid_from, which is when it was SAID. A reader
         # answering "when did X happen?" had to pick it out of free-form
         # `value` JSON or out of `temporal_range`, in two different shapes;
@@ -649,7 +518,7 @@ def _packet_fact(
             if getattr(row, "observed_at", None) and now
             else None
         ),
-        # Reclassification safety net (found by code review, 16 Aug): True
+        # Reclassification safety net (found by code review, 16 aout): True
         # when this fact was activated by the automatic overflow
         # reclassification (a 3rd competing "state" value flipping the
         # whole identity to "event") rather than an extractor declaring
@@ -668,7 +537,7 @@ def _packet_fact(
         # and who actually said it when a third party did.
         "origin_trust": row.origin_trust or "trusted",
         "attributed_to": (row.qualifiers or {}).get("attributed_to"),
-        # Open conflicts (13 Aug): set together with its sibling(s) from the
+        # Open conflicts (13 aout): set together with its sibling(s) from the
         # same open ConflictSet when this fact is one half of a genuine
         # two-sided disagreement being served rather than hidden — see
         # CONTESTED_CONFLICT_MIN_MEMBERS. None for an ordinary fact.
@@ -730,7 +599,7 @@ async def build_context(
     appended to the packet warnings BEFORE the trace is persisted, so the
     inspection trace shows exactly what the API returned.
 
-    `as_of` (14 Aug, mechanism D): the point in time "now" means for every
+    `as_of` (14 aout, mecanisme D): the point in time "now" means for every
     freshness computation in this call -- volatility horizons, the
     valid_to scope filter, and the recency term of both scoring formulas.
     Defaults to the real wall clock (`func.now()`), unchanged behavior for
@@ -745,13 +614,13 @@ async def build_context(
     for the measured effect (~38% of facts hidden on every query on the
     LoCoMo/LongMemEval harnesses before this parameter existed).
 
-    `reranker` (mechanism F-R, 15 Aug, Sprint 2): only consulted, and only
+    `reranker` (mechanism F-R, 15 aout, Sprint 2): only consulted, and only
     ever instantiated, when `settings.rerank_enabled` -- omitted here, an
     unset flag means the cross-encoder pass never runs and every candidate
     keeps its hybrid-formula score exactly as before this mechanism
     existed. See RERANK_TOP_K below for what actually gets reranked.
 
-    `budget_tokens` default (2000, was 900, 15 Aug Sprint 2): external
+    `budget_tokens` default (2000, was 900, 15 aout Sprint 2): external
     accuracy-vs-budget curves cited in research/Haki_Livre_Construction_
     2026-08-15.md agree the gain from more served context flattens well
     before 4000 tokens with a gpt-4o-mini-class reader -- ~1500-2500 is
@@ -787,7 +656,7 @@ async def build_context(
     # SQL arithmetic (`now - Fact.valid_from`) exactly like func.now() does.
     now = literal(as_of) if as_of is not None else func.now()
     similarity = func.coalesce(1 - Fact.embedding.cosine_distance(query_embedding), 0.0)
-    # Lexical axis (20 Aug, upgraded same day): an OR tsquery built from
+    # Lexical axis (20 aout, upgraded same day): an OR tsquery built from
     # the query's own lexemes, in the configuration the search_vector
     # columns were GENERATED with -- see app.context.fts for the full
     # rationale and the verified measurements. websearch_to_tsquery joins
@@ -804,7 +673,7 @@ async def build_context(
     # than left unused.
     ts_query, _ts_query_text = await build_query_tsquery(session, query)
     fulltext = func.coalesce(func.ts_rank_cd(Fact.search_vector, ts_query), 0.0)
-    # `greatest(..., 0)` (20 Aug, bug): without it, a fact whose
+    # `greatest(..., 0)` (20 aout, bug): without it, a fact whose
     # valid_from is AFTER the point of view (`as_of`, always set by the
     # eval harness) would make the exponent POSITIVE -- exp() returning
     # 2.72 at 30 days ahead, 20 at 90 days, instead of a value in [0, 1].
@@ -822,7 +691,7 @@ async def build_context(
         )
         / RECENCY_TAU_SECONDS
     )
-    # No composite score in SQL any more (21 Aug): the three axes are
+    # No composite score in SQL any more (21 aout): the three axes are
     # returned as they are and combined in Python by app.context.ranking,
     # so that facts and episodes -- two separate queries -- are ranked
     # against each other on ONE consistent scale, and so that the
@@ -836,7 +705,7 @@ async def build_context(
     # above, exp(-(now - valid_from) / TAU), goes POSITIVE for that negative
     # elapsed time (exponential growth instead of decay), so the fact's
     # score can run away and crowd out genuinely relevant facts from the
-    # packet. Found via external code audit, confirmed 20 Aug 2026.
+    # packet. Found via external code audit, confirmed 20 aout 2026.
     scope_filters = [
         Fact.project_id == project_id,
         Fact.subject_id == subject_id,
@@ -850,7 +719,7 @@ async def build_context(
     # 10k facts in the sprint-3 benchmark).
     #
     # Every ORDER BY below carries `_FACT_TIEBREAK` as a secondary key, not
-    # a bare `Fact.id` (22 Aug). A random id was still A key -- ties on the
+    # a bare `Fact.id` (22 aout). A random id was still A key -- ties on the
     # primary axis never crashed anything -- but it is a random one: two
     # otherwise-identical calls that both hit a tied group can keep a
     # DIFFERENT subset of it, because which uuid4 sorts first has nothing to
@@ -882,8 +751,8 @@ async def build_context(
     # the sprint-3 benchmark). The cap keeps the work flat no matter how many
     # facts the scope holds.
     #
-    # `Fact.id` as a secondary sort key (13 Aug, "Bug 2" diagnostic, 11
-    # Aug): facts written in the same consolidation batch routinely share
+    # `Fact.id` as a secondary sort key (13 aout, "Bug 2" diagnostic, 11
+    # aout): facts written in the same consolidation batch routinely share
     # their recency value down to the minute, so for an off-topic query a
     # whole batch can tie exactly on every axis. Without a stable secondary
     # key, Postgres's query plan is free to return a tied group in a
@@ -894,7 +763,7 @@ async def build_context(
     # mechanism behind the originally-reported "Bug 2" symptom (five
     # different questions returning an identical packet) once budget
     # headroom alone was ruled out. This ORDER BY is generation-stage only
-    # now (21 Aug) -- the same reasoning applies, more directly, to the
+    # now (21 aout) -- the same reasoning applies, more directly, to the
     # final fusion sort below (`pool.sort`, id as its own last tie-break).
     stmt = (
         select(
@@ -912,10 +781,10 @@ async def build_context(
             Fact.qualifiers,
             Fact.temporal_range,
             Fact.reclassified_at,
-            # When the fact is ABOUT, normalised (migration 0026) -- see
+            # When the fact is ABOUT, normalised (migration 0029) -- see
             # _packet_fact for the rendering.
             Fact.observed_at,
-            # Exact fact-to-turn provenance (migration 0025). Used by the
+            # Exact fact-to-turn provenance (migration 0028). Used by the
             # context window below to serve the turn a fact was actually
             # extracted from, instead of guessing among the turns of its
             # source event.
@@ -939,7 +808,7 @@ async def build_context(
     rows = (await session.execute(stmt)).all()
     stage_timings["retrieval"] = round((time.perf_counter() - retrieval_start) * 1000)
 
-    # Split open conflicts (13 Aug): a genuine 2-member disagreement is
+    # Split open conflicts (13 aout): a genuine 2-member disagreement is
     # served, contested, sibling alongside sibling; a single-member set (a
     # held/quarantined candidate) stays fully blocked — see
     # CONTESTED_CONFLICT_MIN_MEMBERS and the module docstring.
@@ -989,7 +858,7 @@ async def build_context(
                 }
             )
             continue
-        # 14 Aug (mechanism D): "stale" (volatile/ephemeral past horizon) is
+        # 14 aout (mecanisme D): "stale" (volatile/ephemeral past horizon) is
         # no longer excluded here -- it is served like "unconfirmed" always
         # was, annotated in the packet via freshness_by_id/_packet_fact.
         freshness_by_id[row.id] = _fact_freshness(row, now_dt)
@@ -998,7 +867,7 @@ async def build_context(
     # A held/quarantined candidate is blocked too (it is not active, so it
     # never entered the scored `rows` above at all) — traced regardless of
     # whether it would otherwise have matched this query, same as before
-    # 13 Aug. Only single-member sets: a contested pair's candidate side
+    # 13 aout. Only single-member sets: a contested pair's candidate side
     # is handled separately, packed alongside its active sibling below.
     if quarantined_ids:
         quarantined_candidates = (
@@ -1022,17 +891,17 @@ async def build_context(
                 }
             )
 
-    # Episodic memory (sprint 10, key merging 13 Aug): the most relevant
+    # Episodic memory (sprint 10, key merging 13 aout): the most relevant
     # turn-sized SLICES of the same scope, on the SAME three axes as facts
     # (similarity, full-text, recency), so they compete fairly in ONE
-    # ranked pool below (app.context.ranking, 21 Aug), not two
+    # ranked pool below (app.context.ranking, 21 aout), not two
     # separately-budgeted ones. This is what answers "what happened /
-    # when" questions, and (12-13 Aug finding) carries information a
+    # when" questions, and (12-13 aout finding) carries information a
     # compact fact loses entirely: the extractor keeps durable facts only,
     # episodes keep the dated events in their own words.
     #
-    # Episodes are read from `episode_chunks`, not from `events` (21 Aug,
-    # migration 0024): one turn-sized slice per row instead of one whole
+    # Episodes are read from `episode_chunks`, not from `events` (21 aout,
+    # migration 0027): one turn-sized slice per row instead of one whole
     # payload. An event was costing 810 tokens of a 900-token budget to
     # serve and had 87.6 % of itself outside the embedder's ~128-token
     # window -- see app.context.chunking for the measurements. `events`
@@ -1041,14 +910,14 @@ async def build_context(
     episode_similarity = func.coalesce(
         1 - EpisodeChunk.embedding.cosine_distance(query_embedding), 0.0
     )
-    # Full-text axis (mechanism E1a, 15 Aug): the same ts_query already
+    # Full-text axis (mechanism E1a, 15 aout): the same ts_query already
     # built for facts above -- one lexical query, several search_vector
     # columns. NULL-safe: a chunk whose embedding or index_text is missing
     # scores 0 on the axis rather than dropping out of the pool.
     episode_fulltext = func.coalesce(
         func.ts_rank_cd(EpisodeChunk.search_vector, ts_query), 0.0
     )
-    # Same clamp as the fact recency above (20 Aug): a chunk dated after
+    # Same clamp as the fact recency above (20 aout): a chunk dated after
     # the point of view would otherwise score exp(+x). The `occurred_at <=
     # now` filter below is the primary fix; this keeps the expression
     # well-defined regardless.
@@ -1059,7 +928,7 @@ async def build_context(
     episodes_start = time.perf_counter()
     # Candidate generation mirrors the two-CTE shape facts have had since
     # sprint 3: top-K by vector distance UNION top-K by full-text rank, on
-    # IDS ONLY. Before 21 Aug episodes were generated by the composite
+    # IDS ONLY. Before 21 aout episodes were generated by the composite
     # score itself, so a broken composite silently broke generation too --
     # an episode only the lexical axis could find never entered the pool,
     # whatever the ranking did afterwards.
@@ -1067,7 +936,7 @@ async def build_context(
         EpisodeChunk.project_id == project_id,
         EpisodeChunk.subject_id == subject_id,
         EpisodeChunk.embedding.is_not(None),
-        # Point of view (20 Aug): a chunk of a conversation that happens
+        # Point of view (20 aout): a chunk of a conversation that happens
         # after `as_of` has not happened yet as far as this call is
         # concerned.
         EpisodeChunk.occurred_at <= now,
@@ -1168,7 +1037,7 @@ async def build_context(
             continue
         survivors.append(("episode", row))
 
-    # Ordering (21 Aug). Two changes, both measured -- see
+    # Ordering (21 aout). Two changes, both measured -- see
     # app.context.ranking for the numbers and for why RRF, tried first,
     # was rejected:
     #
@@ -1212,7 +1081,7 @@ async def build_context(
             for (_, row), recency_value in zip(survivors, recency_axis)
         }
     # Sort key, in order: relevance, then recency, then CONTENT, then id
-    # (22 Aug, added the content key). `row.id` alone used to be the last
+    # (22 aout, added the content key). `row.id` alone used to be the last
     # tie-break -- not decoration, exact ties are routine (a low-signal
     # query ties a whole consolidation batch) and Postgres gives no stable
     # order for tied rows between two identical calls, confirmed
@@ -1232,12 +1101,7 @@ async def build_context(
         )
     )
 
-    # PRF (mechanism "expansion", 15 Aug Sprint 2): computed on the pool
-    # BEFORE reranking/packing commit to a selection -- see _prf_seed_texts.
-    # Consumed below, once the multi-hop expansion pass runs.
-    prf_seed_texts = _prf_seed_texts(pool)
-
-    # Reranker (mechanism F-R, 15 Aug): re-order only the top RERANK_TOP_K
+    # Reranker (mechanism F-R, 15 aout): re-order only the top RERANK_TOP_K
     # candidates (already sorted by the hybrid score above) with a
     # cross-encoder pass, then keep that block strictly ahead of the
     # untouched tail. Cross-encoder scores are NOT on the same scale as the
@@ -1268,18 +1132,7 @@ async def build_context(
 
     packet_facts: list[dict[str, Any]] = []
     packet_episodes: list[dict[str, Any]] = []
-    # fact_id -> the chunk it was extracted from, when the extractor's
-    # evidence_span could be resolved to one (migration 0025). Kept beside
-    # packet_facts rather than inside it: it is retrieval plumbing for the
-    # context window below, not part of the public packet.
-    source_chunk_by_fact_id: dict[str, uuid.UUID | None] = {}
     packed_fact_ids: set[uuid.UUID] = set()
-    # Context window (mechanism F2, 15 Aug): raw (id, occurred_at) of every
-    # episode packed by score in the loop below, kept here rather than
-    # re-parsed from packet_episodes' ISO strings afterwards -- the
-    # neighbor pass right after this loop needs the real datetime to query
-    # against, not its string rendering.
-    packed_episode_meta: list[tuple[uuid.UUID, datetime, int]] = []
     token_count = 0
     episode_token_count = 0
     episode_budget = budget_tokens * EPISODE_MAX_BUDGET_SHARE
@@ -1319,7 +1172,6 @@ async def build_context(
             episodes_packed += 1
         if kind == "fact":
             conflict = contested_conflict_by_fact.get(row.id)
-            source_chunk_by_fact_id[str(row.id)] = getattr(row, "source_chunk_id", None)
             packet_facts.append(
                 _packet_fact(
                     row,
@@ -1338,7 +1190,7 @@ async def build_context(
             )
             if conflict is not None:
                 # Serve the sibling(s) of this genuine disagreement right
-                # alongside it (13 Aug): the losing side never entered the
+                # alongside it (13 aout): the losing side never entered the
                 # scored pool on its own (still `candidate`, filtered out of
                 # phase 2 above) — without this, the pool would only ever
                 # surface the winning/active half, defeating the point of
@@ -1388,7 +1240,7 @@ async def build_context(
                     "episode_id": str(row.id),
                     "kind": row.kind,
                     "occurred_at": row.occurred_at.isoformat() if row.occurred_at else None,
-                    # Dual-date rendering (mechanism F1, 15 Aug) -- see
+                    # Dual-date rendering (mechanism F1, 15 aout) -- see
                     # _relative_to_now / PacketFact.valid_from_relative.
                     "occurred_at_relative": (
                         _relative_to_now(row.occurred_at, now_dt) if row.occurred_at else None
@@ -1397,264 +1249,51 @@ async def build_context(
                     "context_neighbor": False,
                 }
             )
-            if row.occurred_at is not None:
-                packed_episode_meta.append((row.id, row.occurred_at, row.ordinal))
             decisions.append(
                 {"episode_id": str(row.id), "action": "included", "reason_code": "top_score"}
             )
 
-    # Multi-hop expansion: only worth trying if the main pass packed
-    # something to seed entities from, and budget remains. Stays a
-    # facts-only bolt-on OUTSIDE the unified pool above: ts_rank_cd within
-    # a per-entity query was never on the same score scale as the primary
-    # hybrid/episode score, before or after key merging — appended directly
-    # against whatever budget the unified pass left, not re-merged into it.
-    # Multi-hop rows are deliberately NOT gated by the recall floor: they
-    # are seeded only by gate-passing facts, and their whole point is
-    # lexical evidence that is semantically far from the ORIGINAL query.
-    if packet_facts and token_count < budget_tokens:
-        multi_hop_start = time.perf_counter()
-        query_words = {t.lower() for t in _ENTITY_TOKEN_RE.findall(query)}
-        # PRF seeds (names recurring in the pre-packing pool) ride alongside
-        # the packed-fact seeds -- same downstream entity-frequency ranking
-        # in _candidate_entities, just a second source of raw material.
-        seed_texts = [_render(f["predicate"], f["value"]) for f in packet_facts] + prf_seed_texts
-        included_fact_ids = {uuid.UUID(f["id"]) for f in packet_facts}
-        extra_rows = await _expand_via_entities(
-            session,
-            project_id=project_id,
-            subject_id=subject_id,
-            seed_texts=seed_texts,
-            query_words=query_words,
-            exclude_ids=included_fact_ids
-            | quarantined_ids
-            | set(contested_conflict_by_fact.keys()),
-            now=now,
-        )
-        stage_timings["multi_hop_expansion"] = round(
-            (time.perf_counter() - multi_hop_start) * 1000
-        )
-        for row in extra_rows:
-            if token_count >= budget_tokens:
-                break
-            freshness = _fact_freshness(row, now_dt)
-            cost = estimate_tokens(_render(row.predicate, row.value))
-            if token_count + cost <= budget_tokens:
-                packet_facts.append(_packet_fact(row, freshness, now=now_dt))
-                token_count += cost
-                decisions.append(
-                    {
-                        "fact_id": str(row.id),
-                        "action": "included",
-                        "reason_code": "multi_hop_expansion",
-                    }
-                )
-
-    # Context window (mechanism F2, 15 Aug): a packed slot never stands
-    # alone. An episode packed by score carries its immediate temporal
-    # neighbor (radius 1 -- one event right before and one right after, in
-    # the same scope) so the agent gets the surrounding turn, not just an
-    # isolated slice; a packed FACT additionally carries the episode it was
-    # actually extracted from (its "source turn", the first entry of
-    # source_event_ids -- the concrete conversational moment the compact
-    # fact was condensed from). Bolt-on OUTSIDE the unified pool, same
-    # shape as multi-hop expansion above: these rows never compete on
-    # score, they add context to an ALREADY-won slot rather than new
-    # evidence, so they are appended against whatever budget remains
-    # instead of being re-merged into the ranked pool.
-    if token_count < budget_tokens and (packed_episode_meta or packet_facts):
-        context_window_start = time.perf_counter()
-        packed_chunk_ids = {chunk_id for chunk_id, _, _ in packed_episode_meta}
-        neighbor_reason: dict[uuid.UUID, str] = {}
-
-        neighbor_scope = (
-            EpisodeChunk.project_id == project_id,
-            EpisodeChunk.subject_id == subject_id,
-            EpisodeChunk.origin_trust != "untrusted",
-        )
-        # Since 21 Aug the neighbour of an episode is the adjacent CHUNK,
-        # not the adjacent event -- which is what this mechanism always
-        # meant by "the surrounding turn". Ordering is (occurred_at,
-        # ordinal): every chunk of one event shares its timestamp, so the
-        # ordinal is what puts turn 4 between turn 3 and turn 5.
-        position = tuple_(EpisodeChunk.occurred_at, EpisodeChunk.ordinal)
-        for chunk_id, occurred_at, ordinal in packed_episode_meta:
-            here = tuple_(literal(occurred_at), literal(ordinal))
-            before_id = (
-                await session.execute(
-                    select(EpisodeChunk.id)
-                    .where(*neighbor_scope, position < here)
-                    .order_by(EpisodeChunk.occurred_at.desc(), EpisodeChunk.ordinal.desc())
-                    .limit(1)
-                )
-            ).scalar_one_or_none()
-            after_id = (
-                await session.execute(
-                    select(EpisodeChunk.id)
-                    .where(
-                        *neighbor_scope,
-                        position > here,
-                        # Point of view (20 Aug): the "after" neighbour is
-                        # the one place in this module that deliberately
-                        # looks FORWARD in time, so it is also the one that
-                        # must be bounded by `as_of` explicitly. Without
-                        # it, a packet answering a question dated T could
-                        # carry the verbatim text of a conversation that
-                        # has not happened yet -- the same leak the primary
-                        # episode query was fixed for, reintroduced by a
-                        # bolt-on that never competes on score.
-                        EpisodeChunk.occurred_at <= now,
-                    )
-                    .order_by(EpisodeChunk.occurred_at.asc(), EpisodeChunk.ordinal.asc())
-                    .limit(1)
-                )
-            ).scalar_one_or_none()
-            for neighbor_id in (before_id, after_id):
-                if (
-                    neighbor_id is not None
-                    and neighbor_id not in packed_chunk_ids
-                    and neighbor_id not in neighbor_reason
-                ):
-                    neighbor_reason[neighbor_id] = "episode_neighbor"
-
-        # A packed fact carries the moment it was extracted from. Facts
-        # that resolved an exact `source_chunk_id` at write time (migration
-        # 0028) say so here first -- no guessing needed. Only the rest
-        # (evidence_span absent, or matching no single chunk) fall through
-        # to the word-overlap heuristic below: bounded and honest, the
-        # candidate set is only ever the chunks of the event the fact
-        # actually came from, so the worst case is the wrong turn of the
-        # right conversation.
-        for chunk_id in {
-            source_chunk_by_fact_id.get(fact["id"]) for fact in packet_facts
-        }:
-            if (
-                chunk_id is not None
-                and chunk_id not in packed_chunk_ids
-                and chunk_id not in neighbor_reason
-            ):
-                neighbor_reason[chunk_id] = "fact_source_turn"
-
-        source_event_ids = {
-            uuid.UUID(fact["source_event_ids"][0])
-            for fact in packet_facts
-            if fact["source_event_ids"]
-            and source_chunk_by_fact_id.get(fact["id"]) is None
-        }
-        if source_event_ids:
-            source_chunks: dict[uuid.UUID, list[tuple[int, uuid.UUID, str]]] = {}
-            for chunk in (
-                (
-                    await session.execute(
-                        select(
-                            EpisodeChunk.event_id,
-                            EpisodeChunk.ordinal,
-                            EpisodeChunk.id,
-                            EpisodeChunk.text,
-                        ).where(
-                            *neighbor_scope,
-                            EpisodeChunk.event_id.in_(source_event_ids),
-                            EpisodeChunk.occurred_at <= now,
-                        )
-                    )
-                )
-                .all()
-            ):
-                source_chunks.setdefault(chunk.event_id, []).append(
-                    (chunk.ordinal, chunk.id, chunk.text)
-                )
-            for fact in packet_facts:
-                if not fact["source_event_ids"]:
-                    continue
-                if source_chunk_by_fact_id.get(fact["id"]) is not None:
-                    continue  # already handled exactly, above
-                candidates = source_chunks.get(uuid.UUID(fact["source_event_ids"][0]))
-                if not candidates:
-                    continue
-                fact_words = _overlap_words(_render(fact["predicate"], fact["value"]))
-                _ordinal, chunk_id, _text = min(
-                    candidates,
-                    key=lambda c: (
-                        -len(fact_words & _overlap_words(c[2])),
-                        c[0],
-                    ),
-                )
-                if chunk_id not in packed_chunk_ids and chunk_id not in neighbor_reason:
-                    neighbor_reason[chunk_id] = "fact_source_turn"
-
-        if neighbor_reason:
-            neighbor_rows = (
-                await session.execute(
-                    select(
-                        EpisodeChunk.id,
-                        EpisodeChunk.event_id,
-                        EpisodeChunk.occurred_at,
-                        EpisodeChunk.text,
-                        Event.kind,
-                    )
-                    .join(Event, Event.id == EpisodeChunk.event_id)
-                    .where(
-                        EpisodeChunk.id.in_(neighbor_reason.keys()),
-                        # M8 guard, same as the primary episode query
-                        # above: a fact's source turn can come from an
-                        # untrusted-origin event (the fact itself went
-                        # through quarantine) -- its raw text must never be
-                        # served as an episode either.
-                        EpisodeChunk.origin_trust != "untrusted",
-                        # Same point-of-view bound as every other episode
-                        # read in this module.
-                        EpisodeChunk.occurred_at <= now,
-                    )
-                    .order_by(EpisodeChunk.occurred_at, EpisodeChunk.ordinal, EpisodeChunk.id)
-                )
-            ).all()
-            for row in neighbor_rows:
-                if token_count >= budget_tokens:
-                    decisions.append(
-                        {
-                            "episode_id": str(row.id),
-                            "action": "excluded",
-                            "reason_code": "over_budget",
-                        }
-                    )
-                    continue
-                excerpt = episode_row_excerpt(row)
-                cost = estimate_tokens(f"{row.occurred_at:%Y-%m-%d %H:%M} {row.kind} {excerpt}")
-                if token_count + cost > budget_tokens:
-                    decisions.append(
-                        {
-                            "episode_id": str(row.id),
-                            "action": "excluded",
-                            "reason_code": "over_budget",
-                        }
-                    )
-                    continue
-                token_count += cost
-                packet_episodes.append(
-                    {
-                        "event_id": str(row.event_id),
-                        "episode_id": str(row.id),
-                        "kind": row.kind,
-                        "occurred_at": row.occurred_at.isoformat() if row.occurred_at else None,
-                        "occurred_at_relative": (
-                            _relative_to_now(row.occurred_at, now_dt)
-                            if row.occurred_at
-                            else None
-                        ),
-                        "excerpt": excerpt,
-                        "context_neighbor": True,
-                    }
-                )
-                decisions.append(
-                    {
-                        "episode_id": str(row.id),
-                        "action": "included",
-                        "reason_code": neighbor_reason[row.id],
-                    }
-                )
-        stage_timings["context_window"] = round(
-            (time.perf_counter() - context_window_start) * 1000
-        )
+    # The two bolt-ons that used to sit here are gone (23 aout). Both ran
+    # "against whatever budget the unified pass left", which is a guarantee
+    # of doing nothing: a greedy loop stops when the NEXT item does not fit,
+    # so the leftover is by construction smaller than one line. Measured,
+    # budget 3000, 231 questions: the expansion's trigger passed 91.8 % of
+    # the time with room for one row in 0.0 % of them (11 tokens left on
+    # average); the context window served 0 neighbours out of 8 653
+    # episodes. Eight passing tests certified them, all at budgets of 45,
+    # 200 and 900, where the main pool cannot fill the budget.
+    #
+    # MULTI-HOP EXPANSION: deleted, not repaired. Before rebuilding it I
+    # measured whether it could work at all -- for each question whose
+    # packet holds part of its evidence, take the gold turn that WAS served,
+    # extract its entities exactly as _candidate_entities did, run the same
+    # lexical query: does the missing turn come back? 0 times out of 22. It
+    # was not starved, it was aimed at the wrong thing.
+    #
+    # CONTEXT WINDOW: rebuilt inside the packing loop, charged like
+    # everything else, swept -- and then deleted, because it does not pay.
+    # `any` / `complete` / multi-hop complete:
+    #
+    #     no neighbour                     88.3 / 75.8 / 32.6
+    #     top 3 anchors carry one          89.2 / 76.6 / 32.6
+    #     top 5                            88.7 / 76.6 / 30.2
+    #     top 20                           85.7 / 73.2 / 25.6
+    #     every anchor, both directions    83.5 / 71.4 / 25.6
+    #   budget 6000, no neighbour          91.3 / 82.3 / 53.5
+    #   budget 6000, top 20                91.8 / 82.3 / 46.5
+    #
+    # Nothing moves multi-hop completeness -- the entire point of it -- and
+    # doubling the budget does not rescue it: the slot spent on a neighbour
+    # is worth more spent on the next scored turn.
+    #
+    # The diagnostic that made it look promising was a BASE-RATE error, and
+    # it is worth leaving written down. 90.9 % of missing evidence turns are
+    # adjacent to a packed one -- but 45 packed turns have ~90 neighbours,
+    # about one of which is the missing turn. P(adjacent | missing) is high;
+    # P(missing | adjacent) is ~1 %. Carrying them all buys one hit for
+    # forty-five slots.
+    #
+    # Nothing replaces either of them, on purpose.
 
     # Fragmentation detector (M4): a subject with ZERO memory that is
     # registered as an alias of another subject is NOT a cold start — the
@@ -1705,7 +1344,7 @@ async def build_context(
             "conflicting value alongside them — apply the most recent "
             "'valid from' date to determine which is current"
         )
-    # 14 Aug (mechanism D): volatility no longer hides anything -- past its
+    # 14 aout (mecanisme D): volatility no longer hides anything -- past its
     # horizon a fact is served flagged "stale" (see _fact_freshness), same
     # silent-in-warnings treatment "unconfirmed" already got. No aggregate
     # warning here on purpose, for the same reason: it is per-fact honest

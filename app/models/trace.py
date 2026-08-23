@@ -31,9 +31,9 @@ class ContextTrace(Base):
 
     # Instrumentation (sprint 16 console redesign): wall-clock total plus a
     # per-stage breakdown of the REAL pipeline stages in app/context.py
-    # (embed, retrieval, multi_hop_expansion, episodes) — never invented
-    # stage names lifted from an unconnected mockup. NULL on traces created
-    # before this column existed, never a false zero.
+    # (embed, retrieval, episodes, rerank) — never invented stage names
+    # lifted from an unconnected mockup. NULL on traces created before this
+    # column existed, never a false zero.
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     stage_timings: Mapped[dict | None] = mapped_column(JSONB)
     fact_count: Mapped[int | None] = mapped_column(Integer)

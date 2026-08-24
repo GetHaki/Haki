@@ -22,6 +22,27 @@ import { randomUUID } from "node:crypto";
 
 import type { CaptureResponse, ContextPacket, HakiClient } from "./client.js";
 
+/**
+ * Everything these packets already gave you, for `excludeIds`.
+ *
+ * The second call must repeat the SAME query. Measured on the questions
+ * whose first packet holds only part of their evidence: asking again
+ * unchanged, with these ids excluded, finds the missing turn 44.8% of the
+ * time; asking with a query rewritten from what the first packet contained
+ * finds it 41.4%, and with that content alone 27.6%. Rewriting is worse.
+ *
+ * What this buys is an adaptive budget, not multi-hop reasoning.
+ */
+export function seen(...packets: Array<Record<string, any>>): string[] {
+  const ids: string[] = [];
+  for (const p of packets) {
+    const body = (p?.packet ?? p ?? {}) as Record<string, any>;
+    for (const f of body.facts ?? []) if (f?.id) ids.push(f.id);
+    for (const e of body.episodes ?? []) if (e?.episode_id) ids.push(e.episode_id);
+  }
+  return [...new Set(ids)];
+}
+
 /** Format a ContextPacket as a delimited instruction block.
  *
  * Includes each fact's value, validity date and source event ids, plus the

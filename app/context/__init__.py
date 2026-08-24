@@ -592,6 +592,7 @@ async def build_context(
     reranker: Reranker | None = None,
     extra_warnings: list[str] | None = None,
     as_of: datetime | None = None,
+    exclude_ids: list[str] | None = None,
 ) -> tuple[dict[str, Any], int, uuid.UUID]:
     """Assemble a ContextPacket. Returns (packet, token_count, trace_id).
 
@@ -706,6 +707,32 @@ async def build_context(
     # elapsed time (exponential growth instead of decay), so the fact's
     # score can run away and crowd out genuinely relevant facts from the
     # packet. Found via external code audit, confirmed 20 aout 2026.
+    # Items the caller already holds from an earlier packet (23 aout).
+    # Applied at CANDIDATE GENERATION, not after packing: excluding them
+    # later would still spend the top-K slots on rows the caller is going
+    # to throw away.
+    #
+    # This is "the next page", and it is deliberately not called anything
+    # grander. Measured on the questions whose first packet holds part of
+    # their evidence: re-asking the SAME question with the seen items
+    # excluded finds the missing turn 44.8 % of the time. Re-asking with a
+    # query reformulated from what the first packet contained finds it
+    # 41.4 % of the time, and asking with that content alone -- the most
+    # generous form, the exact text an agent just read -- 27.6 %. So this
+    # does not do multi-hop, and the documentation must not say it does:
+    # what it does is serve further down the same ranked list, which is
+    # the same thing as a larger budget, paid only by the callers who
+    # turn out to need it.
+    excluded: set[uuid.UUID] = set()
+    for raw in exclude_ids or ():
+        try:
+            excluded.add(uuid.UUID(str(raw)))
+        except (ValueError, AttributeError, TypeError):
+            # A malformed id is the caller's typo, not a reason to fail a
+            # memory read: the packet is still correct, it just holds an
+            # item they meant to skip.
+            continue
+
     scope_filters = [
         Fact.project_id == project_id,
         Fact.subject_id == subject_id,
@@ -713,6 +740,8 @@ async def build_context(
         (Fact.valid_to.is_(None)) | (Fact.valid_to > now),
         func.coalesce(Fact.valid_from, Fact.recorded_from) <= now,
     ]
+    if excluded:
+        scope_filters.append(Fact.id.not_in(excluded))
 
     # Phase 1 — candidate generation with the indexes (hnsw + GIN). Without
     # this, phase 2 would score every active fact of the scope (~200 ms at
@@ -948,6 +977,12 @@ async def build_context(
         # filter stays index-friendly.
         EpisodeChunk.origin_trust != "untrusted",
     )
+    if excluded:
+        # Matched on the chunk id, which is what the packet exposes as
+        # `episode_id`. An `event_id` passed here excludes nothing, on
+        # purpose: it names a whole session, and dropping every turn of it
+        # because one was served is not what "I already have this" means.
+        episode_scope = (*episode_scope, EpisodeChunk.id.not_in(excluded))
     episode_vector_top = (
         select(EpisodeChunk.id)
         .where(*episode_scope)

@@ -62,6 +62,7 @@ async def context(
         budget_tokens=body.budget_tokens,
         extra_warnings=[purpose_warning] if purpose_warning else None,
         as_of=body.as_of,
+        exclude_ids=body.exclude_ids,
     )
     await session.commit()
     return ContextResponse(packet=packet, token_count=token_count, trace_id=trace_id)

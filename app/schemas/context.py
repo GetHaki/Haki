@@ -25,13 +25,14 @@ class ContextRequest(BaseModel):
     subject_alias: SubjectAliasIn | None = None
     query: str = Field(min_length=1)
     purpose: str | None = Field(default=None, max_length=128)
-    # 2000 (was 900, Sprint 2): published accuracy-vs-budget curves (Zep/
-    # LoCoMo, LazyMem, EMem) agree the gain from more context flattens well
-    # before 4000 tokens with a gpt-4o-mini-class reader (Zep/LoCoMo: +10.4pp
-    # from 347->1997 tok, then +0.26 for the rest; LazyMem: top-50 actually
-    # WORSE than top-20) -- the working point is ~1500-2500, not "more is
-    # free". Not independently re-validated against Haki's own harness yet
-    # (that curve, 900/1400/2000/3000 on n=50, is still open) -- this is the
+    # 2000 (was 900, 15 aout Sprint 2): external accuracy-vs-budget curves
+    # cited in research/Haki_Livre_Construction_2026-08-15.md agree the
+    # gain from more context flattens well before 4000 tokens with a
+    # gpt-4o-mini-class reader (Zep/LoCoMo: +10.4pp from 347->1997 tok,
+    # then +0.26 for the rest; LazyMem: top-50 actually WORSE than
+    # top-20) -- the working point is ~1500-2500, not "more is free".
+    # Not independently re-validated against Haki's own harness yet (that
+    # curve, 900/1400/2000/3000 on n=50, is still open) -- this is the
     # literature-backed default, callers can still override per call.
     budget_tokens: int = Field(default=2000)
     # 14 aout, mecanisme D: what "now" means for this call's freshness/
@@ -41,6 +42,24 @@ class ContextRequest(BaseModel):
     # point in time the conversation's own timeline is at; a real caller in
     # normal operation should simply omit this. See app.context.build_context.
     as_of: datetime | None = None
+
+    # Items the caller already holds from an earlier packet for this same
+    # query (23 aout). Pass the `id` of a fact or the `episode_id` of an
+    # episode; they are excluded before ranking, so the top-K slots go to
+    # rows the caller does not already have.
+    #
+    # This is a NEXT PAGE, not a second hop, and the difference is
+    # measured. On the questions whose first packet holds part of their
+    # evidence, re-asking the SAME question with the seen items excluded
+    # finds the missing turn 44.8 % of the time; re-asking with a query
+    # reformulated from what the first packet said finds it 41.4 %, and
+    # with that content alone 27.6 %. So: ask again with the SAME query.
+    # Reformulating is measurably worse.
+    #
+    # What it buys is an adaptive budget -- the median call stays at
+    # `budget_tokens`, and only the callers who find the answer missing pay
+    # for a second page.
+    exclude_ids: list[str] | None = Field(default=None, max_length=512)
 
     @model_validator(mode="after")
     def exactly_one_subject(self) -> "ContextRequest":
@@ -65,7 +84,7 @@ class PacketFact(BaseModel):
     # relative time expression the extractor resolved -- see
     # app.providers.base.ExtractedFact.temporal_range. None otherwise.
     temporal_range: dict[str, str] | None = None
-    # When the fact is ABOUT, normalised to one instant (migration 0026) --
+    # When the fact is ABOUT, normalised to one instant (migration 0029) --
     # distinct from valid_from, which is when it was SAID. Derived from
     # temporal_range.start or from a single unambiguous ISO date inside
     # `value`; None for the many facts about no particular instant.
@@ -106,7 +125,7 @@ class PacketEpisode(BaseModel):
 
     # The parent event: stable, addressable through /v1/timeline, and what
     # this field has always meant. Unchanged by the move to chunked
-    # episodes (21 Aug, migration 0024).
+    # episodes (21 aout, migration 0027).
     event_id: str
     # The ranked unit -- one turn-sized chunk of that event. Matches the
     # `episode_id` of the corresponding decision in the trace, so a served

@@ -171,12 +171,23 @@ async def _resolve_scope(ctx: Context) -> _Scope:
 
 
 @mcp.tool()
-async def haki_context(ctx: Context, query: str, budget_tokens: int = 2000) -> dict[str, Any]:
+async def haki_context(
+    ctx: Context,
+    query: str,
+    budget_tokens: int = 2000,
+    exclude_ids: list[str] | None = None,
+) -> dict[str, Any]:
     """Recalls project memory (decisions, conventions, preferences) relevant
     to a task. Call this BEFORE planning or editing code. Returns a block
     ready to inject, with dates and sources, the trace_id (inspectable via
     haki_inspect), and an explicit `status` ("ok"/"degraded"/"failed") —
-    never treat a degraded or failed response as "no known facts"."""
+    never treat a degraded or failed response as "no known facts".
+
+    If the block does not contain what you needed, call this again with the
+    SAME query and `exclude_ids` set to the ids you already received — it
+    serves the next page of the same ranked list. Do NOT rewrite the query
+    with what you just read: measured on this project's own benchmark, that
+    finds the missing turn less often than asking again unchanged."""
     scope = await _resolve_scope(ctx)
     try:
         async with async_session() as session:
@@ -187,6 +198,7 @@ async def haki_context(ctx: Context, query: str, budget_tokens: int = 2000) -> d
                 query=query,
                 purpose="mcp",
                 budget_tokens=budget_tokens,
+                exclude_ids=exclude_ids,
             )
             await session.commit()
     except Exception:

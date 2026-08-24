@@ -313,13 +313,22 @@ export class HakiClient {
     });
   }
 
-  /** Assemble a ContextPacket. Returns {packet, token_count, trace_id}. */
+  /**
+   * Assemble a ContextPacket. Returns {packet, token_count, trace_id}.
+   *
+   * `excludeIds` asks for the NEXT PAGE of the same ranked list: pass what
+   * an earlier packet already gave you (see `seen` in runtime.ts) and those
+   * items are dropped before ranking. Ask again with the SAME query --
+   * rewriting it with what you just read is measurably worse. This is a
+   * further page, not a second hop.
+   */
   context(options: {
     subjectId: string;
     query: string;
     projectId: string;
     purpose?: string;
     budgetTokens?: number;
+    excludeIds?: string[];
   }): Promise<ContextResponse> {
     return this.request("POST", "/v1/context", {
       body: {
@@ -328,6 +337,7 @@ export class HakiClient {
         query: options.query,
         purpose: options.purpose ?? null,
         budget_tokens: options.budgetTokens ?? 2000,
+        exclude_ids: options.excludeIds ?? null,
       },
     });
   }
@@ -352,9 +362,33 @@ export class HakiClient {
     });
   }
 
-  /** Process pending/failed consolidation jobs now. Returns {processed}. */
+  /**
+   * Process pending/failed consolidation jobs now. Returns {processed}.
+   *
+   * Dev/ops endpoint: it drains the pending jobs of EVERY project on the
+   * server, on a session without RLS scoping, and requires the admin key.
+   * Fine on a local dev server, wrong against a shared one -- prefer
+   * `consolidateSubject` whenever the subject is known.
+   */
   consolidate(): Promise<ConsolidateResponse> {
     return this.request("POST", "/v1/consolidate");
+  }
+
+  /**
+   * Consolidate one subject's pending jobs now. Returns {processed}.
+   *
+   * The scoped counterpart of `consolidate()`: same synchronous
+   * "extraction happened, look now" behavior, but bounded to one
+   * project/subject, so a caller never triggers work on another tenant's
+   * data, never waits behind it, and needs only a normal project key.
+   */
+  consolidateSubject(options: {
+    projectId: string;
+    subjectId: string;
+  }): Promise<ConsolidateResponse> {
+    return this.request("POST", "/v1/consolidate/subject", {
+      params: { project_id: options.projectId, subject_id: options.subjectId },
+    });
   }
 
   /** Forget one fact or one subject (exactly one target required). */

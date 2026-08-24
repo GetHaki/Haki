@@ -221,7 +221,10 @@ async function cmdVerify(): Promise<number> {
     step(`capture (thread ${thread1})`, t0);
 
     const t1 = performance.now();
-    const result = await client.consolidate();
+    const result = await client.consolidateSubject({
+      projectId: VERIFY_PROJECT,
+      subjectId,
+    });
     step(`consolidate: ${result.processed} job(s) processed`, t1);
 
     const t2 = performance.now();

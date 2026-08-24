@@ -97,8 +97,16 @@ class HakiClient:
         *,
         purpose: str | None = None,
         budget_tokens: int = 2000,
+        exclude_ids: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Assemble a ContextPacket. Returns {packet, token_count, trace_id}."""
+        """Assemble a ContextPacket. Returns {packet, token_count, trace_id}.
+
+        `exclude_ids` asks for the NEXT PAGE of the same ranked list: pass
+        what an earlier packet already gave you (see haki.runtime.seen) and
+        those items are dropped before ranking. Ask again with the SAME
+        query -- rewriting it with what you just read is measurably worse.
+        This is a further page, not a second hop.
+        """
         return self._request(
             "POST",
             "/v1/context",
@@ -108,6 +116,7 @@ class HakiClient:
                 "query": query,
                 "purpose": purpose,
                 "budget_tokens": budget_tokens,
+                "exclude_ids": exclude_ids,
             },
         )
 
@@ -319,6 +328,7 @@ class AsyncHakiClient:
         *,
         purpose: str | None = None,
         budget_tokens: int = 2000,
+        exclude_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         return await self._request(
             "POST",
@@ -329,6 +339,7 @@ class AsyncHakiClient:
                 "query": query,
                 "purpose": purpose,
                 "budget_tokens": budget_tokens,
+                "exclude_ids": exclude_ids,
             },
         )
 

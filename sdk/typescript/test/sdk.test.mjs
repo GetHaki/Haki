@@ -77,7 +77,7 @@ test("capture -> consolidate -> context round-trip (fake provider)", async () =>
   assert.equal(body.status, "accepted");
   assert.ok(body.consolidation_job_id);
 
-  const result = await client.consolidate();
+  const result = await client.consolidateSubject({ projectId: PROJECT, subjectId });
   assert.ok(result.processed >= 1);
 
   // New thread: the memory must survive the thread boundary.
@@ -454,7 +454,7 @@ test("forget subject -> context serves nothing anymore", async () => {
   await client.capture([
     memoryEvent(subjectId, [mockFact("plan", { tier: "pro" }, subjectId)]),
   ]);
-  await client.consolidate();
+  await client.consolidateSubject({ projectId: PROJECT, subjectId });
   const before = await client.context({ subjectId, query: "plan", projectId: PROJECT });
   assert.equal(before.packet.facts.length, 1);
 

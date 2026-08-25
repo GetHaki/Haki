@@ -117,7 +117,7 @@ async def test_episodes_respect_token_budget(client):
 
 
 async def test_episode_budget_ceiling_limits_how_many_episodes_get_packed(client):
-    """Found 19 Aug 2026 via real measurement, not hypothesis: raising
+    """Found 19 aout 2026 via real measurement, not hypothesis: raising
     budget_tokens 900->4000 on the same LoCoMo subset REGRESSED accuracy
     31.4%->16.4%, because a wider budget let several large raw episodes
     into the packet, crowding out precise facts that fit comfortably in a
@@ -202,6 +202,9 @@ async def test_packet_without_events_keeps_episodes_empty(client):
     assert response.json()["packet"] == {
         "facts": [],
         "episodes": [],
+        # Nothing packed means nothing rendered, so the block's fixed
+        # instruction paragraphs cost nothing either (22 aout).
+        "overhead_tokens": 0,
         "warnings": [
             "missing_purpose: 'purpose' is recommended on context calls (warning only in V1)"
         ],

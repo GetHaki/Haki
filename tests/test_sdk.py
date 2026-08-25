@@ -69,15 +69,17 @@ async def test_consolidate_endpoint_processes_pending_jobs():
         assert [f["value"] for f in response["packet"]["facts"]] == [{"tier": "pro"}]
 
 
-def test_build_prompt_context_contains_value_dates_and_sources():
+def test_build_prompt_context_contains_value_dates_and_a_reference():
     packet = {
         "facts": [
             {
                 "id": "f1",
+                "ref": "F1",
                 "predicate": "invoice_language",
                 "value": {"language": "fr"},
                 "confidence": 0.9,
                 "valid_from": "2026-07-28T10:00:00+00:00",
+                "valid_from_short": "2026-07-28 10:00",
                 "source_event_ids": ["evt-123"],
             }
         ],
@@ -88,7 +90,14 @@ def test_build_prompt_context_contains_value_dates_and_sources():
     assert "invoice_language" in block
     assert "fr" in block
     assert "2026-07-28" in block
-    assert "evt-123" in block
+    # The block cites the packet reference, not the uuid (22 aout): a uuid4
+    # is 35 o200k tokens against 2, and at ~46 identifiers per packet that
+    # was 23 % of everything sent to the model. The id itself is still in
+    # the packet, which is where "with proof" has to be resolvable.
+    assert "[F1]" in block
+    assert "evt-123" not in block
+    assert "sources:" not in block
+    assert "10:00:00" not in block
     assert "open_conflict" in block
     # Empty packet -> empty block, safe to prepend.
     assert build_prompt_context({"facts": [], "warnings": []}) == ""
@@ -137,15 +146,19 @@ def test_build_prompt_context_marks_context_window_neighbors():
         "episodes": [
             {
                 "event_id": "evt-1",
+                "ref": "E1",
                 "kind": "chat_session",
                 "occurred_at": "2023-05-07T12:00:00+00:00",
+                "occurred_at_short": "2023-05-07 12:00",
                 "excerpt": "user: Zolgorvex mentioned a favorite pastime.",
                 "context_neighbor": False,
             },
             {
                 "event_id": "evt-2",
+                "ref": "E2",
                 "kind": "chat_session",
                 "occurred_at": "2023-05-07T13:00:00+00:00",
+                "occurred_at_short": "2023-05-07 13:00",
                 "excerpt": "user: Unrelated later chat.",
                 "context_neighbor": True,
             },
@@ -154,8 +167,8 @@ def test_build_prompt_context_marks_context_window_neighbors():
     }
     block = build_prompt_context(packet)
     lines = block.splitlines()
-    ordinary_line = next(line for line in lines if "evt-1" in line)
-    neighbor_line = next(line for line in lines if "evt-2" in line)
+    ordinary_line = next(line for line in lines if "[E1]" in line)
+    neighbor_line = next(line for line in lines if "[E2]" in line)
     assert "surrounding context" not in ordinary_line
     assert "surrounding context" in neighbor_line
 

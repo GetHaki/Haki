@@ -104,15 +104,17 @@ test("capture -> consolidate -> context round-trip (fake provider)", async () =>
   assert.equal(timeline.events.length, 1);
 });
 
-test("buildPromptContext: value, date, source and hardened instruction", () => {
+test("buildPromptContext: value, date, reference and hardened instruction", () => {
   const packet = {
     facts: [
       {
         id: "f1",
+        ref: "F1",
         predicate: "invoice_language",
         value: { language: "fr" },
         confidence: 0.9,
         valid_from: "2026-07-28T10:00:00+00:00",
+        valid_from_short: "2026-07-28 10:00",
         source_event_ids: ["evt-123"],
       },
     ],
@@ -123,7 +125,15 @@ test("buildPromptContext: value, date, source and hardened instruction", () => {
   assert.ok(block.includes("invoice_language"));
   assert.ok(block.includes("fr"));
   assert.ok(block.includes("2026-07-28"));
-  assert.ok(block.includes("evt-123"));
+  // The reference is what the block cites (22 aout): a uuid4 costs 35
+  // o200k tokens against 2 for `F1`, and at ~46 identifiers per packet
+  // that was 23 % of everything sent to the model. The real ids stay in
+  // the packet, where resolveRefs can map a citation back exactly.
+  assert.ok(block.includes("[F1]"));
+  assert.ok(!block.includes("evt-123"));
+  assert.ok(!block.includes("sources:"));
+  // Seconds and the UTC offset answer no question a packet is asked.
+  assert.ok(!block.includes("10:00:00"));
   assert.ok(block.includes("open_conflict"));
   assert.ok(block.includes("You MUST apply them"));
   assert.ok(block.includes("write your entire response in that language"));
@@ -142,6 +152,45 @@ test("buildPromptContext: value, date, source and hardened instruction", () => {
     }),
     "",
   );
+});
+
+test("buildPromptContext: the server's own line is what gets printed (22 aout)", () => {
+  // The server renders the line it charged the token budget for. If this
+  // SDK printed anything else, the caller would pay a different number of
+  // tokens than the one they asked for -- which is the bug this replaced
+  // (budget_tokens=2000 was putting a median 4 565 tokens in the prompt).
+  // Three implementations of this block existed; only one may decide.
+  const packet = {
+    facts: [
+      {
+        id: "f1",
+        ref: "F1",
+        predicate: "ignored_here",
+        value: { a: 1 },
+        confidence: 0.9,
+        valid_from: "2026-07-28T10:00:00+00:00",
+        line: "- [F1] served_by: the server (valid from 2026-07-28 10:00)",
+        source_event_ids: [],
+      },
+    ],
+    episodes: [
+      {
+        event_id: "evt-1",
+        ref: "E1",
+        kind: "chat_session",
+        occurred_at: "2026-07-28T11:00:00+00:00",
+        excerpt: "ignored here too",
+        line: "- [E1] [2026-07-28 11:00] chat_session: served by the server",
+        context_neighbor: false,
+      },
+    ],
+    warnings: [],
+  };
+  const block = buildPromptContext(packet);
+  assert.ok(block.includes("- [F1] served_by: the server (valid from 2026-07-28 10:00)"));
+  assert.ok(block.includes("- [E1] [2026-07-28 11:00] chat_session: served by the server"));
+  assert.ok(!block.includes("ignored_here"));
+  assert.ok(!block.includes("ignored here too"));
 });
 
 test("buildPromptContext: unconfirmed and stale freshness markers (14 aout, mecanisme D)", () => {
@@ -229,15 +278,19 @@ test("buildPromptContext: marks context window neighbors (F2, 15 aout)", () => {
     episodes: [
       {
         event_id: "evt-1",
+        ref: "E1",
         kind: "chat_session",
         occurred_at: "2023-05-07T12:00:00+00:00",
+        occurred_at_short: "2023-05-07 12:00",
         excerpt: "user: Zolgorvex mentioned a favorite pastime.",
         context_neighbor: false,
       },
       {
         event_id: "evt-2",
+        ref: "E2",
         kind: "chat_session",
         occurred_at: "2023-05-07T13:00:00+00:00",
+        occurred_at_short: "2023-05-07 13:00",
         excerpt: "user: Unrelated later chat.",
         context_neighbor: true,
       },
@@ -245,8 +298,8 @@ test("buildPromptContext: marks context window neighbors (F2, 15 aout)", () => {
     warnings: [],
   };
   const block = buildPromptContext(packet);
-  const ordinaryLine = block.split("\n").find((line) => line.includes("evt-1"));
-  const neighborLine = block.split("\n").find((line) => line.includes("evt-2"));
+  const ordinaryLine = block.split("\n").find((line) => line.includes("[E1]"));
+  const neighborLine = block.split("\n").find((line) => line.includes("[E2]"));
   assert.ok(!ordinaryLine.includes("surrounding context"));
   assert.ok(neighborLine.includes("surrounding context"));
 });

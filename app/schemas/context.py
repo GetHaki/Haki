@@ -25,16 +25,30 @@ class ContextRequest(BaseModel):
     subject_alias: SubjectAliasIn | None = None
     query: str = Field(min_length=1)
     purpose: str | None = Field(default=None, max_length=128)
-    # 2000 (was 900, 15 aout Sprint 2): external accuracy-vs-budget curves
-    # cited in research/Haki_Livre_Construction_2026-08-15.md agree the
-    # gain from more context flattens well before 4000 tokens with a
-    # gpt-4o-mini-class reader (Zep/LoCoMo: +10.4pp from 347->1997 tok,
-    # then +0.26 for the rest; LazyMem: top-50 actually WORSE than
-    # top-20) -- the working point is ~1500-2500, not "more is free".
-    # Not independently re-validated against Haki's own harness yet (that
-    # curve, 900/1400/2000/3000 on n=50, is still open) -- this is the
-    # literature-backed default, callers can still override per call.
-    budget_tokens: int = Field(default=2000)
+    # 3000 (was 2000, itself 900 before Sprint 2). The number changed
+    # because what it MEASURES changed on 22 aout, not the packet: the
+    # budget used to be charged against a stripped string while the prompt
+    # carried the rendered line, so `2000` was really 4 565 tokens. It now
+    # charges the line the caller receives, and 3000 of those buys the SAME
+    # evidence the old 2000 did -- measured on eval.retrieval_bench, LoCoMo
+    # 1-2, n=231, gold served against the REAL prompt cost:
+    #
+    #     before   4 565 real tokens -> 88.3 %
+    #     after    3 223 real tokens -> 88.3 %      (-29 % for the same result)
+    #     after    2 232 real tokens -> 84.4 %      (before, at 2 142: 80.5 %)
+    #     after    4 219 real tokens -> 88.7 %
+    #
+    # It also puts the default back INSIDE the band the published curves
+    # support, which the old one only appeared to be in: Zep/LoCoMo, LazyMem
+    # and EMem agree the gain flattens well before 4 000 tokens with a
+    # gpt-4o-mini-class reader (Zep/LoCoMo: +10.4pp from 347->1997 tok, then
+    # +0.26 for the rest; LazyMem: top-50 WORSE than top-20). Haki was at
+    # 4 565 and comparing itself against those curves as if it were at 2 000.
+    #
+    # The fixed instruction paragraphs (~290 tokens) are NOT taken out of
+    # this: a caller cannot make them smaller. They are reported as
+    # packet.overhead_tokens instead.
+    budget_tokens: int = Field(default=3000)
     # 14 aout, mecanisme D: what "now" means for this call's freshness/
     # recency computations (volatility horizons, valid_to filter, recency
     # scoring term) -- defaults to the real wall clock. For replaying a
@@ -70,10 +84,17 @@ class ContextRequest(BaseModel):
 
 class PacketFact(BaseModel):
     id: str
+    # What the rendered block cites instead of a uuid -- see PacketRef,
+    # defined below next to the episode that shares the scheme.
+    ref: str | None = None
+    # The exact line to print for this item -- see PacketLine.
+    line: str | None = None
     predicate: str
     value: dict[str, Any]
     confidence: float | None
     valid_from: str | None
+    # Trimmed of seconds and UTC offset -- see PacketEpisode.occurred_at_short.
+    valid_from_short: str | None = None
     # Dual-date rendering (mechanism F1, 15 aout): exact offset from the
     # temporal point of view ("N days before/after the question"),
     # precomputed server-side so the reader verifies instead of
@@ -119,6 +140,30 @@ class PacketFact(BaseModel):
     conflict_id: str | None = None
 
 
+# A packet-local reference (`F3`, `E7`), assigned in packing order and
+# stable for the life of the packet (22 aout). It replaces the uuid the
+# rendered block used to carry: a uuid4 is 35 o200k tokens against 2, and
+# at ~46 identifiers per packet that was 23 % of everything sent to the
+# model, spent on strings it is asked to cite and cannot carry reliably.
+# The real ids stay right here in the packet, so a caller resolves a ref
+# exactly -- see haki.runtime.resolve_refs in the SDK.
+PacketRef = str
+
+# The rendered line, server-side (22 aout). Until now the SAME block was
+# built independently in the Python SDK, the TypeScript SDK and -- until
+# P14 -- a third, poorer copy inside the MCP server, while the token budget
+# was computed from a fourth string that matched none of them. Every marker
+# added to one of them is a silent divergence in the others and in the
+# budget.
+#
+# Rendering it once, where the packet is built, makes the budget exact by
+# construction and leaves the SDKs to join lines and add the static header.
+# Additive: an SDK that does not know this field renders from the structured
+# fields exactly as before, and tests/test_packet_cost.py pins the two to
+# the same string so the fallback cannot rot.
+PacketLine = str
+
+
 class PacketEpisode(BaseModel):
     """Source event excerpt served in the packet (episodic memory, sprint
     10): what happened, with its date and provenance id."""
@@ -127,6 +172,10 @@ class PacketEpisode(BaseModel):
     # this field has always meant. Unchanged by the move to chunked
     # episodes (21 aout, migration 0027).
     event_id: str
+    # What the rendered block cites instead of a uuid -- see PacketRef.
+    ref: PacketRef | None = None
+    # The exact line to print for this item -- see PacketLine.
+    line: PacketLine | None = None
     # The ranked unit -- one turn-sized chunk of that event. Matches the
     # `episode_id` of the corresponding decision in the trace, so a served
     # episode can be correlated with the reason it was served. Additive:
@@ -134,6 +183,10 @@ class PacketEpisode(BaseModel):
     episode_id: str | None = None
     kind: str
     occurred_at: str | None
+    # The same instant without the seconds and the UTC offset, which answer
+    # no question a packet is asked and cost 6 % of it (22 aout). An SDK
+    # that does not know this field falls back to `occurred_at`.
+    occurred_at_short: str | None = None
     # Dual-date rendering (mechanism F1, 15 aout) -- see
     # PacketFact.valid_from_relative. None only when occurred_at is None.
     occurred_at_relative: str | None = None
@@ -146,6 +199,14 @@ class PacketEpisode(BaseModel):
 
 
 class ContextPacket(BaseModel):
+    # What the rendered block costs BESIDES the items: the fixed
+    # instruction paragraphs and the delimiters (22 aout). Not taken out of
+    # budget_tokens -- a caller cannot make them smaller, and charging them
+    # would turn every small budget into a silently empty packet -- but
+    # reported, because `token_count + overhead_tokens` is what the prompt
+    # actually costs and that number used to be invisible. 0 for an empty
+    # packet, which renders as "".
+    overhead_tokens: int = 0
     facts: list[PacketFact]
     episodes: list[PacketEpisode] = Field(default_factory=list)
     # `warnings` doubles as the typed list of reasons for `status` — reused

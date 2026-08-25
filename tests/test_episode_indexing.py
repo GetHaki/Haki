@@ -63,7 +63,7 @@ async def _tie_embeddings_and_recency(event_ids: list[uuid.UUID]) -> None:
     module tests -- same isolation technique as test_context.py's
     _collide_embedding for facts."""
     async with async_session() as session:
-        # Ties are forced on the CHUNKS, since 21 Aug (migration 0024) the
+        # Ties are forced on the CHUNKS, since 21 aout (migration 0027) the
         # unit episodic retrieval ranks -- tying the parent events would
         # leave the chunks free to differ on exactly the axes this isolates.
         chunk_groups = [
@@ -116,10 +116,11 @@ async def test_episode_found_by_exact_keyword_over_a_similarity_tied_rival(clien
             "project_id": PROJECT,
             "subject_id": subject,
             "query": "Zolgorvex",
-            # One chunk and no more: date + kind + a ~50-character turn
-            # comes to ~20 estimated tokens each. Recalibrated on 21 Aug,
-            # when the served unit became a turn instead of a whole event.
-            "budget_tokens": 25,
+            # One chunk and no more. Recalibrated on 21 aout when the
+            # served unit became a turn instead of a whole event, and again
+            # on 22 aout when the budget started charging the rendered line
+            # instead of a stripped string.
+            "budget_tokens": 45,
         },
     )
     assert response.status_code == 200

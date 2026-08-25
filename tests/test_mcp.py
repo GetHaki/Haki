@@ -18,6 +18,7 @@ sprint-4 live demo.
 
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -225,8 +226,12 @@ async def test_mcp_full_scenario(mcp_server):
             assert CONVENTION in context_data["context"]
             assert "tests avant toute modification" in context_data["context"]
             # Provenance reaches the model: the SDK renderer (shared with
-            # the gateway since 22 aout) cites the source event per fact.
-            assert "sources:" in context_data["context"]
+            # the gateway since 22 aout) cites the packet reference per
+            # fact (22 aout: `[F1]`, not a uuid that costs 35 tokens and
+            # that a model rarely copies back intact). MCP is the surface
+            # pushed to the registries, so it is also where the token cost
+            # is most visible to a first user.
+            assert re.search(r"- \[F\d+\] ", context_data["context"])
             trace_id = context_data["trace_id"]
             predicates = [fact["predicate"] for fact in context_data["facts"]]
             assert CONVENTION in predicates

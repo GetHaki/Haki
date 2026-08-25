@@ -174,7 +174,7 @@ async def _resolve_scope(ctx: Context) -> _Scope:
 async def haki_context(
     ctx: Context,
     query: str,
-    budget_tokens: int = 2000,
+    budget_tokens: int = 3000,
     exclude_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Recalls project memory (decisions, conventions, preferences) relevant

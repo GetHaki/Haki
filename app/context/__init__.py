@@ -93,6 +93,13 @@ from sqlalchemy.sql import func
 
 from app import metrics
 from app.config import settings
+from app.context import cost as cost_module
+from app.context.cost import (
+    estimate_prose_tokens,
+    estimate_tokens,
+    render_line,
+    short_timestamp,
+)
 from app.context.fts import build_query_tsquery
 from app.context.ranking import legacy_weighted_sum, relevance
 from app.errors import ApiError
@@ -189,10 +196,6 @@ RERANK_TOP_K = 50
 # settings.recall_max_distance (HAKI_RECALL_MAX_DISTANCE) holds the ACTIVE
 # threshold; 0.0 = gate disabled (default).
 RECOMMENDED_RECALL_MAX_DISTANCE = 0.75
-
-
-def estimate_tokens(text: str) -> int:
-    return max(1, len(text) // 4)
 
 
 # Episodic memory (sprint 10): how much of an event's payload feeds the
@@ -477,6 +480,40 @@ def _relative_to_now(dt: datetime, now: datetime) -> str:
     return f"{n} day{'s' if n != 1 else ''} {direction} the question"
 
 
+def _packet_episode(
+    row: Any,
+    excerpt: str,
+    now: datetime | None,
+    *,
+    ref: str,
+    context_neighbor: bool = False,
+) -> dict[str, Any]:
+    """One served turn, in the shape the packet exposes.
+
+    Was built inline in the packing loop; costed from its rendered line
+    now (22 aout), and a line needs a `ref`, so it became its own function.
+    """
+    occurred_at = row.occurred_at.isoformat() if row.occurred_at else None
+    return {
+        # The PARENT event id, not the chunk id: it is what /v1/timeline
+        # and /v1/inspect address, and what the packet has always exposed.
+        # The chunk id stays internal to ranking and tracing.
+        "event_id": str(row.event_id),
+        "episode_id": str(row.id),
+        "ref": ref,
+        "kind": row.kind,
+        "occurred_at": occurred_at,
+        "occurred_at_short": short_timestamp(occurred_at),
+        # Dual-date rendering (mechanism F1, 15 aout) -- see
+        # _relative_to_now / PacketFact.valid_from_relative.
+        "occurred_at_relative": (
+            _relative_to_now(row.occurred_at, now) if row.occurred_at else None
+        ),
+        "excerpt": excerpt,
+        "context_neighbor": context_neighbor,
+    }
+
+
 def _packet_fact(
     row: Any,
     freshness: str = "current",
@@ -491,6 +528,12 @@ def _packet_fact(
         "value": row.value,
         "confidence": row.confidence,
         "valid_from": row.valid_from.isoformat() if row.valid_from else None,
+        # Same instant, trimmed of the seconds and the UTC offset nothing
+        # reads (22 aout) -- see app.context.cost.short_timestamp. Additive:
+        # an SDK that does not know this field renders `valid_from` as before.
+        "valid_from_short": short_timestamp(
+            row.valid_from.isoformat() if row.valid_from else None
+        ),
         # Dual-date rendering (mechanism F1, 15 aout): exact offset from the
         # temporal point of view (`as_of`, defaulting to real "now" -- see
         # `now_dt` in build_context), so the reader reads a number instead
@@ -587,7 +630,7 @@ async def build_context(
     subject_id: str,
     query: str,
     purpose: str | None = None,
-    budget_tokens: int = 2000,
+    budget_tokens: int = 3000,
     embedder: Embedder | None = None,
     reranker: Reranker | None = None,
     extra_warnings: list[str] | None = None,
@@ -621,13 +664,14 @@ async def build_context(
     keeps its hybrid-formula score exactly as before this mechanism
     existed. See RERANK_TOP_K below for what actually gets reranked.
 
-    `budget_tokens` default (2000, was 900, 15 aout Sprint 2): external
+    `budget_tokens` default (3000 since 22 aout, when the budget started
+    counting the line the caller actually receives -- see
+    app.schemas.context.ContextRequest for the measured curve): external
     accuracy-vs-budget curves cited in research/Haki_Livre_Construction_
     2026-08-15.md agree the gain from more served context flattens well
     before 4000 tokens with a gpt-4o-mini-class reader -- ~1500-2500 is
     the cited working point, not "more is free" (one curve even shows
-    MORE context making an already-weak reader WORSE). Not independently
-    re-validated against Haki's own harness yet.
+    MORE context making an already-weak reader WORSE).
     """
     if budget_tokens <= 0:
         raise ApiError(
@@ -1172,12 +1216,32 @@ async def build_context(
     episode_token_count = 0
     episode_budget = budget_tokens * EPISODE_MAX_BUDGET_SHARE
     episodes_packed = 0
+    # Whether a CONTESTED marker was actually charged this call, for
+    # overhead_tokens below (22 aout): the chain-of-note paragraph is only
+    # worth paying for when a conflict is genuinely being served.
+    contested_charged = False
+    # The item is BUILT first, then costed from the line it will actually
+    # render as (22 aout, app.context.cost). Costing a stripped
+    # `predicate value` string instead put a median of 4 565 tokens into the
+    # caller's prompt for budget_tokens=2000 -- 2.28x what they asked for,
+    # on every call. `ref` is assigned here because it is part of that line;
+    # an index that ends up unused when the item does not fit is simply
+    # taken by the next one.
     for _score, kind, row in pool:
         if kind == "fact":
-            cost = estimate_tokens(_render(row.predicate, row.value))
+            conflict = contested_conflict_by_fact.get(row.id)
+            item = _packet_fact(
+                row,
+                freshness_by_id.get(row.id, "current"),
+                conflict_id=str(conflict.id) if conflict else None,
+                now=now_dt,
+            )
+            item["ref"] = f"F{len(packet_facts) + 1}"
         else:
             excerpt = episode_row_excerpt(row)
-            cost = estimate_tokens(f"{row.occurred_at:%Y-%m-%d %H:%M} {row.kind} {excerpt}")
+            item = _packet_episode(row, excerpt, now_dt, ref=f"E{len(packet_episodes) + 1}")
+        item["line"] = render_line(kind, item)
+        cost = estimate_tokens(item["line"])
         if kind == "episode" and episodes_packed > 0 and episode_token_count + cost > episode_budget:
             # Ceiling hit -- this episode would eat into facts' share of the
             # budget. Never blocks the single best-ranked episode (that one
@@ -1206,15 +1270,9 @@ async def build_context(
             episode_token_count += cost
             episodes_packed += 1
         if kind == "fact":
-            conflict = contested_conflict_by_fact.get(row.id)
-            packet_facts.append(
-                _packet_fact(
-                    row,
-                    freshness_by_id.get(row.id, "current"),
-                    conflict_id=str(conflict.id) if conflict else None,
-                    now=now_dt,
-                )
-            )
+            if conflict is not None:
+                contested_charged = True
+            packet_facts.append(item)
             packed_fact_ids.add(row.id)
             decisions.append(
                 {
@@ -1237,7 +1295,15 @@ async def build_context(
                     if sibling is None:
                         continue
                     sibling_freshness = _fact_freshness(sibling, now_dt)
-                    sibling_cost = estimate_tokens(_render(sibling.predicate, sibling.value))
+                    sibling_item = _packet_fact(
+                        sibling,
+                        sibling_freshness,
+                        conflict_id=str(conflict.id),
+                        now=now_dt,
+                    )
+                    sibling_item["ref"] = f"F{len(packet_facts) + 1}"
+                    sibling_item["line"] = render_line("fact", sibling_item)
+                    sibling_cost = estimate_tokens(sibling_item["line"])
                     if token_count + sibling_cost > budget_tokens:
                         decisions.append(
                             {
@@ -1248,14 +1314,7 @@ async def build_context(
                         )
                         continue
                     token_count += sibling_cost
-                    packet_facts.append(
-                        _packet_fact(
-                            sibling,
-                            sibling_freshness,
-                            conflict_id=str(conflict.id),
-                            now=now_dt,
-                        )
-                    )
+                    packet_facts.append(sibling_item)
                     packed_fact_ids.add(sibling_id)
                     decisions.append(
                         {
@@ -1265,25 +1324,7 @@ async def build_context(
                         }
                     )
         else:
-            packet_episodes.append(
-                {
-                    # The PARENT event id, not the chunk id: it is what
-                    # /v1/timeline and /v1/inspect address, and what the
-                    # packet has always exposed. The chunk id stays
-                    # internal to ranking and tracing.
-                    "event_id": str(row.event_id),
-                    "episode_id": str(row.id),
-                    "kind": row.kind,
-                    "occurred_at": row.occurred_at.isoformat() if row.occurred_at else None,
-                    # Dual-date rendering (mechanism F1, 15 aout) -- see
-                    # _relative_to_now / PacketFact.valid_from_relative.
-                    "occurred_at_relative": (
-                        _relative_to_now(row.occurred_at, now_dt) if row.occurred_at else None
-                    ),
-                    "excerpt": excerpt,
-                    "context_neighbor": False,
-                }
-            )
+            packet_episodes.append(item)
             decisions.append(
                 {"episode_id": str(row.id), "action": "included", "reason_code": "top_score"}
             )
@@ -1410,7 +1451,21 @@ async def build_context(
         empty_reason = "no_relevant_memory"
         metrics.increment("context.empty_no_relevant_memory")
 
+    # What the caller's prompt carries BESIDES the memory itself: the
+    # instruction paragraphs and the delimiters, each present only when
+    # something pulls it in. Zero for an empty packet, which renders as "".
+    overhead_tokens = 0
+    if packet_facts or packet_episodes:
+        overhead_tokens = estimate_prose_tokens(cost_module.HEADER) + estimate_prose_tokens(
+            cost_module.WRAPPER
+        )
+        if packet_episodes:
+            overhead_tokens += estimate_prose_tokens(cost_module.EPISODES_HEADER)
+        if contested_charged:
+            overhead_tokens += estimate_prose_tokens(cost_module.CONTESTED_INSTRUCTIONS)
+
     packet = {
+        "overhead_tokens": overhead_tokens,
         "facts": packet_facts,
         "episodes": packet_episodes,
         "warnings": warnings,

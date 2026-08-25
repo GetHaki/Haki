@@ -96,7 +96,7 @@ class HakiClient:
         project_id: str,
         *,
         purpose: str | None = None,
-        budget_tokens: int = 2000,
+        budget_tokens: int = 3000,
         exclude_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         """Assemble a ContextPacket. Returns {packet, token_count, trace_id}.
@@ -327,7 +327,7 @@ class AsyncHakiClient:
         project_id: str,
         *,
         purpose: str | None = None,
-        budget_tokens: int = 2000,
+        budget_tokens: int = 3000,
         exclude_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         return await self._request(

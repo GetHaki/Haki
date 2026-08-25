@@ -82,7 +82,8 @@ export function buildPromptContext(packet: ContextPacket | null | undefined): st
         "about HOW to respond (language of your answer, format, constraints, " +
         "decisions already made), not as background trivia. If a fact states a " +
         "language preference, write your entire response in that language. " +
-        "Cite the source when you rely on a fact. Facts already reflect the " +
+        "Cite an item by the reference in square brackets at the start of " +
+        "its line (F3, E7) when you rely on it. Facts already reflect the " +
         "CURRENT, resolved truth — an outdated value is removed the moment a " +
         "newer one is confirmed, so you never need to compare dates between " +
         "facts yourself; do not second-guess a fact's value. EXCEPTION: a fact " +
@@ -119,20 +120,27 @@ export function buildPromptContext(packet: ContextPacket | null | undefined): st
     );
   }
   for (const fact of facts) {
+    // The server renders the line it charged the budget for; printing
+    // anything else would mean the caller pays a different number of
+    // tokens than the one they set. The rest of this block is the
+    // fallback for an older server.
+    if (fact.line) {
+      lines.push(fact.line);
+      continue;
+    }
     const value = JSON.stringify(fact.value);
     // Dual-date rendering (mechanism F1, 15 aout): an exact, precomputed
     // offset ("N days before the question") next to the ISO date, so the
     // reader VERIFIES a number instead of computing one from two ISO
     // dates -- a gpt-4o-mini-class reader gets that arithmetic right only
     // 13.5-16% of the time (Test-of-Time Arithmetic).
-    let validFrom = fact.valid_from ?? "unknown date";
+    let validFrom = fact.valid_from_short ?? fact.valid_from ?? "unknown date";
     if (fact.valid_from_relative) {
       validFrom = `${validFrom} — ${fact.valid_from_relative}`;
     }
     if (fact.temporal_range) {
       validFrom += `; described event dated ${fact.temporal_range.start} to ${fact.temporal_range.end}`;
     }
-    const sources = (fact.source_event_ids ?? []).join(",") || "no-source";
     let marker = "";
     if (fact.freshness === "unconfirmed") {
       const last = fact.last_confirmed ?? "an unknown date";
@@ -172,7 +180,7 @@ export function buildPromptContext(packet: ContextPacket | null | undefined): st
         "treating all values as equally current]";
     }
     lines.push(
-      `- ${fact.predicate}: ${value} (valid from ${validFrom}; sources: ${sources})${marker}`,
+      `- [${fact.ref ?? "?"}] ${fact.predicate}: ${value} (valid from ${validFrom})${marker}`,
     );
   }
   if (episodes.length > 0) {
@@ -187,7 +195,12 @@ export function buildPromptContext(packet: ContextPacket | null | undefined): st
         "use the one matching that earlier point in time instead.",
     );
     for (const episode of episodes) {
-      let occurred = episode.occurred_at ?? "unknown date";
+      if (episode.line) {
+        lines.push(episode.line);
+        continue;
+      }
+      let occurred =
+        episode.occurred_at_short ?? episode.occurred_at ?? "unknown date";
       if (episode.occurred_at_relative) {
         occurred = `${occurred} — ${episode.occurred_at_relative}`;
       }
@@ -196,7 +209,7 @@ export function buildPromptContext(packet: ContextPacket | null | undefined): st
           "included for the conversational moment around a result above]"
         : "";
       lines.push(
-        `- [${occurred}] ${episode.kind}: ${episode.excerpt} (event: ${episode.event_id})${marker}`,
+        `- [${episode.ref ?? "?"}] [${occurred}] ${episode.kind}: ${episode.excerpt}${marker}`,
       );
     }
   }

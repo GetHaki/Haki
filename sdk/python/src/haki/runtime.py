@@ -1,8 +1,10 @@
 """Runtime helpers: the two agent hooks from the PRD (before/after the LLM).
 
 - BEFORE the LLM call: `build_prompt_context(packet)` formats a ContextPacket
-  into a delimited instruction block (facts with dates and sources) to
-  prepend to the system prompt.
+  into a delimited instruction block (facts and dated source turns, each
+  carrying a short reference the model can cite) to prepend to the system
+  prompt. `resolve_refs(answer, packet)` turns those citations back into
+  the items they name.
 - AFTER the LLM call: `capture_turn(...)` writes the user/assistant exchange
   back to Haki as an event, so the consolidator can extract durable facts.
 
@@ -18,6 +20,7 @@ Usage (< 15 lines user-side):
     capture_turn(client, "usr_42", "prj", user_msg, answer)
 """
 
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -63,7 +66,8 @@ def build_prompt_context(packet: dict[str, Any]) -> str:
             "about HOW to respond (language of your answer, format, constraints, "
             "decisions already made), not as background trivia. If a fact states a "
             "language preference, write your entire response in that language. "
-            "Cite the source when you rely on a fact. Facts already reflect the "
+            "Cite an item by the reference in square brackets at the start of "
+            "its line (F3, E7) when you rely on it. Facts already reflect the "
             "CURRENT, resolved truth — an outdated value is removed the moment a "
             "newer one is confirmed, so you never need to compare dates between "
             "facts yourself; do not second-guess a fact's value. EXCEPTION: a fact "
@@ -98,8 +102,17 @@ def build_prompt_context(packet: dict[str, Any]) -> str:
             "answers a different question than the one asked."
         )
     for fact in facts:
+        # The server renders the line it charged the budget for (22 aout,
+        # app.context.cost). Printing anything else here would mean the
+        # caller pays a different number of tokens than the one they set --
+        # which is exactly the bug this replaced. Everything below is the
+        # fallback for a packet from a server that predates the field, kept
+        # byte-identical to it by tests/test_packet_cost.py.
+        if fact.get("line"):
+            lines.append(fact["line"])
+            continue
         value = fact.get("value")
-        valid_from = fact.get("valid_from") or "unknown date"
+        valid_from = fact.get("valid_from_short") or fact.get("valid_from") or "unknown date"
         # Dual-date rendering (mechanism F1, 15 aout): an exact, precomputed
         # offset ("N days before the question") next to the ISO date, so
         # the reader VERIFIES a number instead of computing one from two
@@ -114,7 +127,6 @@ def build_prompt_context(packet: dict[str, Any]) -> str:
                 f"; described event dated {temporal_range.get('start')} to "
                 f"{temporal_range.get('end')}"
             )
-        sources = ",".join(fact.get("source_event_ids") or []) or "no-source"
         marker = ""
         if fact.get("freshness") == "unconfirmed":
             last = fact.get("last_confirmed") or "an unknown date"
@@ -156,8 +168,8 @@ def build_prompt_context(packet: dict[str, Any]) -> str:
                 "equally current]"
             )
         lines.append(
-            f"- {fact.get('predicate')}: {value} "
-            f"(valid from {valid_from}; sources: {sources}){marker}"
+            f"- [{fact.get('ref') or '?'}] {fact.get('predicate')}: {value} "
+            f"(valid from {valid_from}){marker}"
         )
     if episodes:
         lines.append(
@@ -171,7 +183,14 @@ def build_prompt_context(packet: dict[str, Any]) -> str:
             "use the one matching that earlier point in time instead."
         )
         for episode in episodes:
-            occurred = episode.get("occurred_at") or "unknown date"
+            if episode.get("line"):
+                lines.append(episode["line"])
+                continue
+            occurred = (
+                episode.get("occurred_at_short")
+                or episode.get("occurred_at")
+                or "unknown date"
+            )
             occurred_relative = episode.get("occurred_at_relative")
             if occurred_relative:
                 occurred = f"{occurred} — {occurred_relative}"
@@ -183,13 +202,35 @@ def build_prompt_context(packet: dict[str, Any]) -> str:
                 else ""
             )
             lines.append(
-                f"- [{occurred}] {episode.get('kind')}: {episode.get('excerpt')} "
-                f"(event: {episode.get('event_id')}){marker}"
+                f"- [{episode.get('ref') or '?'}] [{occurred}] "
+                f"{episode.get('kind')}: {episode.get('excerpt')}{marker}"
             )
     for warning in warnings:
         lines.append(f"! {warning}")
     lines.append("</haki_memory>")
     return "\n".join(lines)
+
+
+def resolve_refs(text: str, packet: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Map every packet reference the model cited back to the real item.
+
+    The block cites `F3` / `E7` rather than uuids -- 2 tokens instead of 35,
+    and a reference a model can actually reproduce. The full ids never left:
+    they are in the packet next to the ref. This turns what the model wrote
+    back into the facts and episodes it used, which is what "with proof"
+    has to mean on the caller's side.
+
+    Returns {ref: item}, only for refs that are really in this packet, so a
+    reference the model invented resolves to nothing instead of to the
+    wrong item.
+    """
+    by_ref: dict[str, dict[str, Any]] = {}
+    for item in ((packet or {}).get("facts") or []) + ((packet or {}).get("episodes") or []):
+        ref = item.get("ref")
+        if ref:
+            by_ref[ref] = item
+    cited = set(re.findall(r"\b([FE]\d{1,4})\b", text or ""))
+    return {ref: by_ref[ref] for ref in sorted(cited) if ref in by_ref}
 
 
 def seen(*packets: dict[str, Any]) -> list[str]:

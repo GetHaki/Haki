@@ -407,8 +407,8 @@ def main() -> int:
     parser.add_argument(
         "--budget",
         type=int,
-        default=2000,
-        help="context budget in tokens (default 2000, the product default)",
+        default=3000,
+        help="context budget in tokens (default 3000, the product default)",
     )
     parser.add_argument(
         "--min-served",

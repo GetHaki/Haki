@@ -42,10 +42,22 @@ export interface CaptureResponse {
 
 export interface PacketFact {
   id: string;
+  /**
+   * Packet-local reference the rendered block cites (`F3`), and the exact
+   * line to print for this item. Both server-rendered since 22 aout: the
+   * block used to be built independently here, in the Python SDK and in the
+   * MCP server, while the token budget was computed from a fourth string
+   * matching none of them. Absent when talking to an older server, in which
+   * case buildPromptContext falls back to rendering from the fields below.
+   */
+  ref?: string | null;
+  line?: string | null;
   predicate: string;
   value: Record<string, unknown>;
   confidence: number | null;
   valid_from: string | null;
+  /** valid_from without the seconds and UTC offset nothing reads. */
+  valid_from_short?: string | null;
   /** Dual-date rendering (mechanism F1, 15 aout): exact offset from the
    * temporal point of view ("N days before/after the question"),
    * precomputed server-side. Absent on older servers. */
@@ -79,8 +91,13 @@ export interface PacketFact {
 /** Source event excerpt served in the packet (episodic memory). */
 export interface PacketEpisode {
   event_id: string;
+  /** See PacketFact.ref / PacketFact.line. */
+  ref?: string | null;
+  line?: string | null;
   kind: string;
   occurred_at: string | null;
+  /** occurred_at without the seconds and UTC offset nothing reads. */
+  occurred_at_short?: string | null;
   /** Dual-date rendering (mechanism F1, 15 aout) -- see
    * PacketFact.valid_from_relative. Absent on older servers. */
   occurred_at_relative?: string | null;
@@ -98,6 +115,10 @@ export interface PacketEpisode {
 export type ContextStatus = "ok" | "degraded" | "failed";
 
 export interface ContextPacket {
+  /** What the rendered block costs BESIDES the items (22 aout): the fixed
+   * instruction paragraphs and the delimiters. Not part of budget_tokens.
+   * Absent on older servers. */
+  overhead_tokens?: number;
   facts: PacketFact[];
   episodes: PacketEpisode[];
   /** Doubles as the typed list of reasons for `status`. */
@@ -336,7 +357,7 @@ export class HakiClient {
         subject_id: options.subjectId,
         query: options.query,
         purpose: options.purpose ?? null,
-        budget_tokens: options.budgetTokens ?? 2000,
+        budget_tokens: options.budgetTokens ?? 3000,
         exclude_ids: options.excludeIds ?? null,
       },
     });

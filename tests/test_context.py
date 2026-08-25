@@ -40,7 +40,7 @@ def recall_floor(monkeypatch):
 
 
 async def test_fulltext_axis_survives_a_stopword_heavy_natural_question(client):
-    """Found via external code audit (20 Aug): websearch_to_tsquery ANDs
+    """Found via external code audit (20 aout): websearch_to_tsquery ANDs
     every term of the query together, and the 'simple' ts config has no
     stopword list -- so a natural question like "What is the name of the
     dog?" used to become a query requiring "what" AND "is" AND "the" AND
@@ -99,12 +99,17 @@ async def test_budget_packs_best_scored_facts_and_traces_over_budget(client):
             "project_id": "prj_support",
             "subject_id": "usr_42",
             "query": "topic",
-            "budget_tokens": 60,
+            # Raised with the accounting, not with the intent (22 aout):
+            # the budget now charges the line the caller's prompt really
+            # carries, not a stripped `predicate value` string, so the
+            # same facts cost about 40 % more of it. The property under
+            # test -- some fit, some are traced over_budget -- is the same.
+            "budget_tokens": 100,
         },
     )
     assert response.status_code == 200
     body = response.json()
-    assert body["token_count"] <= 60
+    assert body["token_count"] <= 100
     assert 1 <= len(body["packet"]["facts"]) < 3
 
     trace = await client.get(
@@ -178,7 +183,12 @@ async def test_tied_score_facts_pack_deterministically_across_repeated_calls(cli
                 "project_id": "prj_support",
                 "subject_id": "usr_42",
                 "query": "topic",
-                "budget_tokens": 110,
+                # Raised with the accounting, not with the intent (22 aout):
+                # the budget now charges the line the caller's prompt really
+                # carries, not a stripped `predicate value` string, so the
+                # same facts cost about 40 % more of it. The property under
+                # test -- some fit, some are traced over_budget -- is the same.
+                "budget_tokens": 170,
             },
         )
         assert response.status_code == 200
@@ -233,18 +243,23 @@ async def test_unified_pool_lets_a_highly_relevant_episode_outrank_low_relevance
             "project_id": "prj_support",
             "subject_id": "usr_42",
             "query": episode_text("chat_session", episode_payload),
-            "budget_tokens": 300,
+            # Raised with the accounting, not with the intent (22 aout):
+            # the budget now charges the line the caller's prompt really
+            # carries, not a stripped string, so the same items cost more
+            # of it. The property under test -- the episode wins a slot
+            # despite competing against 6 higher-count facts -- is the same.
+            "budget_tokens": 450,
         },
     )
     assert response.status_code == 200
     body = response.json()
     packet = body["packet"]
-    assert body["token_count"] <= 300
-    # Six irrelevant facts (~55 tokens each) don't all fit in 300 tokens
-    # regardless of the episode -- budget alone forces some out.
+    assert body["token_count"] <= 450
+    # Six irrelevant facts don't all fit regardless of the episode --
+    # budget alone forces some out.
     assert len(packet["facts"]) < 6
     # The episode wins a slot on merit (top score), not on a reserved share.
-    # Since 21 Aug the served unit is a chunk, and the context window may
+    # Since 21 aout the served unit is a chunk, and the context window may
     # legitimately add its neighbour, so what is asserted is the merit
     # inclusion itself: a scored (non-neighbour) episode carrying the
     # matching text.
@@ -290,7 +305,12 @@ async def test_entity_boost_prefers_the_named_person_over_a_same_scored_rival(cl
             "subject_id": "usr_42",
             "query": "What activities does Melanie partake in?",
             # ~55 estimated tokens per fact -- fits exactly one.
-            "budget_tokens": 60,
+            # Raised with the accounting, not with the intent (22 aout):
+            # the budget now charges the line the caller's prompt really
+            # carries, not a stripped `predicate value` string, so the
+            # same facts cost about 40 % more of it. The property under
+            # test -- some fit, some are traced over_budget -- is the same.
+            "budget_tokens": 100,
         },
     )
     assert response.status_code == 200
@@ -514,3 +534,4 @@ async def test_recall_floor_gates_episodes_too(recall_floor, client):
         d.get("episode_id") and d["reason_code"] == "below_relevance_floor"
         for d in decisions
     )
+

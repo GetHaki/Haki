@@ -8,7 +8,7 @@ name: Eval
 # harness has no retry-on-network-error, so one dropped request kills the
 # whole process) — this runs on GitHub's runners instead, same live-server
 # pattern as ci.yml's typescript job (real Postgres, real uvicorn, fake
-# embedder to stay within the local 384-dim index — HAKI_LLM_PROVIDER=openai
+# embedder to stay within the local 1024-dim index — HAKI_LLM_PROVIDER=openai
 # for extraction/answer/judge, HAKI_EMBED_PROVIDER left at its local default
 # since HAKI_EMBED_PROVIDER=openai is unsupported, see app/providers/openai.py).
 #

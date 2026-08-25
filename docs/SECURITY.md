@@ -136,7 +136,7 @@ candidat). SDK : `resolve_conflict(...)`.
 
 `scripts/check_multilingual.py` (serveur lancé avec
 `HAKI_LLM_PROVIDER=openai`, embedder local
-paraphrase-multilingual-MiniLM-L12-v2) : capture FR + EN + ES pour un
+multilingual-e5-large) : capture FR + EN + ES pour un
 sujet, consolidation (extraction OpenRouter), requêtes croisées
 (EN→FR, FR→ES, ES→EN), tableau PASS/FAIL — **3/3 PASS** au dernier run.
 Les predicate/value extraits restent en anglais technique

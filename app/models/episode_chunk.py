@@ -81,7 +81,7 @@ class EpisodeChunk(Base):
     # LongMemEval's K = V + fact. Equal to `text` until then.
     index_text: Mapped[str] = mapped_column(String)
 
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(384))
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(1024))
     search_vector: Mapped[str | None] = mapped_column(
         TSVECTOR,
         # Same configuration as facts.search_vector and events.search_vector

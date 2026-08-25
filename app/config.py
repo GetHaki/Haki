@@ -47,11 +47,28 @@ class Settings(BaseSettings):
     # must fail at startup rather than at the first INSERT, which is what
     # MODELS and the dimension check in get_embedder are for.
     #
-    # The default stays the model every existing install already has vectors
-    # from: changing it invalidates every stored embedding, so it is a
-    # migration, not a setting flip. See the measurements in
-    # app.providers.local.MODELS.
-    embed_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    # Changing this invalidates every stored embedding -- vectors from two
+    # models are not comparable -- so it is a MIGRATION, not a setting flip:
+    # `alembic upgrade head` then `scripts/backfill_embeddings.py`. A flip
+    # without the backfill is refused at startup by
+    # app.db.verify_embedding_space, including between two models of the
+    # same width, which nothing caught before 0028.
+    #
+    # The default became e5-large on 24 aout (migration 0029) on a paired
+    # measurement, not a preference; the ablation that rules out "it is just
+    # a bigger model" is recorded in app.providers.local.MODELS.
+    embed_model: str = "intfloat/multilingual-e5-large"
+
+    # Where fastembed keeps the ONNX weights. fastembed's own default is
+    # `fastembed_cache` in the SYSTEM TEMP DIRECTORY, which in a container
+    # means the model is re-downloaded from HuggingFace on every start --
+    # 2.24 GB, in the first request's critical path, on every deploy,
+    # restart and scale-out. That was survivable at 0.22 GB and is not at
+    # 2.24 GB, so the image bakes the model in and points here (see
+    # Dockerfile). Unset keeps fastembed's behaviour, which is the right
+    # default outside a container: a developer's temp directory survives
+    # between runs.
+    embed_cache_dir: str | None = None  # HAKI_EMBED_CACHE_DIR
 
     # Reranker (mechanism F-R, Sprint 2, 15 aout): a cross-encoder re-scoring
     # pass over the top candidates already selected by the hybrid formula --

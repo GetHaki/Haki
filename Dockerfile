@@ -47,6 +47,29 @@ COPY --chown=haki:haki docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh
 ENV PATH="/app/.venv/bin:$PATH" HOME=/app
 
+# The embedding model is baked into the image, not downloaded at runtime.
+#
+# fastembed's default cache is `fastembed_cache` in the SYSTEM TEMP
+# DIRECTORY, which a container throws away on every start: without this,
+# the first request after each deploy, restart or scale-out downloads the
+# model from HuggingFace inside the critical path. At 0.22 GB that was a
+# slow first request; at 2.24 GB (the retrieval-trained default since
+# migration 0032) it is an outage, and it also makes the service depend on
+# HuggingFace being reachable at boot.
+#
+# The build arg exists so an image can be built for a deployment that
+# overrides HAKI_EMBED_MODEL. Keep the two in sync: an image baked with one
+# model and run with another downloads the other at runtime, silently
+# reintroducing exactly what this avoids.
+ARG HAKI_EMBED_MODEL=intfloat/multilingual-e5-large
+ENV HAKI_EMBED_CACHE_DIR=/app/.embed-cache
+RUN mkdir -p "$HAKI_EMBED_CACHE_DIR" \
+    && python -c "import os; from fastembed import TextEmbedding; \
+TextEmbedding(model_name=os.environ['HAKI_EMBED_MODEL'], \
+cache_dir=os.environ['HAKI_EMBED_CACHE_DIR'])" \
+    && chown -R haki:haki "$HAKI_EMBED_CACHE_DIR"
+ENV HAKI_EMBED_MODEL=${HAKI_EMBED_MODEL}
+
 USER haki
 EXPOSE 8100
 CMD ["/app/docker-entrypoint.sh"]

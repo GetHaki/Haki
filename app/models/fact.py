@@ -194,9 +194,11 @@ class Fact(Base):
     )
 
     # Retrieval (sprint 2): dense embedding + pre-rendered full-text column.
-    # vector(384) since migration 0003 (default embedder: local fastembed,
-    # paraphrase-multilingual-MiniLM-L12-v2).
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(384))
+    # vector(1024) since migration 0029 (default embedder: local fastembed,
+    # intfloat/multilingual-e5-large). Which model produced the stored
+    # vectors is recorded once for the whole corpus in `embedding_space`
+    # (migration 0028), not per row: it is a property of the corpus.
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(1024))
     search_text: Mapped[str | None] = mapped_column(String)
     # Precomputed tsvector of search_text (generated column, migration 0004):
     # ts_rank_cd reads it directly instead of re-parsing text on every query.

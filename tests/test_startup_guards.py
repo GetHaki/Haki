@@ -43,7 +43,7 @@ async def test_open_dev_mode_with_a_fake_extractor_is_allowed(monkeypatch):
 
 
 async def test_the_openai_embedder_is_refused_rather_than_failing_at_insert():
-    """1536 dimensions against a vector(384) column.
+    """1536 dimensions against a vector(1024) column.
 
     It could never have worked: the mismatch was documented in a provider
     docstring, which is not where someone setting an environment variable

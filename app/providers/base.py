@@ -25,9 +25,18 @@ from app.models import FACT_KINDS, MEMORY_FORMS, VOLATILITY_CLASSES, Event
 
 logger = logging.getLogger("haki.providers.base")
 
-# Embedding dimension of the `facts.embedding` column (vector(384), migration
-# 0003). Every embedder selected by config MUST produce vectors of this size.
-EMBEDDING_DIM = 384
+# Embedding dimension of the `embedding` columns (vector(1024), migration
+# 0029). Every embedder selected by config MUST produce vectors of this size.
+#
+# This is what the CODE believes the schema is, which is not the same thing
+# as what the schema IS -- an install that has not run `alembic upgrade
+# head` disagrees with it, and the check in get_embedder cannot see that.
+# The authority is the database: app.db.verify_embedding_space reads the
+# real column width (and which model produced the stored vectors) at
+# startup and refuses to serve on a mismatch. This constant exists so the
+# fake embedder can produce vectors of the right width in tests, and as the
+# cheap first check.
+EMBEDDING_DIM = 1024
 
 # Write gate (M1 — "porte d'ecriture"): reason codes for a candidate emitted
 # with action="reject". A rejected candidate is counted/logged and NEVER

@@ -72,7 +72,7 @@ def get_embedder() -> Embedder:
     elif settings.embed_provider == "openai":
         # Refused, loudly, rather than accepted and failed at INSERT time
         # (22 aout). text-embedding-3-small returns 1536 dimensions and
-        # `facts.embedding` is vector(384) since migration 0003, so this
+        # `facts.embedding` is vector(1024) since migration 0029, so this
         # selection has never been able to work -- it was documented in a
         # docstring nobody reads before setting an environment variable,
         # and the failure surfaced as a database error in the middle of a
@@ -80,7 +80,7 @@ def get_embedder() -> Embedder:
         raise RuntimeError(
             "HAKI_EMBED_PROVIDER=openai is not supported: this provider "
             "returns 1536-dimensional vectors and facts.embedding is "
-            "vector(384) (migration 0003). Use HAKI_EMBED_PROVIDER=local. "
+            "vector(1024) (migration 0029). Use HAKI_EMBED_PROVIDER=local. "
             "OpenAI remains available as an EXTRACTOR "
             "(HAKI_LLM_PROVIDER=openai)."
         )

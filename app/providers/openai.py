@@ -10,8 +10,8 @@ Extraction asks for a JSON object {"facts": [...]} and validates it against
 the ExtractedFact schema. Not used in tests (see FakeProvider).
 
 WARNING (embeddings): this provider's `embed` returns 1536-dimensional
-vectors (text-embedding-3-small), but `facts.embedding` is a vector(384)
-column since migration 0003 (default embedder = local fastembed). Selecting
+vectors (text-embedding-3-small), but `facts.embedding` is a vector(1024)
+column since migration 0029 (default embedder = local fastembed). Selecting
 `HAKI_EMBED_PROVIDER=openai` is therefore NOT supported for now — it would
 fail at insert time. It stays available only as an extractor
 (`HAKI_LLM_PROVIDER=openai`).

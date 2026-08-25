@@ -1,8 +1,10 @@
+import logging
 import re
 from collections.abc import AsyncGenerator
 
 from fastapi import Request
 from sqlalchemy import text
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -10,6 +12,8 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.config import settings
+
+logger = logging.getLogger("haki.db")
 
 # See app/config.py (db_disable_prepared_statement_cache) for why this is
 # sometimes needed: Supabase in production is reached through the Supavisor
@@ -119,6 +123,132 @@ _GENERATED_FTS_CONFIG_SQL = """
       AND a.attname = 'search_vector'
 """
 _TSVECTOR_CONFIG_RE = re.compile(r"to_tsvector\(\s*'([a-z_]+)'::regconfig")
+
+
+# The vector axis has the SAME failure mode as the lexical one above, and
+# nothing checked it until now. Two independent ways to go dark, both
+# silent:
+#
+# 1. The dimension. `facts.embedding` is a vector(N) fixed by a migration;
+#    the embedder is chosen at runtime by HAKI_EMBED_MODEL. get_embedder
+#    compares the model's dimension against the EMBEDDING_DIM CONSTANT --
+#    which is the dimension the code BELIEVES the column has, not the one
+#    it actually has. An install whose `alembic upgrade head` did not run
+#    passes that check and fails at the first INSERT, mid-consolidation.
+#
+# 2. The model. This is the hole this function exists for. Two DIFFERENT
+#    models of the SAME dimension are interchangeable to every check the
+#    project had: snowflake-arctic-embed-s and the default are both 384,
+#    so swapping HAKI_EMBED_MODEL between them starts cleanly, inserts
+#    cleanly, and compares query vectors from one embedding space against
+#    stored vectors from another. Cosine similarity between two unrelated
+#    spaces is noise: the dense axis contributes nothing and ranking
+#    silently degrades to lexical-only. No error, no test failure -- the
+#    exact shape of the FTS bug that cost this project weeks.
+#
+# `embedding_space` records which model produced the stored vectors
+# (migration 0028). One row, read once at startup, no per-row stamp and no
+# change to any of the eight write sites: the invariant is a property of
+# the corpus, not of a row.
+_EMBEDDING_COLUMN_DIM_SQL = """
+    SELECT c.relname AS table_name,
+           a.atttypmod AS dim
+    FROM pg_attribute a
+    JOIN pg_class c ON c.oid = a.attrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = current_schema()
+      AND c.relname IN ('facts', 'events', 'episode_chunks')
+      AND a.attname = 'embedding'
+      AND NOT a.attisdropped
+"""
+
+
+async def verify_embedding_space() -> None:
+    """Fail fast when the configured embedder does not match stored vectors.
+
+    Silent on a database whose schema is not migrated yet (fresh install,
+    CI bootstrap), for the same reason as verify_fts_config: there is
+    nothing to disagree with yet.
+
+    A pending backfill is a WARNING, not a refusal. Refusing would mean the
+    service is down for the whole duration of the re-embedding, and the
+    degradation is partial and recoverable -- rows already re-embedded are
+    correct. A model MISMATCH is a refusal, because every comparison it
+    produces is meaningless.
+    """
+    if settings.embed_provider != "local":
+        return
+    from app.providers.local import MODELS
+
+    # An unknown model name is NOT a reason to skip this check. get_embedder
+    # does raise on it, with the list of known models -- but only once
+    # something asks for an embedder, and the model comparison below needs
+    # nothing but the NAME. Returning early here would mean a typo in
+    # HAKI_EMBED_MODEL passes startup silently.
+    spec = MODELS.get(settings.embed_model)
+
+    async with engine.connect() as conn:
+        dims = {
+            row.table_name: int(row.dim)
+            for row in (await conn.execute(text(_EMBEDDING_COLUMN_DIM_SQL))).all()
+        }
+        if not dims:
+            return
+        try:
+            state = (
+                await conn.execute(
+                    text(
+                        "SELECT model, backfilled_at FROM embedding_space WHERE id = 1"
+                    )
+                )
+            ).first()
+        except ProgrammingError:
+            # Migration 0028 not applied: the dimension check below still
+            # runs, which is the half that was already possible to get wrong.
+            state = None
+
+    mismatched = (
+        {table: dim for table, dim in sorted(dims.items()) if dim != spec.dim}
+        if spec is not None
+        else {}
+    )
+    # The DIMENSION first when both are wrong: the fix is ordered (widen the
+    # columns, then re-embed), and this is the first half of it.
+    if mismatched:
+        detail = ", ".join(
+            f"{table}=vector({dim})" for table, dim in mismatched.items()
+        )
+        raise RuntimeError(
+            f"embedding dimension mismatch: HAKI_EMBED_MODEL={settings.embed_model!r} "
+            f"produces {spec.dim}-dimensional vectors and the schema has {detail}. "
+            "Run `alembic upgrade head`, then re-embed with "
+            "`uv run python -m scripts.backfill_embeddings` -- vectors from two "
+            "models are not comparable, so widening the column without a backfill "
+            "leaves the dense axis matching noise."
+        )
+
+    if state is None:
+        return
+    if state.model and state.model != settings.embed_model:
+        raise RuntimeError(
+            f"embedding model mismatch: the stored vectors were produced by "
+            f"{state.model!r} and HAKI_EMBED_MODEL is {settings.embed_model!r}. "
+            "Both produce vectors of the same size, so nothing else would have "
+            "complained: query vectors from one embedding space would be compared "
+            "against stored vectors from another, and cosine similarity between "
+            "two unrelated spaces is noise -- the dense axis would go dark and "
+            "ranking would silently fall back to lexical only. Either restore "
+            f"HAKI_EMBED_MODEL={state.model!r}, or re-embed the corpus with "
+            "`uv run python -m scripts.backfill_embeddings`."
+        )
+    if state.backfilled_at is None:
+        logger.warning(
+            "embedding backfill INCOMPLETE for model %s: rows whose embedding is "
+            "still NULL are invisible to the dense axis and are retrieved by the "
+            "lexical axis alone. Finish with "
+            "`uv run python -m scripts.backfill_embeddings`.",
+            settings.embed_model,
+        )
 
 
 async def verify_fts_config() -> None:

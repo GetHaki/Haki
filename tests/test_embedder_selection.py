@@ -78,8 +78,8 @@ async def test_a_model_of_the_wrong_dimension_is_refused_before_any_insert(monke
 
     monkeypatch.setattr(providers, "_embedder", None)
     monkeypatch.setattr(providers.settings, "embed_provider", "local")
-    monkeypatch.setattr(providers.settings, "embed_model", ASYMMETRIC)
-    assert MODELS[ASYMMETRIC].dim != EMBEDDING_DIM
+    monkeypatch.setattr(providers.settings, "embed_model", DEFAULT)
+    assert MODELS[DEFAULT].dim != EMBEDDING_DIM
     with pytest.raises(RuntimeError, match="re-embeds every stored row"):
         get_embedder()
     monkeypatch.setattr(providers, "_embedder", None)

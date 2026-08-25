@@ -93,7 +93,7 @@ class Event(Base):
     # this event's own facts are known (mechanism E3, 15 aout, migration
     # 0022), re-derived from index_text instead so the embedding also
     # reflects what was extracted, not just the raw payload.
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(384))
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(1024))
 
     # True key merging (mechanism E3, migration 0022): kind + truncated
     # payload, concatenated with the predicate/value of every fact

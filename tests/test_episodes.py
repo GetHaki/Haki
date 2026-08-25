@@ -12,6 +12,7 @@ from sqlalchemy import select
 from app.consolidator import run_pending_consolidations
 from app.db import async_session
 from app.models import ConflictSet, Event, Fact, FactStatus
+from app.providers import EMBEDDING_DIM
 from app.providers.fake import FakeProvider, mock_fact
 
 ORG = "org_acme"
@@ -52,7 +53,7 @@ async def test_consolidation_embeds_events(client):
     async with async_session() as session:
         event = (await session.execute(select(Event))).scalars().one()
     assert event.embedding is not None
-    assert len(event.embedding) == 384
+    assert len(event.embedding) == EMBEDDING_DIM
 
 
 async def test_context_serves_dated_episode(client):

@@ -2,7 +2,7 @@
 
 Prérequis : API lancée avec `HAKI_LLM_PROVIDER=openai` (extraction via
 OpenRouter, cle dans .env) et l'embedder local par defaut
-(paraphrase-multilingual-MiniLM-L12-v2, 384 dims) :
+(multilingual-e5-large, 1024 dims) :
 
     uv run alembic upgrade head
     HAKI_LLM_PROVIDER=openai uv run uvicorn app.main:app --port 8100

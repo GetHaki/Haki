@@ -86,6 +86,7 @@ import sys
 import uuid
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import delete, select
@@ -300,7 +301,12 @@ async def _served_dias(
     return served
 
 
-async def run(conversations: int | None, budget: int, min_served: float | None) -> int:
+async def run(
+    conversations: int | None,
+    budget: int,
+    min_served: float | None,
+    dump_path: Path | None = None,
+) -> int:
     config = load_config(CONFIG)
     dataset_path = ROOT / config["dataset"]["file"]
     if not dataset_path.exists():
@@ -318,50 +324,75 @@ async def run(conversations: int | None, budget: int, min_served: float | None) 
     embedder = get_embedder()
     per_category: dict[int, list[bool]] = defaultdict(list)
     started = datetime.now()
+    # `--dump` writes one record per question (sample_id, question,
+    # category, any, complete, gold, served) so two runs can be compared
+    # PAIRED, question by question, instead of only as two aggregate
+    # percentages -- see eval/compare_dumps.py.
+    dump_file = dump_path.open("w", encoding="utf-8") if dump_path is not None else None
 
-    for position, sample in enumerate(samples, start=1):
-        sample_id = str(sample.get("sample_id", f"conv{position}"))
-        subject_id = _subject_of(sample_id)
-        chunk_to_dia = await _ingest(sample)
-        as_of = max(
-            _parse_locomo_date(raw_date, FALLBACK_BASE)
-            for _, raw_date, _ in _sessions_of(sample["conversation"])
-        )
-        questions = [
-            qa
-            for qa in sample.get("qa", [])
-            if int(qa.get("category", 0)) in CATEGORY_NAMES and (qa.get("evidence") or [])
-        ]
-        for qa in questions:
-            gold = {str(dia) for dia in qa["evidence"] if _DIA_RE.match(str(dia))}
-            async with async_session() as session:
-                packet, _tokens, _trace_id = await build_context(
-                    session,
-                    project_id=PROJECT_ID,
-                    subject_id=subject_id,
-                    query=str(qa.get("question", "")),
-                    budget_tokens=budget,
-                    embedder=embedder,
-                    as_of=as_of,
-                )
-                await session.commit()
-            served = await _served_dias(packet, chunk_to_dia)
-            # TWO metrics, because for a question whose answer needs two
-            # distinct moments, "some evidence arrived" is not the question
-            # (22 aout). `any` is what this bench has always reported and is
-            # kept for continuity; `all` is the one that predicts whether the
-            # question is ANSWERABLE from the packet. On LoCoMo multi-hop they
-            # differ by 51 points -- 83.7 % against 32.6 % -- which is most of
-            # why this bench read 88.3 % while accuracy read 73 %.
-            per_category[int(qa["category"])].append(
-                (bool(served & gold), gold.issubset(served))
+    try:
+        for position, sample in enumerate(samples, start=1):
+            sample_id = str(sample.get("sample_id", f"conv{position}"))
+            subject_id = _subject_of(sample_id)
+            chunk_to_dia = await _ingest(sample)
+            as_of = max(
+                _parse_locomo_date(raw_date, FALLBACK_BASE)
+                for _, raw_date, _ in _sessions_of(sample["conversation"])
             )
-        done = sum(len(v) for v in per_category.values())
-        print(
-            f"[{position}/{len(samples)}] {sample_id}: {len(questions)} questions "
-            f"({done} total, {(datetime.now() - started).seconds}s)",
-            flush=True,
-        )
+            questions = [
+                qa
+                for qa in sample.get("qa", [])
+                if int(qa.get("category", 0)) in CATEGORY_NAMES and (qa.get("evidence") or [])
+            ]
+            for qa in questions:
+                gold = {str(dia) for dia in qa["evidence"] if _DIA_RE.match(str(dia))}
+                async with async_session() as session:
+                    packet, _tokens, _trace_id = await build_context(
+                        session,
+                        project_id=PROJECT_ID,
+                        subject_id=subject_id,
+                        query=str(qa.get("question", "")),
+                        budget_tokens=budget,
+                        embedder=embedder,
+                        as_of=as_of,
+                    )
+                    await session.commit()
+                served = await _served_dias(packet, chunk_to_dia)
+                # TWO metrics, because for a question whose answer needs two
+                # distinct moments, "some evidence arrived" is not the question
+                # (22 aout). `any` is what this bench has always reported and is
+                # kept for continuity; `all` is the one that predicts whether the
+                # question is ANSWERABLE from the packet. On LoCoMo multi-hop they
+                # differ by 51 points -- 83.7 % against 32.6 % -- which is most of
+                # why this bench read 88.3 % while accuracy read 73 %.
+                any_ok = bool(served & gold)
+                complete_ok = gold.issubset(served)
+                per_category[int(qa["category"])].append((any_ok, complete_ok))
+                if dump_file is not None:
+                    dump_file.write(
+                        json.dumps(
+                            {
+                                "sample_id": sample_id,
+                                "question": str(qa.get("question", "")),
+                                "category": CATEGORY_NAMES[int(qa["category"])],
+                                "any": any_ok,
+                                "complete": complete_ok,
+                                "gold": sorted(gold),
+                                "served": sorted(served),
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
+            done = sum(len(v) for v in per_category.values())
+            print(
+                f"[{position}/{len(samples)}] {sample_id}: {len(questions)} questions "
+                f"({done} total, {(datetime.now() - started).seconds}s)",
+                flush=True,
+            )
+    finally:
+        if dump_file is not None:
+            dump_file.close()
 
     all_results = [ok for results in per_category.values() for ok in results]
     if not all_results:
@@ -380,6 +411,8 @@ async def run(conversations: int | None, budget: int, min_served: float | None) 
             f"  {CATEGORY_NAMES[category]:<12} {any_rate:6.1f}% {all_rate:8.1f}% "
             f"{len(results):6d}"
         )
+    if dump_path is not None:
+        print(f"\ndump written: {dump_path}")
 
     if min_served is not None and served_rate < min_served:
         print(
@@ -416,9 +449,20 @@ def main() -> int:
         default=None,
         help="exit non-zero below this percentage (the CI gate)",
     )
+    parser.add_argument(
+        "--dump",
+        type=Path,
+        default=None,
+        help="write one JSON record per question, for eval.compare_dumps",
+    )
     args = parser.parse_args()
     return asyncio.run(
-        run(None if args.all else args.conversations, args.budget, args.min_served)
+        run(
+            None if args.all else args.conversations,
+            args.budget,
+            args.min_served,
+            dump_path=args.dump,
+        )
     )
 
 

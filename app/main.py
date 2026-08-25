@@ -13,7 +13,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from app.api.routes import api_router
 from app.auth import ApiKeyAuthMiddleware
 from app.config import settings
-from app.db import install_tcp_nodelay, verify_fts_config
+from app.db import install_tcp_nodelay, verify_embedding_space, verify_fts_config
 from app.errors import error_body, register_error_handlers
 from app.mcp_server import mcp as mcp_server
 from app.rate_limit import limiter, rate_limit_exceeded_handler
@@ -67,6 +67,11 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     # Refuses to serve when the queried and indexed text search
     # configurations disagree — see app.db.verify_fts_config.
     await verify_fts_config()
+    # Same guard for the OTHER retrieval axis: refuses to serve when the
+    # configured embedding model is not the one the stored vectors came
+    # from, and warns when a re-embedding pass is incomplete. Both states
+    # are silent without this — see app.db.verify_embedding_space.
+    await verify_embedding_space()
     # `fake` is the DEFAULT extractor, which is right for tests and wrong
     # for anything else: FakeProvider reads `payload["mock_facts"]` and
     # returns [] otherwise. A self-hosted install that forgets

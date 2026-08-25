@@ -55,7 +55,7 @@ phase 1 generates candidates with the INDEXES (top RETRIEVAL_TOP_K by hnsw
 cosine distance UNION top RETRIEVAL_TOP_K by GIN full-text rank), and phase
 2 computes the full hybrid score on that small union only (≤ 2×TOP_K rows),
 then caps at CANDIDATE_LIMIT. Only the columns needed for packing are
-selected: decoding the 384-dim embedding of every returned row costs more
+selected: decoding the 1024-dim embedding of every returned row costs more
 than the scoring itself (measured). Trade-off, documented: a fact that is
 neither in the vector top-K nor in the full-text top-K cannot be served even
 if recency would have lifted it — and facts beyond the cap are not traced.
@@ -819,7 +819,7 @@ async def build_context(
     candidates = select(vector_top.c.id).union(select(fts_top.c.id)).cte("candidates")
 
     # Phase 2 — full hybrid score on the candidate union only. Only the
-    # columns needed for packing are selected: decoding the 384-dim embedding
+    # columns needed for packing are selected: decoding the 1024-dim embedding
     # of every returned row costs more than the scoring itself (measured in
     # the sprint-3 benchmark). The cap keeps the work flat no matter how many
     # facts the scope holds.

@@ -90,6 +90,7 @@ from typing import Any
 
 from sqlalchemy import Float, Text, cast, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 from sqlalchemy.sql import func
 
 from app import metrics
@@ -935,10 +936,15 @@ async def build_context(
     # `forgotten` decision, so the trace stays auditable).
     contested_rows_by_id: dict[uuid.UUID, Fact] = {}
     if contested_conflict_by_fact:
+        # Same rule as the phase-2 query above: never decode the 1024-dim
+        # embedding or the tsvector for rows the packet renders from light
+        # columns only (_packet_fact + _fact_freshness touch neither).
         contested_members = (
             (
                 await session.execute(
-                    select(Fact).where(
+                    select(Fact)
+                    .options(defer(Fact.embedding), defer(Fact.search_vector))
+                    .where(
                         Fact.id.in_(contested_conflict_by_fact.keys())
                     )
                 )
@@ -974,10 +980,13 @@ async def build_context(
     # 13 aout. Only single-member sets: a contested pair's candidate side
     # is handled separately, packed alongside its active sibling below.
     if quarantined_ids:
-        quarantined_candidates = (
+        # Audit-only rows: the trace needs the id, nothing else. Selecting
+        # the full entity would decode the 1024-dim embedding per row for
+        # a decision that carries no content.
+        quarantined_candidate_ids = (
             (
                 await session.execute(
-                    select(Fact).where(
+                    select(Fact.id).where(
                         Fact.id.in_(quarantined_ids),
                         Fact.status == FactStatus.candidate,
                     )
@@ -986,10 +995,10 @@ async def build_context(
             .scalars()
             .all()
         )
-        for fact in quarantined_candidates:
+        for fact_id in quarantined_candidate_ids:
             decisions.append(
                 {
-                    "fact_id": str(fact.id),
+                    "fact_id": str(fact_id),
                     "action": "blocked",
                     "reason_code": "conflict_open",
                 }

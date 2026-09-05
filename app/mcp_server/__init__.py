@@ -64,6 +64,7 @@ from haki.runtime import build_prompt_context
 from app.context import build_context, failed_packet, get_trace
 from app.db import async_session
 from app.schemas import EventIn
+from app.schemas.capture import MAX_JSON_BYTES
 
 logger = logging.getLogger("haki.mcp")
 
@@ -170,6 +171,20 @@ async def _resolve_scope(ctx: Context) -> _Scope:
     return _Scope(key.org_id, key.project_id, subject_id)
 
 
+def _parse_uuid(value: str, name: str) -> uuid.UUID:
+    """Parse a model-supplied id, raising a typed ToolError, never a raw ValueError.
+
+    M2: uuid.UUID() on a malformed string raises ValueError, which the MCP
+    transport surfaces as a raw protocol error with no actionable message.
+    The model then retries the same malformed id. ToolError carries a typed
+    message the model can act on ("expected UUID, got ...").
+    """
+    try:
+        return uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        raise ToolError(f"invalid {name}: expected UUID string, got {value!r}")
+
+
 @mcp.tool()
 async def haki_context(
     ctx: Context,
@@ -236,9 +251,21 @@ async def haki_capture(ctx: Context, content: str, kind: str = "agent.observatio
     """Memorize a durable project fact: technical decision, convention,
     resolved error. Call at the END of a task. Never memorize secrets,
     tokens or ephemeral data. Consolidation is synchronous in dev
-    (HAKI_MCP_AUTOCONSOLIDATE), so the fact is recallable immediately."""
+    (HAKI_MCP_AUTOCONSOLIDATE), so the fact is recallable immediately.
+    Content larger than MAX_JSON_BYTES (256 KiB, same bound as POST
+    /v1/capture) is rejected with a typed error."""
     scope = await _resolve_scope(ctx)
     subject_id = scope.subject_id
+    # M3: same 256 KiB bound as the REST surface (app.schemas.capture).
+    # Without it an agent pasting a whole file into content would bloat
+    # the JSONB payload column; EventIn's own validator would raise a raw
+    # pydantic error instead of a typed ToolError the model can act on.
+    size = len(content.encode("utf-8"))
+    if size > MAX_JSON_BYTES:
+        raise ToolError(
+            f"content too large: {size} bytes, limit is {MAX_JSON_BYTES} "
+            "(256 KiB, same as POST /v1/capture) — split into smaller facts"
+        )
     # Content-based idempotency key (no timestamp): an agent calling the
     # tool twice with the same memory does not create a duplicate event.
     digest = hashlib.sha256(f"{kind}\n{content}".encode("utf-8")).hexdigest()
@@ -294,7 +321,7 @@ async def haki_inspect(ctx: Context, trace_id: str) -> dict[str, Any]:
     async with async_session() as session:
         trace = await get_trace(
             session,
-            trace_id=uuid.UUID(trace_id),
+            trace_id=_parse_uuid(trace_id, "trace_id"),
             project_id=scope.project_id,
             subject_id=scope.subject_id,
         )
@@ -359,8 +386,8 @@ async def haki_correct(
             session,
             project_id=scope.project_id,
             rating=rating,
-            trace_id=uuid.UUID(trace_id) if trace_id else None,
-            fact_id=uuid.UUID(fact_id) if fact_id else None,
+            trace_id=_parse_uuid(trace_id, "trace_id") if trace_id else None,
+            fact_id=_parse_uuid(fact_id, "fact_id") if fact_id else None,
             comment=comment,
         )
         await session.commit()

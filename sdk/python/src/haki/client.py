@@ -5,11 +5,40 @@ because the main consumers are user scripts and agent hooks; an async
 variant is provided for async codebases.
 """
 
+import asyncio
+import random
+import time
 from typing import Any
 
 import httpx
 
 from haki.errors import HakiApiError, HakiConnectionError
+
+# Statuses worth a second attempt: rate limiting and transient upstream
+# failures. Anything else (400/401/403/404/409/422, ...) is definitive —
+# retrying it burns the caller's time and, worse, its rate-limit budget.
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+
+# How many extra attempts after the first one. 3 retries = 4 tries total:
+# enough to ride out a rolling restart or a burst-limited minute, small
+# enough that a genuinely dead server fails fast (~3.5 s of backoff).
+_MAX_RETRIES = 3
+# Base backoff between attempts: 0.5 s, 1 s, 2 s, plus jitter so a fleet
+# of agents woken by the same outage does not retry in lockstep.
+_BACKOFF_BASE_SECONDS = 0.5
+
+
+def _retry_delay(attempt: int, response: httpx.Response | None) -> float:
+    """Seconds to wait before attempt number `attempt` (1-based retry)."""
+    if response is not None and response.status_code == 429:
+        # The server tells us how long to wait — believe it, within reason.
+        try:
+            asked = float(response.headers.get("retry-after", ""))
+            if 0 <= asked <= 60:
+                return asked
+        except (TypeError, ValueError):
+            pass
+    return _BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)) + random.uniform(0, 0.25)
 
 
 def _raise_for_error(response: httpx.Response) -> None:
@@ -51,7 +80,10 @@ class HakiClient:
         self._http = httpx.Client(
             base_url=base_url.rstrip("/"),
             headers=headers,
-            timeout=timeout,
+            # Fail fast on connect/write/pool, generous on read: the server
+            # answers memory reads in ~100 ms but a consolidation pass can
+            # legitimately hold the socket for seconds.
+            timeout=httpx.Timeout(10.0, read=timeout, write=10.0, pool=10.0),
             transport=transport,
         )
 
@@ -64,13 +96,39 @@ class HakiClient:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
-        try:
-            response = self._http.request(method, path, **kwargs)
-        except httpx.HTTPError as exc:
-            raise HakiConnectionError(
-                f"cannot reach Haki at {self._http.base_url}: {exc}"
-            ) from exc
+    def _request(
+        self, method: str, path: str, *, retry: bool = True, **kwargs: Any
+    ) -> dict[str, Any]:
+        """One HTTP call with retries on transient failures.
+
+        Retries 429/500/502/503/504 and network errors with exponential
+        backoff (+ Retry-After on 429). Pass `retry=False` for calls that
+        must run exactly once — today only `create_key`, where a retry
+        after an ambiguous timeout would mint a second key and orphan the
+        first (the clear value is returned once and never listable).
+        Every other route is safe to replay: reads are reads, capture
+        deduplicates by content, and forget/feedback/resolve are
+        idempotent by ledger transition.
+        """
+        last_error: Exception | None = None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                response = self._http.request(method, path, **kwargs)
+            except httpx.HTTPError as exc:
+                last_error = HakiConnectionError(
+                    f"cannot reach Haki at {self._http.base_url}: {exc}"
+                )
+                response = None
+            else:
+                if response.is_success or response.status_code not in _RETRYABLE_STATUS:
+                    _raise_for_error(response)
+                    return response.json()
+                last_error = None
+            if not retry or attempt >= _MAX_RETRIES:
+                break
+            time.sleep(_retry_delay(attempt + 1, response))
+        if last_error is not None:
+            raise last_error
         _raise_for_error(response)
         return response.json()
 
@@ -244,6 +302,7 @@ class HakiClient:
             "POST",
             "/v1/keys",
             json={"org_id": org_id, "project_id": project_id, "label": label},
+            retry=False,  # never replay: a retry could mint an orphan key
         )
 
     def list_keys(self) -> dict[str, Any]:
@@ -285,7 +344,7 @@ class AsyncHakiClient:
         self._http = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             headers=headers,
-            timeout=timeout,
+            timeout=httpx.Timeout(10.0, read=timeout, write=10.0, pool=10.0),
             transport=transport,
         )
 
@@ -298,13 +357,29 @@ class AsyncHakiClient:
     async def __aexit__(self, *exc: object) -> None:
         await self.aclose()
 
-    async def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
-        try:
-            response = await self._http.request(method, path, **kwargs)
-        except httpx.HTTPError as exc:
-            raise HakiConnectionError(
-                f"cannot reach Haki at {self._http.base_url}: {exc}"
-            ) from exc
+    async def _request(
+        self, method: str, path: str, *, retry: bool = True, **kwargs: Any
+    ) -> dict[str, Any]:
+        """Async mirror of HakiClient._request (same retry contract)."""
+        last_error: Exception | None = None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                response = await self._http.request(method, path, **kwargs)
+            except httpx.HTTPError as exc:
+                last_error = HakiConnectionError(
+                    f"cannot reach Haki at {self._http.base_url}: {exc}"
+                )
+                response = None
+            else:
+                if response.is_success or response.status_code not in _RETRYABLE_STATUS:
+                    _raise_for_error(response)
+                    return response.json()
+                last_error = None
+            if not retry or attempt >= _MAX_RETRIES:
+                break
+            await asyncio.sleep(_retry_delay(attempt + 1, response))
+        if last_error is not None:
+            raise last_error
         _raise_for_error(response)
         return response.json()
 
@@ -435,6 +510,7 @@ class AsyncHakiClient:
             "POST",
             "/v1/keys",
             json={"org_id": org_id, "project_id": project_id, "label": label},
+            retry=False,  # never replay: a retry could mint an orphan key
         )
 
     async def list_keys(self) -> dict[str, Any]:

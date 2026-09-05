@@ -945,24 +945,40 @@ async def build_context(
         if any(member in row_ids for member in conflict.fact_ids):
             served_contested_fact_ids.update(conflict.fact_ids)
     contested_rows_by_id: dict[uuid.UUID, Fact] = {}
-    if served_contested_fact_ids:
+    quarantined_rows_by_id: dict[uuid.UUID, Fact] = {}
+    # A3: ONE roundtrip for both needs. The contested hydrate and the
+    # quarantine audit below used to be two sequential SELECTs; on one
+    # AsyncSession (= one connection, RLS-scoped) they cannot overlap, so
+    # each is paid in full. Loading the union in a single IN query and
+    # splitting in Python removes a whole roundtrip whenever both sides are
+    # present, at the cost of decoding light columns for quarantine rows
+    # (their trace only needs the id) — a deliberate trade: a roundtrip
+    # costs far more than a few small columns. Heavy columns stay deferred
+    # for every row (A1), exactly as before.
+    # The two `if` below are independent on purpose, never elif: a fact id
+    # can theoretically sit in both sets (member of a contested pair AND
+    # of a single-member quarantine), and the old code served both roles —
+    # contested hydration AND quarantine trace — for it.
+    hydrate_ids = served_contested_fact_ids | quarantined_ids
+    if hydrate_ids:
         # Same rule as the phase-2 query above: never decode the 1024-dim
         # embedding or the tsvector for rows the packet renders from light
         # columns only (_packet_fact + _fact_freshness touch neither).
-        contested_members = (
+        for fact in (
             (
                 await session.execute(
                     select(Fact)
                     .options(defer(Fact.embedding), defer(Fact.search_vector))
-                    .where(
-                        Fact.id.in_(served_contested_fact_ids)
-                    )
+                    .where(Fact.id.in_(hydrate_ids))
                 )
             )
             .scalars()
             .all()
-        )
-        contested_rows_by_id = {f.id: f for f in contested_members}
+        ):
+            if fact.id in served_contested_fact_ids:
+                contested_rows_by_id[fact.id] = fact
+            if fact.id in quarantined_ids:
+                quarantined_rows_by_id[fact.id] = fact
 
     now_dt = as_of or datetime.now(timezone.utc)
     decisions: list[dict[str, Any]] = []
@@ -990,22 +1006,12 @@ async def build_context(
     # 13 aout. Only single-member sets: a contested pair's candidate side
     # is handled separately, packed alongside its active sibling below.
     if quarantined_ids:
-        # Audit-only rows: the trace needs the id, nothing else. Selecting
-        # the full entity would decode the 1024-dim embedding per row for
-        # a decision that carries no content.
-        quarantined_candidate_ids = (
-            (
-                await session.execute(
-                    select(Fact.id).where(
-                        Fact.id.in_(quarantined_ids),
-                        Fact.status == FactStatus.candidate,
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-        for fact_id in quarantined_candidate_ids:
+        # No query here (A3): the rows were loaded with the contested
+        # hydrate above in a single roundtrip. The SQL `status == candidate`
+        # filter is replicated in Python — same set, same trace.
+        for fact_id, fact in quarantined_rows_by_id.items():
+            if fact.status != FactStatus.candidate:
+                continue
             decisions.append(
                 {
                     "fact_id": str(fact_id),

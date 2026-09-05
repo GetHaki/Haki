@@ -1403,7 +1403,9 @@ def _record_rejection(
 
 
 async def _process_job(
-    session: AsyncSession, job: Job, extractor: Extractor, embedder: Embedder
+    session: AsyncSession, job: Job, extractor: Extractor, embedder: Embedder,
+    *,
+    only_event_ids: set[uuid.UUID] | None = None,
 ) -> dict[str, Any]:
     event_ids = [uuid.UUID(e) for e in job.payload.get("event_ids", [])]
     events = (
@@ -1417,6 +1419,13 @@ async def _process_job(
         .scalars()
         .all()
     )
+    if only_event_ids is not None:
+        # B12: a subject-scoped run (POST /v1/consolidate/subject) must never
+        # extract another subject's events just because they share this job's
+        # batch. The remainder stays in the payload for the global
+        # worker/ops run (see _run_jobs) -- nothing is skipped, nothing is
+        # processed under the wrong scope.
+        events = [e for e in events if e.id in only_event_ids]
 
     result: dict[str, Any] = {
         "created": 0,
@@ -1810,7 +1819,9 @@ async def run_pending_consolidations_for_subject(
     )
     # Filter to this subject FIRST, then claim: claiming a job only to
     # discover it belongs to another subject would take it away from the
-    # worker that should have it.
+    # worker that should have it. Claimed jobs are then processed with
+    # only_event_ids (B12): a mixed batch's other subjects stay queued,
+    # never extracted under this caller's scope.
     jobs = await claim_jobs(
         session,
         [
@@ -1821,7 +1832,9 @@ async def run_pending_consolidations_for_subject(
             )
         ],
     )
-    return await _run_jobs(session, jobs, extractor, embedder)
+    return await _run_jobs(
+        session, jobs, extractor, embedder, only_event_ids=subject_event_ids
+    )
 
 
 async def _run_jobs(
@@ -1829,6 +1842,8 @@ async def _run_jobs(
     jobs: list[Job],
     extractor: Extractor | None,
     embedder: Embedder | None,
+    *,
+    only_event_ids: set[uuid.UUID] | None = None,
 ) -> int:
     extractor = extractor or get_extractor()
     embedder = embedder or get_embedder()
@@ -1837,10 +1852,34 @@ async def _run_jobs(
         try:
             # Savepoint per job: a failure rolls back only this job's writes.
             async with session.begin_nested():
-                result = await _process_job(session, job, extractor, embedder)
-                job.status = JobStatus.done
-                job.finished_at = datetime.now(timezone.utc)
-                job.payload = {**job.payload, "result": result}
+                result = await _process_job(
+                    session, job, extractor, embedder, only_event_ids=only_event_ids
+                )
+                if only_event_ids is not None:
+                    remaining = [
+                        e
+                        for e in job.payload.get("event_ids", [])
+                        if uuid.UUID(e) not in only_event_ids
+                    ]
+                else:
+                    remaining = []
+                if remaining:
+                    # B12: other subjects' events stay queued for the global
+                    # worker/ops run -- back to pending (the claim flipped
+                    # this job to running), payload narrowed to what is left.
+                    # The partial result is kept for observability; the next
+                    # run overwrites it with its own full counts.
+                    job.payload = {
+                        **job.payload,
+                        "event_ids": remaining,
+                        "result": result,
+                    }
+                    job.status = JobStatus.pending
+                    job.started_at = None
+                else:
+                    job.status = JobStatus.done
+                    job.finished_at = datetime.now(timezone.utc)
+                    job.payload = {**job.payload, "result": result}
             done += 1
             metrics.increment("consolidator.job.done")
         except Exception as exc:  # provider or DB failure: job stays replayable

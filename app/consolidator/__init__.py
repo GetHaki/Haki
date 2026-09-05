@@ -148,6 +148,14 @@ logger = logging.getLogger(__name__)
 # 0.35. 0.28 sits in that gap with margin on both sides.
 SEMANTIC_MATCH_MAX_DISTANCE = 0.28
 
+# B9: matches weaker than this still resolve one-shot, but are never
+# persisted as aliases. 0.23 is the top of the measured same-concept
+# cluster (0.09-0.23) from the calibration above -- a weak match at the
+# edge of the gap is exactly where a one-time embedding false positive
+# lives, and fossilizing it would hijack every future candidate under
+# that predicate deterministically.
+ALIAS_LEARN_MAX_DISTANCE = 0.23
+
 # A conflict is a disagreement between two competing values of ONE fact.
 # Nothing in the product's model needs a three-way one, and the eval run
 # that motivated the identity fix above found 3+ member sets in ~24% of
@@ -481,11 +489,21 @@ async def _resolve_existing_fact(
     if row is None or row.distance > SEMANTIC_MATCH_MAX_DISTANCE:
         return None
     matched = row[0]
-    if matched.predicate != predicate:
+    if matched.predicate != predicate and row.distance <= ALIAS_LEARN_MAX_DISTANCE:
         # Learn it: the NEXT event for this subject using this exact
         # synonym pair resolves deterministically at step 2 instead of
         # depending on embedding luck again. First discovery wins — never
         # overwritten by a later, possibly noisier, semantic match.
+        #
+        # B9: only STRONG matches fossilize. A weak match (0.23-0.28, at the
+        # edge of the calibrated gap) still resolves one-shot for THIS
+        # candidate, but is not persisted: a one-time embedding false
+        # positive must never become a permanent deterministic hijack of
+        # every future candidate under that predicate. The 0.23 edge is the
+        # top of the measured same-concept cluster (0.09-0.23, see the
+        # threshold calibration above), not a new guess. Fail-safe
+        # direction: fewer persisted aliases just means more one-shot
+        # resolutions, never a wrong fact.
         await session.execute(
             pg_insert(PredicateAlias)
             .values(
@@ -538,27 +556,48 @@ async def _find_qualifier_ambiguous_active_fact(
     `_apply_candidate`, which opens a ConflictSet exactly as it already does
     for a same-qualifier contradiction -- held for human review, served as
     `contested`, never silently trusted either way.
+
+    B8: "exact predicate" includes a REGISTERED alias's canonical form. An
+    unconditional `employer {}` fact and a qualified `boss {team: X}`
+    candidate disagree the same way `employer {}` vs `employer {team: X}`
+    do -- once the synonym is known (alias table), hiding the disagreement
+    behind the predicate spelling is the same invisibility bug. Still no
+    semantic dice here: only predicates the subject already confirmed as
+    synonyms, never embedding neighbours.
     """
+    predicates = [predicate]
+    alias = (
+        await session.execute(
+            select(PredicateAlias.canonical_predicate).where(
+                PredicateAlias.project_id == project_id,
+                PredicateAlias.subject_id == subject_id,
+                PredicateAlias.alias_predicate == predicate,
+            )
+        )
+    ).scalar_one_or_none()
+    if alias is not None and alias != predicate:
+        predicates.append(alias)
     candidate_identity = _identity_qualifiers(qualifiers)
-    stmt = select(Fact).where(
-        Fact.project_id == project_id,
-        Fact.subject_id == subject_id,
-        Fact.predicate == predicate,
-        Fact.status == FactStatus.active,
-    )
-    for fact in (await session.execute(stmt)).scalars().all():
-        fact_identity = _identity_qualifiers(fact.qualifiers)
-        if bool(fact_identity) == bool(candidate_identity):
-            # Both empty (the exact-match path above already catches this)
-            # or both non-empty (the hard guard's actual, still-intact
-            # target) -- not this narrow case.
-            continue
-        if _canonical(fact.value) == _canonical(value):
-            # Same value: not a contradiction, e.g. a general statement
-            # later reaffirmed with more specific context. Leave it to the
-            # ordinary duplicate/reinforcement paths, unchanged by this fix.
-            continue
-        return fact
+    for one_predicate in predicates:
+        stmt = select(Fact).where(
+            Fact.project_id == project_id,
+            Fact.subject_id == subject_id,
+            Fact.predicate == one_predicate,
+            Fact.status == FactStatus.active,
+        )
+        for fact in (await session.execute(stmt)).scalars().all():
+            fact_identity = _identity_qualifiers(fact.qualifiers)
+            if bool(fact_identity) == bool(candidate_identity):
+                # Both empty (the exact-match path above already catches this)
+                # or both non-empty (the hard guard's actual, still-intact
+                # target) -- not this narrow case.
+                continue
+            if _canonical(fact.value) == _canonical(value):
+                # Same value: not a contradiction, e.g. a general statement
+                # later reaffirmed with more specific context. Leave it to the
+                # ordinary duplicate/reinforcement paths, unchanged by this fix.
+                continue
+            return fact
     return None
 
 

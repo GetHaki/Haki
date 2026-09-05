@@ -80,6 +80,7 @@ where the gate empties the packet returns empty_reason="no_relevant_memory"
 with status "ok": not a failure, an honest "nothing relevant enough".
 """
 
+import asyncio
 import json
 import re
 import time
@@ -541,6 +542,19 @@ def _packet_fact(
         "valid_from_relative": (
             _relative_to_now(row.valid_from, now) if row.valid_from and now else None
         ),
+        # End of the validity interval (Bench-2): when a supersession set
+        # this, the reader can see that a value STOPPED being true instead
+        # of guessing from two "valid from" dates. Additive -- readers that
+        # do not know this field keep using valid_from exactly as before.
+        "valid_to": (
+            row.valid_to.isoformat() if getattr(row, "valid_to", None) else None
+        ),
+        # Identity qualifiers (Bench-2): the condition this fact holds under
+        # (team, person, ...). The answer prompt groups facts "by what they
+        # are actually about" -- without these, two facts under one
+        # predicate read as one contradicting pair instead of two scoped
+        # truths. Additive, same contract as valid_to above.
+        "qualifiers": dict(getattr(row, "qualifiers", None) or {}),
         # When this fact's source text used a relative time expression
         # ("last week"), the ISO range the extractor resolved it to,
         # anchored on the source event's occurred_at -- distinct from
@@ -694,7 +708,21 @@ async def build_context(
     # self-hosted custom provider) keeps working -- for those, symmetric is
     # both the previous behaviour and the safe assumption.
     embed_query = getattr(embedder, "embed_query", embedder.embed)
-    query_embedding = (await embed_query([query]))[0]
+    # Perf-1: the embedding runs in a worker thread (local.py) or over the
+    # network (remote providers) and never touches `session`, so it overlaps
+    # with the tsquery lexeme SELECT below instead of preceding it. The
+    # facts/episodes/conflict SELECTs further down stay sequential on
+    # purpose: an AsyncSession is a single connection and does not support
+    # concurrent queries, and opening parallel sessions would lose the
+    # request's RLS context (get_session sets haki.project_id per session).
+    # True branch parallelism needs RLS propagation first -- tracked, not
+    # attempted here.
+    query_embedding, ts_query_pair = await asyncio.gather(
+        embed_query([query]),
+        build_query_tsquery(session, query),
+    )
+    query_embedding = query_embedding[0]
+    ts_query, _ts_query_text = ts_query_pair
     stage_timings["embed"] = round((time.perf_counter() - embed_start) * 1000)
 
     # A bound literal (not just a Python datetime) so it can take part in
@@ -715,8 +743,8 @@ async def build_context(
     # The debug text (the assembled tsquery, e.g. "'carolin' | 'go'") is
     # not wired into the context trace yet -- a real but separate piece of
     # work (a new ContextTrace column + migration). Discarded here rather
-    # than left unused.
-    ts_query, _ts_query_text = await build_query_tsquery(session, query)
+    # than left unused (the tsquery itself was built above, overlapping
+    # the embedding).
     fulltext = func.coalesce(func.ts_rank_cd(Fact.search_vector, ts_query), 0.0)
     # `greatest(..., 0)` (20 aout, bug): without it, a fact whose
     # valid_from is AFTER the point of view (`as_of`, always set by the
@@ -845,6 +873,7 @@ async def build_context(
             Fact.value,
             Fact.confidence,
             Fact.valid_from,
+            Fact.valid_to,
             Fact.source_event_ids,
             Fact.recorded_from,
             Fact.last_reinforced_at,
@@ -901,7 +930,9 @@ async def build_context(
     # the losing side of a genuine disagreement stays `candidate` (never
     # scored by the phase-2 query above, which filters status == active)
     # and needs to be hydrated directly so it can be packed alongside its
-    # active sibling.
+    # active sibling. Forgotten members (`disabled`/`deleted`) are hydrated
+    # too but never packed (B2: filtered at pack time with a traced
+    # `forgotten` decision, so the trace stays auditable).
     contested_rows_by_id: dict[uuid.UUID, Fact] = {}
     if contested_conflict_by_fact:
         contested_members = (
@@ -1294,6 +1325,18 @@ async def build_context(
                     sibling = contested_rows_by_id.get(sibling_id)
                     if sibling is None:
                         continue
+                    if sibling.status in (FactStatus.disabled, FactStatus.deleted):
+                        # B2: a forgotten member of an open conflict set is
+                        # never served again, not even as a contested sibling.
+                        # Traced so the inspect view stays auditable.
+                        decisions.append(
+                            {
+                                "fact_id": str(sibling_id),
+                                "action": "blocked",
+                                "reason_code": "forgotten",
+                            }
+                        )
+                        continue
                     sibling_freshness = _fact_freshness(sibling, now_dt)
                     sibling_item = _packet_fact(
                         sibling,
@@ -1474,6 +1517,9 @@ async def build_context(
     }
 
     trace = ContextTrace(
+        id=uuid.uuid4(),  # explicit: the column default only materializes on
+        # flush, and Perf-2 skips the flush -- without this, trace.id below
+        # would be None. Same semantics as the default, just earlier.
         project_id=project_id,
         subject_id=subject_id,
         query=query,
@@ -1485,8 +1531,15 @@ async def build_context(
         stage_timings=stage_timings,
         fact_count=len(packet_facts),
     )
+    # Perf-2: no `flush()` here. `trace.id` is a client-side uuid4 (see
+    # app/models/trace.py), so it is known before any roundtrip, and both
+    # callers commit right after this returns (routes/context.py,
+    # routes/gateway.py) -- the flush was a redundant roundtrip carrying
+    # the ~27 KB packet+decisions JSONB for nothing. A full write-behind
+    # (respond first, persist after) is deliberately NOT done: the trace is
+    # the proof the product sells, and a background write trades silent
+    # trace loss plus inspect-races for milliseconds. Durability first.
     session.add(trace)
-    await session.flush()
     return packet, token_count, trace.id
 
 

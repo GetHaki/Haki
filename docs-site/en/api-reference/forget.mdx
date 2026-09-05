@@ -26,6 +26,9 @@ See [Forget](/en/concepts/forget) for the full mechanics.
 <ResponseField name="conflict_sets_deleted" type="integer" default="0" />
 <ResponseField name="events_deleted" type="integer" default="0" />
 <ResponseField name="traces_deleted" type="integer" default="0" />
+<ResponseField name="feedback_deleted" type="integer" default="0" />
+<ResponseField name="predicate_aliases_deleted" type="integer" default="0" />
+<ResponseField name="subject_aliases_deleted" type="integer" default="0" />
 
 <RequestExample>
 
@@ -58,7 +61,10 @@ await client.forget({ projectId: "prj_support", subjectId: "usr_42", mode: "dele
   "facts_deleted": 12,
   "conflict_sets_deleted": 1,
   "events_deleted": 34,
-  "traces_deleted": 5
+  "traces_deleted": 5,
+  "feedback_deleted": 2,
+  "predicate_aliases_deleted": 1,
+  "subject_aliases_deleted": 0
 }
 ```
 

@@ -32,3 +32,6 @@ class ForgetResponse(BaseModel):
     conflict_sets_deleted: int = 0
     events_deleted: int = 0
     traces_deleted: int = 0
+    feedback_deleted: int = 0
+    predicate_aliases_deleted: int = 0
+    subject_aliases_deleted: int = 0

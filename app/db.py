@@ -119,7 +119,7 @@ _GENERATED_FTS_CONFIG_SQL = """
     JOIN pg_class c ON c.oid = d.adrelid
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = current_schema()
-      AND c.relname IN ('facts', 'events')
+      AND c.relname IN ('facts', 'events', 'episode_chunks')
       AND a.attname = 'search_vector'
 """
 _TSVECTOR_CONFIG_RE = re.compile(r"to_tsvector\(\s*'([a-z_]+)'::regconfig")

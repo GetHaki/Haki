@@ -189,6 +189,9 @@ export interface ForgetResponse {
   conflict_sets_deleted: number;
   events_deleted: number;
   traces_deleted: number;
+  feedback_deleted: number;
+  predicate_aliases_deleted: number;
+  subject_aliases_deleted: number;
 }
 
 export type FeedbackRating = "useful" | "irrelevant" | "incorrect";

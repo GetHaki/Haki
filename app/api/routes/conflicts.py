@@ -110,7 +110,24 @@ async def resolve_conflict(
     for fact_id in conflict.fact_ids:
         if fact_id == request.keep_fact_id:
             fact = await ledger.get_fact(session, fact_id)
-            if fact.status is not FactStatus.active:
+            if fact.status is FactStatus.superseded:
+                # Reactivate via conflict resolution (B4): the human chose the
+                # formerly-superseded fact as the keeper. This is the legitimate
+                # use of resolve on a superseded fact map (core.py:235).
+                fact = await ledger.transition_fact_status(
+                    session, fact_id, FactStatus.active
+                )
+            elif fact.status is FactStatus.disabled:
+                # A human deliberately disabled this fact — resolving the
+                # conflict must not silently re-enable it. Request a different
+                # keeper or re-enable it first.
+                raise ApiError(
+                    type="conflict_keep_disabled",
+                    message=f"Fact {request.keep_fact_id} is disabled and cannot be resurrected by conflict resolution. Re-enable it first, or choose another fact.",
+                    field="keep_fact_id",
+                    status_code=409,
+                )
+            elif fact.status is not FactStatus.active:
                 # candidate/disputed -> active (Ledger lifecycle).
                 fact = await ledger.transition_fact_status(
                     session, fact_id, FactStatus.active
@@ -119,6 +136,11 @@ async def resolve_conflict(
         fact = await ledger.get_fact(session, fact_id)
         if fact.status is FactStatus.superseded:
             superseded.append(fact_id)
+            continue
+        if fact.status is FactStatus.disabled:
+            # A disabled loser stays disabled — it was already out of service,
+            # and forcing disabled -> superseded would be a loud reclassification
+            # that changes the human's intent. It is not counted as superseded.
             continue
         fact = await ledger.transition_fact_status(
             session, fact_id, FactStatus.superseded

@@ -9,7 +9,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -116,19 +116,48 @@ async def write_events(
     }
 
     # Re-select so every caller gets the full rows, inserted or pre-existing.
+    # B13: scope the re-select by (project_id, idempotency_key), not by key
+    # alone. Explicit idempotency keys are caller-chosen and can repeat
+    # across projects (the unique constraint is per-project, so the INSERT
+    # itself never collides) -- without the project filter, a second project
+    # reusing a key would receive the OTHER project's event row, leaking
+    # its id into this project's consolidation, billing and response.
     keys = [row["idempotency_key"] for row in rows]
-    existing = (
-        (
-            await session.execute(
-                select(Event).where(Event.idempotency_key.in_(keys))
+    project_ids = {row["project_id"] for row in rows}
+    if len(project_ids) == 1:
+        (only_project,) = project_ids
+        existing = (
+            (
+                await session.execute(
+                    select(Event).where(
+                        Event.project_id == only_project,
+                        Event.idempotency_key.in_(keys),
+                    )
+                )
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    )
-    by_key = {event.idempotency_key: event for event in existing}
+    else:
+        existing = (
+            (
+                await session.execute(
+                    select(Event).where(
+                        tuple_(
+                            Event.project_id, Event.idempotency_key
+                        ).in_([(row["project_id"], row["idempotency_key"]) for row in rows])
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    by_key = {(event.project_id, event.idempotency_key): event for event in existing}
 
-    return [(by_key[row["idempotency_key"]], row["idempotency_key"] not in inserted) for row in rows]
+    return [
+        (by_key[(row["project_id"], row["idempotency_key"])], row["idempotency_key"] not in inserted)
+        for row in rows
+    ]
 
 
 async def list_timeline(
@@ -232,14 +261,23 @@ ALLOWED_TRANSITIONS: dict[FactStatus, set[FactStatus]] = {
         FactStatus.disabled,
         FactStatus.deleted,
     },
-    FactStatus.superseded: {FactStatus.disputed, FactStatus.deleted},
+    FactStatus.superseded: {
+        FactStatus.disputed,
+        FactStatus.deleted,
+        FactStatus.disabled,  # forget disable on a superseded fact (B3)
+        FactStatus.active,  # reactivate via conflict resolution (B4 keep=superseded)
+    },
     FactStatus.disputed: {
         FactStatus.active,
         FactStatus.superseded,
         FactStatus.disabled,
         FactStatus.deleted,
     },
-    FactStatus.disabled: {FactStatus.active, FactStatus.deleted},
+    FactStatus.disabled: {
+        FactStatus.active,  # human re-enable
+        FactStatus.deleted,
+        FactStatus.disabled,  # idempotent: disable an already-disabled fact (B3)
+    },
     FactStatus.deleted: set(),  # terminal: deleted -> * is forbidden
 }
 

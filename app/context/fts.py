@@ -88,13 +88,17 @@ from app.config import settings
 # round trip through `::tsquery` intact.
 _TSQUERY_ESCAPES = str.maketrans({"'": "''", "\\": "\\\\"})
 
-# (table, source column, index name) -- the two GENERATED tsvector columns
+# (table, source column, index name) -- every GENERATED tsvector column
 # whose configuration must always match `text_search_config()` below. Used
 # by `rebuild_statements` (migrations and `scripts/set_fts_config.py` share
-# this instead of each hand-writing the DDL).
+# this instead of each hand-writing the DDL). episode_chunks was missing
+# here until Perf-3: after a config change its column silently kept the old
+# configuration and the episode lexical axis went dark -- the exact failure
+# mode verify_fts_config exists to prevent.
 FTS_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("facts", "search_text", "ix_facts_search_vector"),
     ("events", "index_text", "ix_events_search_vector"),
+    ("episode_chunks", "index_text", "ix_episode_chunks_search_vector"),
 )
 
 
@@ -145,7 +149,7 @@ async def build_query_tsquery(
 
 
 def rebuild_statements(config: str) -> list[str]:
-    """The DDL that rebuilds both GENERATED tsvector columns under `config`.
+    """The DDL that rebuilds every GENERATED tsvector column under `config`.
 
     Returned as data rather than executed, so that a migration and
     `scripts/set_fts_config.py` run the exact same statements over two

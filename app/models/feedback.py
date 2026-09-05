@@ -20,7 +20,9 @@ class Feedback(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     project_id: Mapped[str] = mapped_column(String(128))
     trace_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
-    fact_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("facts.id"))
+    fact_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("facts.id", ondelete="SET NULL")
+    )
     rating: Mapped[str] = mapped_column(String(16))  # useful|irrelevant|incorrect
     comment: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(

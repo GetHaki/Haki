@@ -441,12 +441,35 @@ def truncate_sessions(
 
 def render_facts(facts: list[dict]) -> str:
     """Render a Haki ContextPacket's facts as the memory block of the answer
-    prompt."""
+    prompt.
+
+    Bench-2: beyond predicate + value + valid_from, the reader now sees the
+    identity qualifiers (the condition the fact holds under -- team, person,
+    ...), the end of the validity interval when one was set by a
+    supersession, and whether the fact is one half of an open conflict. The
+    answer prompt already instructs grouping "by what facts are actually
+    about" and resolving by dates -- these fields are what that instruction
+    was missing to act on. Absent fields render exactly as before, so old
+    packets (and unity tests on this format) keep working unchanged.
+    """
     lines: list[str] = []
     for fact in facts:
         value = json.dumps(fact.get("value", {}), ensure_ascii=False, sort_keys=True)
         valid_from = fact.get("valid_from") or "?"
-        lines.append(f"- {fact.get('predicate', '?')}: {value} (valid from {valid_from})")
+        extras: list[str] = []
+        qualifiers = fact.get("qualifiers") or {}
+        if qualifiers:
+            scope = json.dumps(qualifiers, ensure_ascii=False, sort_keys=True)
+            extras.append(f"holds when {scope}")
+        valid_to = fact.get("valid_to")
+        if valid_to:
+            extras.append(f"valid until {valid_to}")
+        if fact.get("contested"):
+            extras.append("contested -- a conflicting value exists, do not trust either side alone")
+        suffix = f" ({'; '.join(extras)})" if extras else ""
+        lines.append(
+            f"- {fact.get('predicate', '?')}: {value} (valid from {valid_from}){suffix}"
+        )
     return "\n".join(lines) if lines else "(no facts in memory)"
 
 

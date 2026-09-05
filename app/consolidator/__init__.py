@@ -654,6 +654,7 @@ async def _echo_reject_reason(
     project_id: str,
     subject_id: str,
     embedding: list[float],
+    candidate_value: dict | None = None,
 ) -> str | None:
     """Post-validation half of the anti-echo write gate (M1): a candidate
     whose embedding closely matches a fact already SERVED to this subject in
@@ -664,6 +665,16 @@ async def _echo_reject_reason(
     candidate, after extraction, using the embedding already computed for
     the write path, no extra LLM call. Returns "echo_of_context" when a
     served fact is found within ANTI_ECHO_MAX_DISTANCE, else None.
+
+    B14: a candidate carrying a NOVEL canonical value skips the gate
+    outright. An echo repeats the same information (same value); a genuine
+    update or contradiction asserts a different one -- and the two
+    populations are not separable by distance (rephrased-same-value pairs
+    land at 0.002-0.187, genuine value updates at 0.030-0.158, fully
+    overlapping). Before this, every `create` update to a recently-served
+    fact was destroyed here, the conflict never opened, and the old value
+    stayed served alone. (`supersede` already skipped the gate for the same
+    reason -- an echo is never a replacement.)
     """
     served_ids = await _recently_served_fact_ids(
         session, project_id=project_id, subject_id=subject_id
@@ -677,9 +688,25 @@ async def _echo_reject_reason(
         .limit(1)
     )
     row = (await session.execute(stmt)).first()
-    if row is not None and row.distance <= ANTI_ECHO_MAX_DISTANCE:
+    if row is None:
+        return None
+    if candidate_value is not None:
+        served_values = await _served_canonical_values(session, served_ids)
+        if _canonical(candidate_value) not in served_values:
+            return None
+    if row.distance <= ANTI_ECHO_MAX_DISTANCE:
         return "echo_of_context"
     return None
+
+
+async def _served_canonical_values(
+    session: AsyncSession, served_ids: set[uuid.UUID]
+) -> set[str]:
+    """Canonical values of recently-served facts (B14 echo pre-filter)."""
+    rows = (
+        await session.execute(select(Fact.value).where(Fact.id.in_(served_ids)))
+    ).all()
+    return {_canonical((value or {})) for (value,) in rows}
 
 
 async def _open_conflict_set(
@@ -1617,6 +1644,7 @@ async def _process_job(
                     project_id=event.project_id,
                     subject_id=event.subject_id,
                     embedding=embedding,
+                    candidate_value=candidate.value,
                 )
                 if candidate.action != "supersede"
                 else None

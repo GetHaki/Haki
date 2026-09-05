@@ -73,7 +73,14 @@ def build_prompt_context(packet: dict[str, Any]) -> str:
             "facts yourself; do not second-guess a fact's value. EXCEPTION: a fact "
             "marked CONTESTED below is an unresolved disagreement — for those, and "
             "only those, compare 'valid from' dates yourself and treat the most "
-            "recent one as current.",
+            "recent one as current. Relevance check first: these items were picked "
+            "by similarity, so they can look topical while answering a different "
+            "question. Before using any of them, check that at least one is even "
+            "about what is asked — the same attribute, event, or decision. "
+            "Competing candidates are fine (that is what the rest of these "
+            "instructions resolve); inventing from nothing is not. If nothing "
+            "below is even about it, say the memory does not contain it instead "
+            "of promoting the closest-looking item to an answer.",
         )
     # A minimal terse rule under-performs a spelled-out chain of steps for
     # this exact task (Bug 3, 13 aout: gpt-4o-mini went 2/3 with a one-line

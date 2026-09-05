@@ -224,6 +224,7 @@ async def test_the_sdk_instructions_are_the_ones_the_budget_charged():
     for sentence in (
         "You MUST apply them",
         "Cite an item by the reference in square brackets",
+        "Relevance check first",
         "raw excerpts kept for citation and narrative detail",
     ):
         assert sentence in joined, sentence

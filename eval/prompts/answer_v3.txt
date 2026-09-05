@@ -6,6 +6,8 @@ Question date: {question_date}
 
 Question: {question}
 
+0. Relevance check FIRST, before grouping or resolving anything: check that at least one fact or event above is even ABOUT the question's attribute/event/decision (same topic area counts — competing candidates are resolved in steps 1-5 below, not here; inventing from nothing is the failure to avoid). Similarity-ranked memory can look topical while answering a different question. If nothing above is even about it, reply exactly: "I don't have enough information to answer." — do not promote the closest-looking item to an answer.
+
 Before answering, resolve outdated values:
 1. Group the facts above by what they are actually about (the same real-world attribute can appear under different wordings or predicate names — e.g. "personal_best_5k" and "goal_personal_best_time" can both be the user's 5K personal best).
 2. Check whether the question contains an EXPLICIT contrast or reference-point marker naming a past state: "before I changed/updated it", "previously", "used to", "originally", "when I first started", "in the first [period]". Ordinary past-tense phrasing alone ("what WAS the amount...", "what WAS my score...", "how many did I have...") is NOT this signal — most questions about a single, final, settled fact are naturally phrased in the past tense too (the whole conversation already happened), and still want the CURRENT (most recent) value. Only step 4 below applies when one of the explicit markers is present; when in doubt, treat it as a CURRENT-value question (step 3).

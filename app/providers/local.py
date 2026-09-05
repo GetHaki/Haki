@@ -31,6 +31,8 @@ Design notes:
 """
 
 import asyncio
+import hashlib
+import json
 import warnings
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -38,6 +40,17 @@ from dataclasses import dataclass
 from app.config import settings
 
 _CACHE_MAX_ENTRIES = 1024
+
+# Shared embedding cache (Redis): the per-process LRU above answers repeats
+# inside ONE worker in ~0 ms, but every worker pays its own 96 ms miss for
+# the same repeated queries ("resume this thread", system prompts...). A
+# Redis entry costs ~1 ms and is shared by all workers. Key carries the
+# model name, so a model swap can never poison it; values are immutable
+# for a pinned model, hence the long TTL. Redis is best-effort here: any
+# error (down, slow, evicted) falls back to local compute -- a cache must
+# never fail a request.
+_EMB_CACHE_PREFIX = "haki:emb:v1"
+_EMB_CACHE_TTL_SECONDS = 7 * 24 * 3600
 
 
 @dataclass(frozen=True)
@@ -122,7 +135,7 @@ class EmbeddingModel:
 # THE ENGLISH-ONLY MODELS ARE A TRAP for this product: they buy about a
 # point of English and give back a THIRD of the French.
 #
-# Changing the default is a MIGRATION, never a setting flip: see 0029, and
+# Changing the default is a MIGRATION, never a setting flip: see 0032, and
 # scripts/backfill_embeddings.py for the re-embedding pass it requires.
 MODELS: dict[str, EmbeddingModel] = {
     "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2": EmbeddingModel(
@@ -130,13 +143,13 @@ MODELS: dict[str, EmbeddingModel] = {
         query_prefix="",
         doc_prefix="",
         note="multilingual, symmetric paraphrase objective, 128-token window "
-        "-- the default until migration 0029, kept for a rollback",
+        "-- the default until migration 0032, kept for a rollback",
     ),
     "intfloat/multilingual-e5-large": EmbeddingModel(
         dim=1024,
         query_prefix="query: ",
         doc_prefix="passage: ",
-        note="DEFAULT since 0029: multilingual, retrieval-trained, "
+        note="DEFAULT since 0032: multilingual, retrieval-trained, "
         "512-token window, 2.24 GB on disk / ~1.5 GB resident, 96 ms/query",
     ),
     "snowflake/snowflake-arctic-embed-s": EmbeddingModel(
@@ -230,13 +243,70 @@ class LocalEmbedder:
             elif text not in results and text not in missing:
                 missing.append(text)
         if missing:
-            computed = await asyncio.to_thread(self._embed_missing, missing)
-            for text, vector in computed.items():
+            # Shared cache second: another worker may have embedded these
+            # already. Best-effort -- _shared_lookup never raises.
+            still_missing = await self._shared_lookup(missing, results)
+            if still_missing:
+                computed = await asyncio.to_thread(self._embed_missing, still_missing)
+                await self._shared_store(computed)
+                for text, vector in computed.items():
+                    self._cache[text] = vector
+                    while len(self._cache) > _CACHE_MAX_ENTRIES:
+                        self._cache.popitem(last=False)
+                    results[text] = vector
+        return [results[text] for text in texts]
+
+    def _shared_key(self, text: str) -> str:
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        return f"{_EMB_CACHE_PREFIX}:{self._name}:{digest}"
+
+    async def _shared_lookup(
+        self, missing: list[str], results: dict[str, list[float]]
+    ) -> list[str]:
+        """Fill `results` from Redis; return texts still missing. Never raises."""
+        try:
+            from app.redis_client import redis_client
+
+            keys = [self._shared_key(text) for text in missing]
+            raw = await redis_client.mget(keys)
+            still_missing: list[str] = []
+            for text, payload in zip(missing, raw or []):
+                if payload is None:
+                    still_missing.append(text)
+                    continue
+                try:
+                    vector = [float(x) for x in json.loads(payload)]
+                except (ValueError, TypeError):
+                    still_missing.append(text)
+                    continue
+                if len(vector) != self._spec.dim:
+                    # Model swapped without a key change (should not happen --
+                    # the model is in the key) or corrupt entry: recompute.
+                    still_missing.append(text)
+                    continue
                 self._cache[text] = vector
                 while len(self._cache) > _CACHE_MAX_ENTRIES:
                     self._cache.popitem(last=False)
                 results[text] = vector
-        return [results[text] for text in texts]
+            return still_missing
+        except Exception:
+            return list(missing)
+
+    async def _shared_store(self, computed: dict[str, list[float]]) -> None:
+        """Write-through to Redis. Never raises."""
+        try:
+            from app.redis_client import redis_client
+
+            async with redis_client.pipeline(transaction=False) as pipe:
+                for text, vector in computed.items():
+                    pipe.setex(
+                        self._shared_key(text),
+                        _EMB_CACHE_TTL_SECONDS,
+                        json.dumps(vector),
+                    )
+                await pipe.execute()
+        except Exception:
+            pass
 
 
 # Reranker (mechanism F-R, Sprint 2, 15 aout): a cross-encoder -- query and

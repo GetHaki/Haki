@@ -70,11 +70,11 @@ logger = logging.getLogger("haki.mcp")
 mcp = MCPServer(
     "haki",
     instructions=(
-        "Memoire long-terme du projet. Appeler haki_context avant de planifier "
-        "ou modifier du code, haki_capture en fin de tache pour les decisions, "
-        "conventions et erreurs resolues. Ne memoriser que du durable, jamais "
-        "de secrets. Appeler haki_correct quand l'utilisateur signale qu'un "
-        "fait rappele par haki_context est errone."
+        "Project long-term memory. Call haki_context before planning "
+        "or editing code, haki_capture at the end of a task for decisions, "
+        "conventions and resolved errors. Only memorize durable content, "
+        "never secrets. Call haki_correct when the user reports that a "
+        "fact recalled by haki_context is wrong."
     ),
 )
 
@@ -177,17 +177,17 @@ async def haki_context(
     budget_tokens: int = 3000,
     exclude_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Recalls project memory (decisions, conventions, preferences) relevant
-    to a task. Call this BEFORE planning or editing code. Returns a block
-    ready to inject, with dates and sources, the trace_id (inspectable via
-    haki_inspect), and an explicit `status` ("ok"/"degraded"/"failed") —
+    """Recall the project's memory (decisions, conventions, preferences)
+    relevant to a task. Call BEFORE planning or editing code. Returns a
+    ready-to-inject block with dates and sources, the trace_id (inspectable
+    via haki_inspect), and an explicit `status` ("ok"/"degraded"/"failed") —
     never treat a degraded or failed response as "no known facts".
 
-    If the block does not contain what you needed, call this again with the
-    SAME query and `exclude_ids` set to the ids you already received — it
+    If the block does not hold what was needed, call this tool again with
+    the SAME query and `exclude_ids` set to the ids already received — it
     serves the next page of the same ranked list. Do NOT rewrite the query
-    with what you just read: measured on this project's own benchmark, that
-    finds the missing turn less often than asking again unchanged."""
+    with what was just read: measured on this project's bench, that finds
+    the missing turn less often than asking unchanged."""
     scope = await _resolve_scope(ctx)
     try:
         async with async_session() as session:
@@ -233,9 +233,9 @@ async def haki_context(
 
 @mcp.tool()
 async def haki_capture(ctx: Context, content: str, kind: str = "agent.observation") -> dict[str, Any]:
-    """Stores a durable project fact: technical decision, convention,
-    resolved bug. Call this at the END of a task. Never store secrets,
-    tokens, or ephemeral data. Consolidation is synchronous in dev
+    """Memorize a durable project fact: technical decision, convention,
+    resolved error. Call at the END of a task. Never memorize secrets,
+    tokens or ephemeral data. Consolidation is synchronous in dev
     (HAKI_MCP_AUTOCONSOLIDATE), so the fact is recallable immediately."""
     scope = await _resolve_scope(ctx)
     subject_id = scope.subject_id
@@ -287,9 +287,9 @@ async def haki_capture(ctx: Context, content: str, kind: str = "agent.observatio
 
 @mcp.tool()
 async def haki_inspect(ctx: Context, trace_id: str) -> dict[str, Any]:
-    """Inspects the trace of a haki_context call: which facts were
-    included, excluded, or blocked, and why (reason_code). Provenance
-    proof of the memory served."""
+    """Inspect the trace of a haki_context call: which facts were included,
+    excluded or blocked, and why (reason_code). Provenance proof of the
+    served memory."""
     scope = await _resolve_scope(ctx)
     async with async_session() as session:
         trace = await get_trace(
@@ -313,10 +313,10 @@ async def haki_inspect(ctx: Context, trace_id: str) -> dict[str, Any]:
 
 @mcp.tool()
 async def haki_forget(ctx: Context, mode: str = "disable") -> dict[str, Any]:
-    """Forgets the memory of the subject configured for this server, in
-    this project. mode='disable' (reversible, facts move to disabled) or
-    'delete' (real erasure: facts, embeddings, events, traces). Returns
-    the erasure receipt (forget_id) and counters of what was done."""
+    """Forget the configured subject's memory in this project.
+    mode='disable' (reversible, facts move to disabled) or 'delete' (real
+    erasure: facts, embeddings, events, traces). Returns the erasure receipt
+    (forget_id) and the counters of what was done."""
     scope = await _resolve_scope(ctx)
     async with async_session() as session:
         receipt, counters = await ledger.forget(
@@ -344,16 +344,15 @@ async def haki_correct(
     trace_id: str | None = None,
     comment: str | None = None,
 ) -> dict[str, Any]:
-    """Corrects memory from the conversation (M10). rating='incorrect'
+    """Correct the memory from inside the conversation (M10). rating='incorrect'
     with a fact_id moves that fact to 'disputed': haki_context will never
-    recall it again. rating='useful'/'irrelevant' logs an opinion on a
-    recall without changing the fact. Exactly one target required: fact_id
-    (a specific fact, usually seen via haki_context/haki_inspect) OR
-    trace_id (an entire haki_context call). Same mechanism as
-    POST /v1/feedback (app.ledger.submit_feedback): identical effect
-    regardless of the call path. Scope resolved by API key (see
-    _resolve_scope) or, self-hosted without a key, by
-    HAKI_MCP_PROJECT_ID."""
+    recall it again. rating='useful'/'irrelevant' logs feedback on a recall
+    without changing the fact. Exactly one target required: fact_id (one
+    precise fact, usually seen via haki_context/haki_inspect) OR trace_id
+    (one whole haki_context call). Same mechanism as POST /v1/feedback
+    (app.ledger.submit_feedback): identical effect whatever the call path.
+    Scope resolved by API key (see _resolve_scope) or, self-hosted without
+    a key, by HAKI_MCP_PROJECT_ID."""
     scope = await _resolve_scope(ctx)
     async with async_session() as session:
         row, fact_status = await ledger.submit_feedback(

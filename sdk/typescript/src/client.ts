@@ -248,6 +248,32 @@ export interface HealthResponse {
 
 // -- Client --------------------------------------------------------------------
 
+// Statuses worth a second attempt: rate limiting and transient upstream
+// failures — same contract as the Python SDK (sdk/python/src/haki/client.py).
+// Anything else (400/401/403/404/409/422, ...) is definitive.
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+
+// Extra attempts after the first one: 3 retries = 4 tries total, backoff
+// 0.5 s / 1 s / 2 s plus jitter so a fleet of agents does not retry in
+// lockstep.
+const MAX_RETRIES = 3;
+const BACKOFF_BASE_MS = 500;
+
+function retryDelayMs(attempt: number, retryAfter: string | null): number {
+  if (retryAfter !== null) {
+    const asked = Number(retryAfter);
+    // The server tells us how long to wait — believe it, within reason.
+    if (Number.isFinite(asked) && asked >= 0 && asked <= 60) {
+      return asked * 1000;
+    }
+  }
+  return BACKOFF_BASE_MS * 2 ** (attempt - 1) + Math.random() * 250;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export interface HakiClientOptions {
   /** Base URL of the Haki API, e.g. "http://localhost:8100". */
   baseUrl: string;
@@ -272,6 +298,7 @@ export class HakiClient {
     method: string,
     path: string,
     options: { params?: Record<string, string>; body?: unknown } = {},
+    retry = true,
   ): Promise<any> {
     const url = new URL(this.baseUrl + path);
     for (const [name, value] of Object.entries(options.params ?? {})) {
@@ -281,44 +308,71 @@ export class HakiClient {
     if (this.apiKey) headers["Authorization"] = `Bearer ${this.apiKey}`;
     if (options.body !== undefined) headers["Content-Type"] = "application/json";
 
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        method,
-        headers,
-        body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-        signal: AbortSignal.timeout(this.timeout),
-      });
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      throw new HakiConnectionError(
-        `cannot reach Haki at ${this.baseUrl}: ${detail}`,
-      );
-    }
-
-    if (!response.ok) {
-      let errorType: string | undefined;
-      let message: string | undefined;
-      let field: string | undefined;
-      let payload: Record<string, unknown> = {};
+    // Retries 429/500/502/503/504 and network errors with exponential
+    // backoff (+ Retry-After on 429). Pass `retry=false` for calls that
+    // must run exactly once — today only `createKey`, where a retry after
+    // an ambiguous timeout would mint a second key and orphan the first.
+    let lastResponse: Response | undefined;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      let response: Response;
       try {
-        payload = (await response.json()) as Record<string, unknown>;
-        const error = (payload.error ?? {}) as Record<string, unknown>;
-        errorType = error.type as string | undefined;
-        message = error.message as string | undefined;
-        field = error.field as string | undefined;
-      } catch {
-        // Non-JSON error body: fall back to the HTTP status only.
+        response = await fetch(url, {
+          method,
+          headers,
+          body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+          signal: AbortSignal.timeout(this.timeout),
+        });
+      } catch (err) {
+        if (!retry || attempt >= MAX_RETRIES) {
+          const detail = err instanceof Error ? err.message : String(err);
+          throw new HakiConnectionError(
+            `cannot reach Haki at ${this.baseUrl}: ${detail}`,
+          );
+        }
+        await sleep(retryDelayMs(attempt + 1, null));
+        continue;
       }
-      const text = message ?? `HTTP ${response.status}`;
-      throw new HakiApiError(text, {
-        statusCode: response.status,
-        errorType,
-        field,
-        payload,
-      });
+      if (response.ok || !RETRYABLE_STATUS.has(response.status)) {
+        await HakiClient.throwForStatus(response);
+        return response.json();
+      }
+      lastResponse = response;
+      if (!retry || attempt >= MAX_RETRIES) {
+        break;
+      }
+      await sleep(retryDelayMs(attempt + 1, response.headers.get("retry-after")));
     }
-    return response.json();
+    // Exhausted on a retryable status: raise the TYPED error from the last
+    // body, same as a first-try failure — never a bare status.
+    await HakiClient.throwForStatus(lastResponse!);
+    return lastResponse!.json();
+  }
+
+  /** Raise HakiApiError for a non-2xx response, parsing the typed body. */
+  private static async throwForStatus(response: Response): Promise<void> {
+    if (response.ok) {
+      return;
+    }
+    let errorType: string | undefined;
+    let message: string | undefined;
+    let field: string | undefined;
+    let payload: Record<string, unknown> = {};
+    try {
+      payload = (await response.json()) as Record<string, unknown>;
+      const error = (payload.error ?? {}) as Record<string, unknown>;
+      errorType = error.type as string | undefined;
+      message = error.message as string | undefined;
+      field = error.field as string | undefined;
+    } catch {
+      // Non-JSON error body: fall back to the HTTP status only.
+    }
+    const text = message ?? `HTTP ${response.status}`;
+    throw new HakiApiError(text, {
+      statusCode: response.status,
+      errorType,
+      field,
+      payload,
+    });
   }
 
   // -- API (parity with the Python HakiClient) --------------------------------
@@ -467,13 +521,18 @@ export class HakiClient {
     orgId: string;
     label?: string;
   }): Promise<KeyCreatedResponse> {
-    return this.request("POST", "/v1/keys", {
-      body: {
-        org_id: options.orgId,
-        project_id: options.projectId,
-        label: options.label ?? null,
+    return this.request(
+      "POST",
+      "/v1/keys",
+      {
+        body: {
+          org_id: options.orgId,
+          project_id: options.projectId,
+          label: options.label ?? null,
+        },
       },
-    });
+      false, // never replay: a retry could mint an orphan key
+    );
   }
 
   /** Masked key listing (prefix only). */

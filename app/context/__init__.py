@@ -927,15 +927,25 @@ async def build_context(
         else:
             quarantined_ids.update(conflict.fact_ids)
 
-    # Every member of a contested set, fetched once regardless of status —
-    # the losing side of a genuine disagreement stays `candidate` (never
-    # scored by the phase-2 query above, which filters status == active)
-    # and needs to be hydrated directly so it can be packed alongside its
-    # active sibling. Forgotten members (`disabled`/`deleted`) are hydrated
-    # too but never packed (B2: filtered at pack time with a traced
-    # `forgotten` decision, so the trace stays auditable).
+    # Every member of a genuine 2-member disagreement is hydrated once, even
+    # the losing side (still `candidate`, never scored by the phase-2 query
+    # above) — so it can be packed alongside its active sibling. But only
+    # for a conflict TOUCHING this query's own `rows`: a conflict with no
+    # member in `rows` cannot produce a served contested fact here (the
+    # packing loop below only ever looks up siblings of a packed `rows`
+    # member), so hydrating its members is pure work. This keeps the
+    # hydrate proportional to served facts, not to open conflicts.
+    row_ids = {row.id for row in rows}
+    served_contested_fact_ids: set[uuid.UUID] = set()
+    _seen_conflicts: set[int] = set()
+    for fid, conflict in contested_conflict_by_fact.items():
+        if id(conflict) in _seen_conflicts:
+            continue
+        _seen_conflicts.add(id(conflict))
+        if any(member in row_ids for member in conflict.fact_ids):
+            served_contested_fact_ids.update(conflict.fact_ids)
     contested_rows_by_id: dict[uuid.UUID, Fact] = {}
-    if contested_conflict_by_fact:
+    if served_contested_fact_ids:
         # Same rule as the phase-2 query above: never decode the 1024-dim
         # embedding or the tsvector for rows the packet renders from light
         # columns only (_packet_fact + _fact_freshness touch neither).
@@ -945,7 +955,7 @@ async def build_context(
                     select(Fact)
                     .options(defer(Fact.embedding), defer(Fact.search_vector))
                     .where(
-                        Fact.id.in_(contested_conflict_by_fact.keys())
+                        Fact.id.in_(served_contested_fact_ids)
                     )
                 )
             )

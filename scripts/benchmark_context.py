@@ -5,6 +5,12 @@ Ledger (embeddings via the LOCAL fastembed provider), then runs 100
 `build_context` calls (direct call, no HTTP) and reports p50/p95/p99 with a
 breakdown: query embedding time vs SQL+ranking time.
 
+Bench-3 corrections: the wrapper now records `embed_query` (the QUERY side
+build_context actually calls since the e5 adoption), not just `embed` --
+before, the wrapper had no embed_query, build_context fell back to the
+passage-side `embed`, and the bench timed the wrong side of an asymmetric
+model. Budget is the production default (3000), not the old 900.
+
 Run: uv run python scripts/benchmark_context.py
 Requires: Postgres up (docker compose), migrations applied to the main
 `haki` database. Bench rows (org_id = org_bench) are wiped before and after.
@@ -68,7 +74,14 @@ _TOPICS = [
 
 
 class TimingEmbedder:
-    """Wraps an embedder and records per-call embedding latency (ms)."""
+    """Wraps an embedder and records per-call embedding latency (ms).
+
+    Both sides: build_context calls `embed_query` (getattr fallback to
+    `embed` for pre-split providers), so the wrapper must expose
+    `embed_query` itself -- otherwise the getattr falls back to the
+    passage-side `embed` and the bench measures the wrong side of an
+    asymmetric model (Bench-3).
+    """
 
     def __init__(self, inner: LocalEmbedder) -> None:
         self.inner = inner
@@ -77,6 +90,12 @@ class TimingEmbedder:
     async def embed(self, texts: list[str]) -> list[list[float]]:
         started = time.perf_counter()
         vectors = await self.inner.embed(texts)
+        self.calls_ms.append((time.perf_counter() - started) * 1000)
+        return vectors
+
+    async def embed_query(self, texts: list[str]) -> list[list[float]]:
+        started = time.perf_counter()
+        vectors = await self.inner.embed_query(texts)
         self.calls_ms.append((time.perf_counter() - started) * 1000)
         return vectors
 
@@ -166,7 +185,7 @@ async def main() -> None:
                     project_id=PROJECT,
                     subject_id=subject_id,
                     query=query,
-                    budget_tokens=900,
+                    budget_tokens=3000,
                     embedder=timing,
                 )
                 await session.commit()

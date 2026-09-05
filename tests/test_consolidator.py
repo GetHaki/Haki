@@ -82,6 +82,7 @@ async def test_capture_then_worker_creates_active_fact_with_provenance(client):
         "conflicts": 0,
         "conflict_capped": 0,
         "reclassified_event": 0,
+        "supersede_without_existing": 0,
         "duplicates": 0,
         "reinforced": 0,
         "quarantined": 0,

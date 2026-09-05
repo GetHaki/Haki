@@ -1242,9 +1242,27 @@ async def _apply_candidate(
             # Ledger transition active -> superseded; the replaced fact stays
             # in history and is never served as current again.
             await transition_fact_status(session, existing.id, FactStatus.superseded)
-            existing.valid_to = event.occurred_at
+            # B11, same monotonic-clock idiom as last_reinforced_at above: a
+            # late-ingested event carries an OLDER occurred_at than the fact
+            # it replaces, and writing it raw as valid_to would make
+            # valid_to < valid_from -- a negative validity interval that
+            # corrupts duration rendering and date arbitration downstream.
+            # Clamp to valid_from (zero-length, never negative); the new
+            # fact still takes event.occurred_at as its own valid_from.
+            if existing.valid_from is not None and event.occurred_at < existing.valid_from:
+                existing.valid_to = existing.valid_from
+            else:
+                existing.valid_to = event.occurred_at
             fact.supersedes_id = existing.id
             result["superseded"] += 1
+        else:
+            # B7: the extractor labeled this "supersede" but no existing fact
+            # was found to replace -- an extractor labeling error, not a
+            # supersession. The value itself is novel, so activating it as a
+            # fresh fact loses nothing (semantically identical to "create"),
+            # but it is counted separately: a rising number here means the
+            # extraction prompt mislabels updates and needs attention.
+            result["supersede_without_existing"] += 1
         await transition_fact_status(session, fact.id, FactStatus.active)
         result["created"] += 1
         return
@@ -1416,6 +1434,9 @@ async def _process_job(
         # used to count -- only whichever candidate happens to still be
         # memory_form "state" at cap time goes this way instead now).
         "reclassified_event": 0,
+        # B7: "supersede" with no existing fact to replace (extractor
+        # mislabel) -- still counted in "created" above, tracked here too.
+        "supersede_without_existing": 0,
         "duplicates": 0,
         "reinforced": 0,
         "quarantined": 0,

@@ -226,10 +226,19 @@ def observed_at_of(value: Any, temporal_range: dict | None) -> datetime | None:
     None is a real answer, not a failure: most facts ("I have a dog") are
     about no particular instant, and inventing one for them would make the
     column meaningless for the ones that do.
+
+    Priority (B10): a single explicit ISO date inside `value` wins over the
+    range's start. The range is a resolved relative phrase ("last week") --
+    the extractor's understanding of a vague expression -- while an ISO
+    date in the value is the precise instant itself (same hierarchy as
+    _apply_candidate's "an extractor-resolved range ... a plain ISO date
+    already inside value is more precise than any phrase"). Before this,
+    the range always won, so value={date: 2023-06-20} with a "last week"
+    range resolved to observed_at=range start instead of June 20th.
     """
-    if isinstance(temporal_range, dict):
-        start = parse_iso_instant(temporal_range.get("start"))
-        if start is not None:
-            return start
     dates = _dates_in(value)
-    return dates[0] if len(dates) == 1 else None
+    if len(dates) == 1:
+        return dates[0]
+    if isinstance(temporal_range, dict):
+        return parse_iso_instant(temporal_range.get("start"))
+    return None

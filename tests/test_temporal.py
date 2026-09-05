@@ -40,6 +40,16 @@ def test_a_resolved_range_anchors_the_fact_at_its_start():
     )
 
 
+def test_an_explicit_date_in_the_value_beats_the_range_start():
+    """B10: the range is a resolved relative phrase ("last week"), the ISO
+    date in the value is the precise instant itself. The precise date wins,
+    even when the two contradict -- the range only anchors facts whose
+    value carries no single exact date."""
+    assert observed_at_of({"date": "2023-06-20"}, AUGUST) == datetime(
+        2023, 6, 20, tzinfo=timezone.utc
+    )
+
+
 def test_a_single_date_in_the_value_is_taken_whatever_its_key():
     """Key-agnostic on purpose.
 

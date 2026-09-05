@@ -109,6 +109,18 @@ async def _forget_fact(
         key = "facts_disabled" if mode == "disable" else "facts_deleted"
         return {key: 0}
     await transition_fact_status(session, fact_id, target)
+    if target is FactStatus.deleted:
+        # B6: a soft-deleted row stays for the audit trail (id, predicate,
+        # dates, status), but its RETRIEVAL axes are purged -- embedding and
+        # search_text (search_vector follows automatically: it is GENERATED
+        # from coalesce(search_text, '')). Belt and suspenders on top of the
+        # status filters in retrieval: even a future query that forgot a
+        # status predicate can never match this row again, on either axis.
+        # value/evidence_span stay (what was deleted must remain auditable);
+        # events, chunks and trace packets are ledger/audit history, not
+        # fact data -- subject-delete is the real erasure path for those.
+        fact.embedding = None
+        fact.search_text = None
     key = "facts_disabled" if mode == "disable" else "facts_deleted"
     return {key: 1}
 

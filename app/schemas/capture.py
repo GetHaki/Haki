@@ -72,7 +72,12 @@ class EventIn(BaseModel):
 
 
 class CaptureRequest(BaseModel):
-    events: list[EventIn] = Field(min_length=1)
+    # Security audit H8 (8 sept): an unbounded batch turned the per-request
+    # rate limit into a fiction — 300 req/min × N events × 256 KiB each,
+    # each batch spawning a paid LLM consolidation job. 100 events is ~50x
+    # the largest legitimate batch seen in production; the 256 KiB
+    # per-event bound stays in EventIn.
+    events: list[EventIn] = Field(min_length=1, max_length=100)
     idempotency_key: str | None = Field(default=None, max_length=256)
 
 

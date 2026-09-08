@@ -152,15 +152,32 @@ async def mcp_dev_auth(request: Request, call_next) -> Response:
     self-hosted single-server config) must match it exactly. Unset = open
     mode for that path (local development only, documented in the
     README). Full OAuth lands in a later sprint.
+
+    Security audit C2 (8 sept): an UNSET HAKI_API_KEY is not only "open
+    mode" — on a multi-tenant deployment it silently falls back to the
+    legacy prj_cursor_dev scope, leaving the whole memory surface
+    anonymous. When HAKI_ADMIN_KEY is set (docs/DEPLOY.md's own signal
+    for "this is a real deployment"), the anonymous/legacy path is
+    refused outright: /mcp then requires either a real hk_ key
+    (validated per tool call by _resolve_scope) or the admin key.
+    Self-hosters without an admin key keep the open behavior — that is
+    the documented single-server bootstrap.
     """
-    if settings.api_key and request.url.path.startswith("/mcp"):
+    if request.url.path.startswith("/mcp"):
         auth_header = request.headers.get("authorization") or ""
         token = auth_header[7:] if auth_header.lower().startswith("bearer ") else ""
-        if not token.startswith("hk_") and auth_header != f"Bearer {settings.api_key}":
+        if token.startswith("hk_"):
+            return await call_next(request)  # validated per-tool-call downstream
+        if settings.api_key and auth_header == f"Bearer {settings.api_key}":
+            return await call_next(request)  # legacy single-server secret
+        if settings.admin_key:
+            # Real deployment: no anonymous access, no legacy fallback.
             return JSONResponse(
                 status_code=401,
                 content=error_body(
-                    "unauthorized", "invalid or missing bearer token", "Authorization"
+                    "unauthorized",
+                    "a Haki API key (hk_...) is required on /mcp for this deployment",
+                    "Authorization",
                 ),
             )
     return await call_next(request)

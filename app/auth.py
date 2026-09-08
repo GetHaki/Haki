@@ -55,12 +55,13 @@ def constant_time_bearer_match(authorization_header: str | None, secret: str) ->
     in constant time (`hmac.compare_digest`) so response timing never leaks
     how many leading bytes of a guessed secret were correct.
 
-    Found by security review (16 aout): the shared-secret checks this
-    guards (HAKI_ADMIN_KEY in app.api.routes.keys, the CLI device-code
-    approve endpoint) used plain `==`/`!=` on `str`. A timing attack over
-    a real network is hard to pull off, but there is no reason for the
-    inconsistency with how this project already verifies its own
-    signed/keyed inputs elsewhere, and no cost to closing it."""
+    Found by security review (16 aout): the 4 shared-secret checks this
+    guards (HAKI_ADMIN_KEY in app.api.routes.keys, HAKI_CONSOLE_SERVICE_KEY
+    in orgs/cli_auth/billing) all used plain `==`/`!=` on `str` -- unlike
+    app.billing.geniuspay's webhook signature check, which already used
+    compare_digest correctly. A timing attack over a real network is hard
+    to pull off, but there is no reason for the inconsistency and no cost
+    to closing it."""
     expected = f"Bearer {secret}"
     return hmac.compare_digest((authorization_header or "").encode(), expected.encode())
 
@@ -90,18 +91,21 @@ async def resolve_api_key(token: str | None) -> ApiKey | None:
     return key
 
 
-def _body_project_ids(payload: Any) -> list[str | None]:
-    """project_id candidates in a JSON body: top-level plus per-event
-    (capture batches carry one project_id per event)."""
+def _body_scope_ids(payload: Any) -> tuple[list[str | None], list[str | None]]:
+    """project_id AND org_id candidates in a JSON body: top-level plus
+    per-event (capture batches carry one scope pair per event)."""
     if not isinstance(payload, dict):
-        return []
-    candidates: list[str | None] = [payload.get("project_id")]
+        return [], []
+    project_candidates: list[str | None] = [payload.get("project_id")]
+    org_candidates: list[str | None] = [payload.get("org_id")]
     events = payload.get("events")
     if isinstance(events, list):
-        candidates.extend(
-            event.get("project_id") for event in events if isinstance(event, dict)
-        )
-    return candidates
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            project_candidates.append(event.get("project_id"))
+            org_candidates.append(event.get("org_id"))
+    return project_candidates, org_candidates
 
 
 class ApiKeyAuthMiddleware:
@@ -178,6 +182,12 @@ class ApiKeyAuthMiddleware:
                 "project_id", []
             )
         ]
+        org_candidates: list[str | None] = [
+            value
+            for value in parse_qs(scope.get("query_string", b"").decode()).get(
+                "org_id", []
+            )
+        ]
 
         # Then the JSON body (buffered and replayed downstream).
         body = b""
@@ -191,7 +201,9 @@ class ApiKeyAuthMiddleware:
                 body += message.get("body", b"")
                 more = message.get("more_body", False)
             try:
-                candidates.extend(_body_project_ids(json.loads(body)) if body else [])
+                body_projects, body_orgs = _body_scope_ids(json.loads(body)) if body else ([], [])
+                candidates.extend(body_projects)
+                org_candidates.extend(body_orgs)
             except ValueError:
                 pass  # malformed JSON: 422 invalid_payload downstream
 
@@ -210,6 +222,20 @@ class ApiKeyAuthMiddleware:
 
         try:
             policy.check_project_scope(key.project_id, candidates, action=action)
+            # Security audit C4 (8 sept): org_id is client-suppliable and the
+            # capture route bills the org it names — leaving it unchecked let
+            # any hk_ key debit ANOTHER org's credit balance and write events
+            # with an org/project pair it doesn't own. The authenticated key's
+            # org is authoritative: every org_id in the request must be either
+            # absent (server derives it) or exactly the key's org.
+            claimed_orgs = {o for o in org_candidates if o is not None}
+            if claimed_orgs and claimed_orgs != {key.org_id}:
+                raise ApiError(
+                    type="forbidden",
+                    message="org_id does not match the authenticated API key's organization",
+                    field="org_id",
+                    status_code=403,
+                )
         except ApiError as exc:
             await self._deny(scope, receive, send, exc)
             return

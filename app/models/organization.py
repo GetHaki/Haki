@@ -58,9 +58,23 @@ class Organization(Base):
     geniuspay_subscription_id: Mapped[str | None] = mapped_column(
         String(128), unique=True, index=True
     )
+    # Sprint 17 (8 sept): Dodo replaces GeniusPay. Both id columns exist
+    # during the transition; dodo_subscription_id is the one the new
+    # checkout and webhook read/write (migration 0035). GeniusPay's
+    # remains for historical orgs (never migrated — their subscriptions
+    # lived on the XOF rail).
+    dodo_subscription_id: Mapped[str | None] = mapped_column(
+        String(128), unique=True, index=True
+    )
     subscription_status: Mapped[str | None] = mapped_column(String(32))
     subscription_plan: Mapped[str | None] = mapped_column(String(64))
     current_period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     credit_balance: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     free_credits_granted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # Retention (sprint 16 console redesign): how long superseded/disabled
+    # facts and context_traces are kept before POST /v1/retention/purge
+    # deletes them for good. NULL = keep everything (the only behavior that
+    # existed before this column — never purged).
+    retention_days: Mapped[int | None] = mapped_column(Integer)

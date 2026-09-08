@@ -1,7 +1,7 @@
 [project]
 name = "haki-api"
 version = "0.1.0"
-description = "Haki -- long-term memory layer for AI agents (Ledger, Consolidator, Context, forget, Cursor MCP server)"
+description = "Haki — couche de memoire long-terme pour agents IA (Ledger, Consolidator, Context, forget, serveur MCP Cursor)"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
@@ -14,26 +14,31 @@ dependencies = [
     "pgvector>=0.5.0",
     "httpx>=0.28.1",
     # Pinned, not >=0.4: fastembed 0.8.0 has been the ONLY version ever
-    # locked in this project's history -- every embedding Haki has ever
-    # stored uses this version's mean-pooling behaviour for
-    # paraphrase-multilingual-MiniLM-L12-v2. TextEmbedding's own warning
-    # suggests downgrading to 0.5.1 to get the OLDER CLS behaviour back --
-    # doing that now would be the regression, silently putting new vectors
-    # in a different space from everything already in Postgres. Bump
-    # deliberately (and re-embed) if this ever needs to move.
+    # locked since sprint 3 (verified against git history, 12 aout) --
+    # every embedding Haki has ever stored uses this version's mean-pooling
+    # behaviour for paraphrase-multilingual-MiniLM-L12-v2. TextEmbedding's
+    # own warning suggests downgrading to 0.5.1 to get the OLDER CLS
+    # behaviour back -- doing that now would be the regression, silently
+    # putting new vectors in a different space from everything already in
+    # Postgres. Bump deliberately (and re-embed) if this ever needs to move.
     "fastembed==0.8.0",
     "mcp>=2.0.0",
     # CLI device-code auth flow (sprint 14): short-lived pending/approved
     # state, native TTL, no Postgres table. redis.asyncio, not the
     # deprecated aioredis.
     "redis>=5.0",
-    # Rate limiting for customer-facing endpoints reachable with a normal
-    # hk_ key (e.g. POST /v1/consolidate/subject).
+    # Rate limiting (sprint 17, production-readiness P1): default in-memory
+    # backend, deliberately not Redis-backed — see app/rate_limit.py for
+    # why that's the right call for the current single-instance deploy.
     "slowapi>=0.1.9",
     # The gateway renders the <haki_memory> block with the SDK's
     # build_prompt_context: one implementation, no divergent copy.
-    # Distribution name is "gethaki" (haki was already taken on PyPI) --
-    # the importable module stays "haki" (sdk/python/src/haki/).
+    # Distribution name is "gethaki" (sprint 14: "haki" was already taken
+    # on PyPI) -- the importable module stays "haki" (sdk/python/src/haki/).
+    # Sprint 17: Dodo Payments (subscription billing replaces GeniusPay).
+    # The official SDK ships the Standard-Webhooks verification helpers and
+    # typed models; the thin httpx client here only needs the base API.
+    "dodopayments>=1.115",
     "gethaki",
 ]
 

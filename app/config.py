@@ -52,9 +52,9 @@ class Settings(BaseSettings):
     # `alembic upgrade head` then `scripts/backfill_embeddings.py`. A flip
     # without the backfill is refused at startup by
     # app.db.verify_embedding_space, including between two models of the
-    # same width, which nothing caught before 0028.
+    # same width, which nothing caught before 0031.
     #
-    # The default became e5-large on 24 aout (migration 0029) on a paired
+    # The default became e5-large on 24 aout (migration 0032) on a paired
     # measurement, not a preference; the ablation that rules out "it is just
     # a bigger model" is recorded in app.providers.local.MODELS.
     embed_model: str = "intfloat/multilingual-e5-large"
@@ -79,7 +79,7 @@ class Settings(BaseSettings):
     # only -- there is no remote/paid reranker provider (see app.providers.
     # base.Reranker; local uses fastembed's TextCrossEncoder, same ONNX/CPU
     # runtime already used for embeddings).
-    # MEASURED, 21 Aug (external audit, not reproduced in this repo's own
+    # MEASURED, 21 aout (external audit, not reproduced in this repo's own
     # bench): once the lexical axis was repaired (app.context.fts), the
     # composite score replaced by a normalized fusion (app.context.
     # ranking) and episodes served as turn-sized chunks (episode_chunks),
@@ -88,7 +88,7 @@ class Settings(BaseSettings):
     # 308-question sample -- McNemar p = 0.68, indistinguishable from
     # noise. Reported cost: ~1.1s p50 / ~1.4s p95 of CPU per call. An
     # earlier measurement had credited the reranker with a much larger
-    # gain; that number was measured on top of the pre-21-Aug ranking --
+    # gain; that number was measured on top of the pre-21-aout ranking --
     # a reranker's job is to repair the order it is given, and once the
     # order is mostly right there is little left to repair.
     #
@@ -150,6 +150,31 @@ class Settings(BaseSettings):
         "https://pay.genius.ci/api/v1/merchant"
     )  # HAKI_GENIUSPAY_BASE_URL
 
+    # Sprint 17 (8 sept 2026): Dodo Payments replaces GeniusPay as the
+    # subscription provider — global Merchant of Record (190+ countries)
+    # where GeniusPay was XOF-only, Standard-Webhooks signatures with a
+    # native webhook-id (idempotency by construction), hosted customer
+    # portal for cancel/payment-method (which GeniusPay never had).
+    # Auth is Authorization: Bearer (confirmed live; a bare python-urllib
+    # UA gets Cloudflare 403/1010 — the client must send a normal UA).
+    # Unset api_key = DodoClient refuses to construct (fails loudly).
+    # WEBHOOK endpoint: https://api.gethaki.space/v1/webhooks/dodo —
+    # secret whsec_... from the Dodo dashboard (endpoint
+    # ep_3J371cjQwGl6wC4Oy6KtBBJrm6k), rotating expires the old one
+    # within 24h.
+    dodo_api_key: str | None = None  # HAKI_DODO_API_KEY
+    dodo_webhook_key: str | None = None  # HAKI_DODO_WEBHOOK_KEY (whsec_...)
+    dodo_env: str = "live"  # HAKI_DODO_ENV: "live" | "test"
+    dodo_base_url: str = ""  # HAKI_DODO_BASE_URL (override; else derived)
+
+    # Dodo product ids per plan key (created live 8 sept, verified by
+    # re-read: monthly charge, 20-year subscription period per Dodo's
+    # own recommendation for perpetual plans). The webhook maps
+    # product_id -> plan key -> monthly credit grant.
+    dodo_product_starter: str = "pdt_0NnA603PPZX7WecsTmCuy"
+    dodo_product_growth: str = "pdt_0NnA60M0FGN8mVUIJhMsl"
+    dodo_product_scale: str = "pdt_0NnA60UpFC4DAs12Lvttu"
+
     # Single V1 plan (documented scope limit, same spirit as "one org per
     # human" — no plan picker yet). Price confirmed (sprint 13): 9900 XOF,
     # aligned with "Inside AI Starter" on the same GeniusPay merchant
@@ -174,6 +199,15 @@ class Settings(BaseSettings):
     # job that no process ever picked up. docker-entrypoint.sh now runs
     # this loop alongside uvicorn.
     worker_poll_seconds: float = 5.0  # HAKI_WORKER_POLL_SECONDS
+
+    # Retention purge cadence (TTL chantier): how often the worker loop runs
+    # purge_all_organizations (app/retention.py) -- the opt-in per-org purge
+    # of disabled/deleted facts and old context_traces. The purge endpoint
+    # (POST /v1/retention/purge) was "meant to be called by a cron" but no
+    # cron exists in-repo, so without this the mechanism never ran at all
+    # and context_traces grew with every query. 0 or negative disables the
+    # scheduled run (manual endpoint still works).
+    retention_purge_interval_seconds: float = 3600.0  # HAKI_RETENTION_PURGE_INTERVAL_SECONDS
 
     # MCP server scope (sprint 4): memory is project- AND subject-scoped by
     # config, never chosen by the model (security invariant, README —
@@ -221,11 +255,11 @@ class Settings(BaseSettings):
     # RECOMMENDED_RECALL_MAX_DISTANCE in app/context).
     recall_max_distance: float = 0.0  # HAKI_RECALL_MAX_DISTANCE
 
-    # Text search configuration for the lexical retrieval axis (20 Aug,
+    # Text search configuration for the lexical retrieval axis (20 aout,
     # app.context.fts). It applies to BOTH sides of the match and they must
     # agree: the `search_vector` columns of `facts` and `events` are
     # GENERATED, so their configuration is fixed by the migration that
-    # built them (0004/0019 -> 'simple', 0023 -> 'english'), while the
+    # built them (0004/0022 -> 'simple', 0026 -> 'english'), while the
     # query side reads this setting at request time. A mismatch does not
     # raise on its own -- it silently matches nothing, which is exactly
     # the failure this axis already suffered for weeks with every test
@@ -237,7 +271,7 @@ class Settings(BaseSettings):
     # (a language change is an ops action, not a new migration per swap).
     fts_config: str = "english"  # HAKI_FTS_CONFIG=simple|english|french
 
-    # How the unified candidate pool is ordered (21 Aug).
+    # How the unified candidate pool is ordered (21 aout).
     # "normalized" (default): the two relevance axes (similarity,
     # full-text) are min-max normalized over the query's own candidate
     # pool and combined by app.context.ranking.relevance; recency leaves
@@ -245,7 +279,7 @@ class Settings(BaseSettings):
     # app.context.ranking for the full rationale, including why RRF --
     # tried first -- was rejected.
     #
-    # "legacy" restores the pre-21-Aug weighted sum exactly
+    # "legacy" restores the pre-21-aout weighted sum exactly
     # (app.context.ranking.legacy_weighted_sum). It is a rollback path for
     # a ranking change landing in production and a way to reproduce old
     # eval numbers -- not a supported alternative. Remove it once the

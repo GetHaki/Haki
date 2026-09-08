@@ -1,0 +1,17 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.GetHaki/haki",
+  "description": "Reliable long-term memory for AI agents — bitemporal fact ledger, contradiction detection, and full explainability. Self-host or use the cloud.",
+  "version": "0.1.0",
+  "websiteUrl": "https://gethaki.space",
+  "repository": {
+    "url": "https://github.com/GetHaki/Haki",
+    "source": "github"
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://api.gethaki.space/mcp/"
+    }
+  ]
+}

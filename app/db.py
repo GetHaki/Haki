@@ -1,8 +1,9 @@
 import logging
 import re
-from collections.abc import AsyncGenerator
+from typing import Any, AsyncGenerator
 
 from fastapi import Request
+from sqlalchemy import event as sa_event
 from sqlalchemy import text
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import (
@@ -39,15 +40,33 @@ async def get_session(request: Request) -> AsyncGenerator[AsyncSession, None]:
     sees the key's project rows, even if the code forgets a project filter
     (migration 0006 policies). In dev-open mode no key is resolved, nothing
     is set, and the policies are permissive (documented).
+
+    Security audit C3 (8 sept): `set_config(..., true)` is transaction-
+    local, and this codebase commits mid-request by design (the gateway
+    commits the decision trace before capturing the turn). Every later
+    transaction on the SAME pooled connection used to start with NO GUC —
+    the policy's "no context = permissive" branch then applied, and
+    post-commit writes ran unscoped. The `after_begin` hook below
+    re-applies the GUC at the start of EVERY transaction on this session,
+    so mid-request commits can no longer drop the scope.
     """
     async with async_session() as session:
         state = request.scope.get("state") or {}
         api_key = state.get("haki_api_key")
         if api_key is not None:
-            await session.execute(
-                text("SELECT set_config('haki.project_id', :pid, true)"),
-                {"pid": api_key.project_id},
-            )
+            def _set_rls_guc(session_: Any, transaction: Any) -> None:
+                """Sync listener on the sync_session's `after_begin`: fired at
+                the start of every transaction, runs on the same greenlet as
+                the transaction's first statement via
+                sync_session.run_sync-free plain Connection.execute. LOCAL
+                (set_config ..., true) — dies with the transaction, never
+                leaks into the pool."""
+                session_.connection().exec_driver_sql(
+                    "SELECT set_config('haki.project_id', %s, true)",
+                    (api_key.project_id,),
+                )
+
+            sa_event.listen(session.sync_session, "after_begin", _set_rls_guc)
         yield session
 
 
@@ -97,7 +116,7 @@ def install_tcp_nodelay() -> None:
     loop._haki_nodelay_installed = True
 
 
-# Text search configuration drift guard (20 Aug).
+# Text search configuration drift guard (20 aout).
 #
 # `facts.search_vector` and `events.search_vector` are GENERATED columns:
 # the text search configuration used to build the tsvector is frozen into
@@ -147,7 +166,7 @@ _TSVECTOR_CONFIG_RE = re.compile(r"to_tsvector\(\s*'([a-z_]+)'::regconfig")
 #    exact shape of the FTS bug that cost this project weeks.
 #
 # `embedding_space` records which model produced the stored vectors
-# (migration 0028). One row, read once at startup, no per-row stamp and no
+# (migration 0031). One row, read once at startup, no per-row stamp and no
 # change to any of the eight write sites: the invariant is a property of
 # the corpus, not of a row.
 _EMBEDDING_COLUMN_DIM_SQL = """
@@ -203,7 +222,7 @@ async def verify_embedding_space() -> None:
                 )
             ).first()
         except ProgrammingError:
-            # Migration 0028 not applied: the dimension check below still
+            # Migration 0031 not applied: the dimension check below still
             # runs, which is the half that was already possible to get wrong.
             state = None
 

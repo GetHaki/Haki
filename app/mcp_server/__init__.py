@@ -299,10 +299,23 @@ async def haki_capture(ctx: Context, content: str, kind: str = "agent.observatio
             )
         await session.commit()
 
-        processed = None
-        if settings.mcp_autoconsolidate and job is not None:
-            processed = await ledger.run_pending_consolidations(session)
-            await session.commit()
+    # Security audit C3 (8 sept): the consolidation must NOT reuse this
+    # tool's session. write_events ran inside `set_config(haki.project_id,
+    # true)` (transaction-local RLS); after that first commit() the NEXT
+    # transaction on the same pooled connection starts with NO GUC — the
+    # RLS policy's "no context = permissive" branch then applies, and
+    # run_pending_consolidations would see and process EVERY tenant's
+    # queue under this caller's credentials. The worker runs the same
+    # call on a plain ops session by design (app/worker.py), so a fresh
+    # no-RLS session here is exactly equivalent to the worker path —
+    # nothing is gained by keeping the caller's session, and everything
+    # (cross-tenant reads, paid LLM calls on other tenants' events,
+    # foreign-row writes) is lost.
+    processed = None
+    if settings.mcp_autoconsolidate and job is not None:
+        async with async_session() as ops_session:
+            processed = await ledger.run_pending_consolidations(ops_session)
+            await ops_session.commit()
 
     return {
         "event_id": str(stored.id),

@@ -1,0 +1,73 @@
+{
+  "dxt_version": "0.1",
+  "name": "haki",
+  "display_name": "Haki — long-term memory for AI agents",
+  "version": "0.1.0",
+  "description": "Self-hosted long-term memory for AI agents on your own Postgres. Facts are dated, versioned and superseded (never silently overwritten), every recall ships with an inspectable trace, and agents can correct wrong memories from inside the conversation. Five tools: haki_context, haki_capture, haki_inspect, haki_forget, haki_correct.",
+  "author": {
+    "name": "Ousmane Dicko"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GetHaki/Haki"
+  },
+  "license": "Apache-2.0",
+  "homepage": "https://gethaki.space",
+  "documentation": "https://github.com/GetHaki/Haki#readme",
+  "support": "https://github.com/GetHaki/Haki/issues",
+  "server": {
+    "type": "uv",
+    "entry_point": "server/main.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "${__dirname}",
+        "run",
+        "python",
+        "server/main.py"
+      ],
+      "env": {
+        "HAKI_DATABASE_URL": "${user_config.database_url}",
+        "HAKI_MCP_PROJECT_ID": "${user_config.project_id}",
+        "HAKI_MCP_ORG_ID": "${user_config.org_id}",
+        "HAKI_MCP_SUBJECT_ID": "${user_config.subject_id}"
+      }
+    }
+  },
+  "user_config": {
+    "database_url": {
+      "type": "string",
+      "title": "Postgres URL",
+      "description": "asyncpg URL of your Haki database (schema applied via alembic): postgresql+asyncpg://user:pass@host:5432/haki",
+      "required": true,
+      "sensitive": true
+    },
+    "project_id": {
+      "type": "string",
+      "title": "Project ID",
+      "description": "Haki project this server instance reads and writes (e.g. prj_myapp)",
+      "required": true
+    },
+    "org_id": {
+      "type": "string",
+      "title": "Org ID",
+      "description": "Haki organization the project belongs to (e.g. org_default)",
+      "required": false
+    },
+    "subject_id": {
+      "type": "string",
+      "title": "Subject ID",
+      "description": "Subject whose memory this server instance serves (one instance per person/agent)",
+      "required": true
+    }
+  },
+  "keywords": [
+    "memory",
+    "postgres",
+    "long-term-memory",
+    "agent-memory",
+    "bitemporal",
+    "self-hosted"
+  ]
+}

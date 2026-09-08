@@ -1,0 +1,15 @@
+[project]
+name = "haki-mcp-bundle"
+version = "0.1.0"
+description = "MCP bundle shim for the Haki memory server (stdio)"
+requires-python = ">=3.12"
+dependencies = [
+    # The real server: app/mcp_server pulls app.ledger, app.context, etc.
+    # The bundle ships the full repository, so we depend on the API package
+    # itself (pyproject at repo root, wheel packages = ["app"]).
+    "haki-api",
+    "anyio>=4",
+]
+
+[tool.uv.sources]
+haki-api = { path = "..", editable = false }

@@ -310,20 +310,25 @@ async def purchase_credits(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> CreditsPurchaseResponse:
-    """Creates a ONE-SHOT GeniusPay payment (not a subscription) for a
-    credit top-up — a WRITE call against a LIVE payment provider (real
-    financial effect). Credits are granted later, by the webhook, once
-    GeniusPay confirms the payment actually completed — never here (this
-    endpoint only starts the checkout and returns where to redirect the
-    user). Never exercised against the real API in tests (mocked HTTP
-    transport, see tests/test_credits.py).
+    """Creates a ONE-SHOT checkout for a credit top-up — a WRITE call
+    against a LIVE payment provider (real financial effect). Credits are
+    granted later, by the webhook, once the provider confirms the payment
+    actually completed — never here (this endpoint only starts the
+    checkout and returns where to redirect the user). Never exercised
+    against the real API in tests (mocked HTTP transport,
+    tests/test_credits.py).
 
     Sprint 15: on-demand top-ups (PAYG) are gated to organizations with an
     active/trialing Cloud subscription (`ACTIVE_SUBSCRIPTION_STATUSES`,
     app/billing/credits.py) — a product decision to avoid unlimited PAYG
     access to an org that never subscribed. This affects ONLY the purchase
     of NEW credits: the lazy monthly free grant and spending credits the
-    org already holds (POST /v1/capture) are untouched by this check."""
+    org already holds (POST /v1/capture) are untouched by this check.
+
+    Sprint 17: the Dodo path maps `credits` to a one-time pack product
+    (1000/5000/20000 — the console's quick top-ups) and redirects to the
+    hosted checkout; the grant rides on `payment.succeeded` (idempotent by
+    webhook-id). GeniusPay retained behind `dodo_api_key is None`."""
     _require_console_auth(request)
     org = await _org_by_owner_ref(session, body.owner_ref)
 
@@ -338,6 +343,57 @@ async def purchase_credits(
             status_code=403,
         )
 
+    if settings.dodo_api_key:
+        pack_key = f"payg_{body.credits}"
+        product_id = getattr(settings, f"dodo_product_{pack_key}", "")
+        if not product_id:
+            raise ApiError(
+                type="invalid_payload",
+                message=(
+                    f"no PAYG pack for {body.credits} credits — available "
+                    "packs: 1000, 5000, 20000"
+                ),
+                field="credits",
+                status_code=422,
+            )
+        client = DodoClient()
+        try:
+            result = await client.create_checkout_session(
+                product_id=product_id,
+                customer_email=body.customer_email,
+                customer_name=body.customer_name or org.name,
+                return_url=f"{settings.console_base_url}/app/billing",
+                metadata={
+                    "haki_org_id": str(org.id),
+                    "haki_credits": body.credits,
+                    "haki_pack": pack_key,
+                },
+            )
+        except DodoError as exc:
+            raise ApiError(
+                type="billing_provider_error", message=str(exc), status_code=502
+            ) from exc
+        finally:
+            await client.aclose()
+
+        session_id = str(result.get("session_id") or "")
+        checkout_url = result.get("checkout_url")
+        if not session_id or not checkout_url:
+            raise ApiError(
+                type="billing_provider_error",
+                message="Dodo response did not include a session id / checkout url",
+                status_code=502,
+            )
+
+        return CreditsPurchaseResponse(
+            org_id=org.id,
+            credits=body.credits,
+            amount_xof=0.0,  # Dodo prices in USD; XOF amount not applicable
+            geniuspay_payment_id=session_id,  # correlation id for this checkout
+            payment_url=checkout_url,
+        )
+
+    # --- Legacy GeniusPay path (transition only) ------------------------
     amount_xof = round(body.credits * settings.billing_credit_price_xof_per_credit, 2)
 
     client = GeniusPayClient()
@@ -607,12 +663,71 @@ async def dodo_webhook(
     data = payload.get("data") or {}
     webhook_id = request.headers.get("webhook-id") or ""
 
-    if not event.startswith("subscription."):
-        # payment.succeeded / credit.* / dunning.* are acknowledged but
-        # unused: the credit grant rides on subscription.renewed alone,
-        # and Dodo's own credit entitlements are not the ledger of record
-        # yet (app/billing/credits.py is).
-        logger.info("dodo webhook: event ignored (event=%s)", event)
+    if event.startswith("subscription."):
+        return await _handle_dodo_event(session, event, data, webhook_id)
+
+    if event == "payment.succeeded":
+        return await _handle_dodo_topup(session, data, webhook_id)
+
+    # credit.* / dunning.* / dispute.* etc. are acknowledged but unused:
+    # the credit grant rides on subscription.renewed + payment.succeeded,
+    # and Dodo's own credit entitlements are not the ledger of record yet
+    # (app/billing/credits.py is).
+    logger.info("dodo webhook: event ignored (event=%s)", event)
+    return {"received": True}
+
+
+# PAYG packs: product_id -> credits granted on payment.succeeded.
+_DODO_PAYG_PRODUCTS = {
+    settings.dodo_product_payg_1000: 1000,
+    settings.dodo_product_payg_5000: 5000,
+    settings.dodo_product_payg_20000: 20000,
+}
+
+
+async def _handle_dodo_topup(session: AsyncSession, data: dict, webhook_id: str) -> dict:
+    """POST /v1/webhooks/dodo, one-shot top-up branch (sprint 17).
+
+    Correlation: the checkout stored `haki_org_id` + the pack product in
+    the session metadata; the payment webhook echoes the product_cart it
+    was paid for. Idempotent by webhook-id (the grant's reference): Dodo's
+    automatic retries can never double-credit."""
+    payment = data.get("payment") or {}
+    if not payment:
+        logger.warning("dodo webhook: payment.succeeded without payment object")
         return {"received": True}
 
-    return await _handle_dodo_event(session, event, data, webhook_id)
+    org_id_raw = (payment.get("metadata") or {}).get("haki_org_id")
+    org: Organization | None = None
+    if org_id_raw:
+        try:
+            org = await session.get(Organization, uuid.UUID(str(org_id_raw)))
+        except ValueError:
+            org = None
+    if org is None:
+        logger.warning("dodo webhook: no organization for top-up (webhook_id=%s)", webhook_id)
+        return {"received": True}
+
+    # Resolve the pack credits from the payment's product cart.
+    cart = payment.get("product_cart") or payment.get("products") or []
+    credits = 0
+    for item in cart:
+        pid = item.get("product_id") or item.get("product") or ""
+        if pid in _DODO_PAYG_PRODUCTS:
+            credits += _DODO_PAYG_PRODUCTS[pid]
+    if credits <= 0:
+        logger.warning(
+            "dodo webhook: top-up payment without a known pack product (webhook_id=%s)",
+            webhook_id,
+        )
+        return {"received": True}
+
+    await grant_credits(
+        session,
+        org,
+        credits,
+        reason=REASON_TOPUP_PURCHASE,
+        reference=webhook_id,  # unique per delivery -> retries are no-ops
+    )
+    await session.commit()
+    return {"received": True}

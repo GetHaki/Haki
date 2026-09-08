@@ -175,6 +175,13 @@ class Settings(BaseSettings):
     dodo_product_growth: str = "pdt_0NnA60M0FGN8mVUIJhMsl"
     dodo_product_scale: str = "pdt_0NnA60UpFC4DAs12Lvttu"
 
+    # PAYG top-up packs (one-time products, created live 8 sept): the
+    # console's three quick top-ups, priced at the same ~0.001 USD/credit
+    # ratio as the legacy 0.65 XOF/credit. Map: pack credits -> product.
+    dodo_product_payg_1000: str = "pdt_0NnAISTImSob0IZ60pjwK"
+    dodo_product_payg_5000: str = "pdt_0NnAIScQf9eTiRudJ1BwR"
+    dodo_product_payg_20000: str = "pdt_0NnAISmj046sIA9GO12tZ"
+
     # Single V1 plan (documented scope limit, same spirit as "one org per
     # human" — no plan picker yet). Price confirmed (sprint 13): 9900 XOF,
     # aligned with "Inside AI Starter" on the same GeniusPay merchant

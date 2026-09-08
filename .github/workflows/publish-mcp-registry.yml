@@ -17,7 +17,7 @@ jobs:
 
       - name: Install mcp-publisher
         run: |
-          curl -fsSL -o mp.tar.gz https://github.com/modelcontextprotocol/registry/releases/download/v1.1.0/mcp-publisher_1.1.0_linux_amd64.tar.gz
+          curl -fsSL -o mp.tar.gz https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_1.8.1_linux_amd64.tar.gz
           tar -xzf mp.tar.gz mcp-publisher
 
       - name: Login via GitHub OIDC and publish

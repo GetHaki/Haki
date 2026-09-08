@@ -101,7 +101,7 @@ async function handler(
         error: {
           type: "api_unreachable",
           message:
-            "L'API Haki est injoignable. Vérifiez sa configuration ou réessayez plus tard.",
+            "The Haki API is unreachable. Check its configuration or try again later.",
         },
       },
       { status: 502 },

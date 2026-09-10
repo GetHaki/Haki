@@ -46,6 +46,12 @@ def build_prompt_context(packet: dict[str, Any]) -> str:
     block would itself be a distractor. The signal is for the CALLER
     (packet field), not for the prompt.
     """
+    def _san(text: Any) -> str:
+        # Same neutralization as the server's render_line (H1): a literal
+        # '</haki_memory>' inside captured content would break out of the
+        # delimited block. Only that exact sequence is touched.
+        return str(text).replace("</haki_memory>", "<\\/haki_memory>")
+
     facts = (packet or {}).get("facts") or []
     episodes = (packet or {}).get("episodes") or []
     warnings = (packet or {}).get("warnings") or []
@@ -175,7 +181,7 @@ def build_prompt_context(packet: dict[str, Any]) -> str:
                 "equally current]"
             )
         lines.append(
-            f"- [{fact.get('ref') or '?'}] {fact.get('predicate')}: {value} "
+            f"- [{fact.get('ref') or '?'}] {_san(fact.get('predicate'))}: {_san(value)} "
             f"(valid from {valid_from}){marker}"
         )
     if episodes:
@@ -210,7 +216,7 @@ def build_prompt_context(packet: dict[str, Any]) -> str:
             )
             lines.append(
                 f"- [{episode.get('ref') or '?'}] [{occurred}] "
-                f"{episode.get('kind')}: {episode.get('excerpt')}{marker}"
+                f"{_san(episode.get('kind'))}: {_san(episode.get('excerpt'))}{marker}"
             )
     for warning in warnings:
         lines.append(f"! {warning}")

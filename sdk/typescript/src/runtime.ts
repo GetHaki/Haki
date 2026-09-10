@@ -60,6 +60,11 @@ export function seen(...packets: Array<Record<string, any>>): string[] {
  * (packet field), not for the prompt.
  */
 export function buildPromptContext(packet: ContextPacket | null | undefined): string {
+  // Same neutralization as the server's render_line (H1): a literal
+  // '</haki_memory>' inside captured content would break out of the
+  // delimited block. Only that exact sequence is touched.
+  const san = (text: unknown): string =>
+    String(text).replace(/<\/haki_memory>/g, "<\\/haki_memory>");
   const facts = packet?.facts ?? [];
   const episodes = packet?.episodes ?? [];
   const warnings = packet?.warnings ?? [];
@@ -187,7 +192,7 @@ export function buildPromptContext(packet: ContextPacket | null | undefined): st
         "treating all values as equally current]";
     }
     lines.push(
-      `- [${fact.ref ?? "?"}] ${fact.predicate}: ${value} (valid from ${validFrom})${marker}`,
+      `- [${fact.ref ?? "?"}] ${san(fact.predicate)}: ${san(value)} (valid from ${validFrom})${marker}`,
     );
   }
   if (episodes.length > 0) {
@@ -216,7 +221,7 @@ export function buildPromptContext(packet: ContextPacket | null | undefined): st
           "included for the conversational moment around a result above]"
         : "";
       lines.push(
-        `- [${episode.ref ?? "?"}] [${occurred}] ${episode.kind}: ${episode.excerpt}${marker}`,
+        `- [${episode.ref ?? "?"}] [${occurred}] ${san(episode.kind)}: ${san(episode.excerpt)}${marker}`,
       );
     }
   }

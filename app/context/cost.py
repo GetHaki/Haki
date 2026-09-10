@@ -123,6 +123,22 @@ def _episode_marker(episode: dict[str, Any]) -> str:
     )
 
 
+def _sanitize_injection(text: Any) -> str:
+    """Neutralize any '</haki_memory>' sequence inside rendered content.
+
+    Memory content (a fact value, an episode excerpt) is end-user input that
+    reached the ledger through capture. Rendered verbatim inside the
+    <haki_memory> block, a literal closing tag lets captured text BREAK OUT
+    of the delimited block and emit un-attributed instructions after it —
+    a stored prompt injection (H1, security audit). Escaping only the '<'
+    of that specific sequence keeps every other character (and every other
+    '<' the content legitimately contains) untouched, and the reader still
+    sees the original text as quoted content: '<\/haki_memory>'.
+    """
+    s = str(text)
+    return s.replace("</haki_memory>", "<\\/haki_memory>")
+
+
 def render_line(kind: str, item: dict[str, Any]) -> str:
     """The exact line build_prompt_context will emit for this item.
 
@@ -143,7 +159,8 @@ def render_line(kind: str, item: dict[str, Any]) -> str:
     ref = item.get("ref") or "?"
     if kind == "fact":
         return (
-            f"- [{ref}] {item.get('predicate')}: {item.get('value')} "
+            f"- [{ref}] {_sanitize_injection(item.get('predicate'))}: "
+            f"{_sanitize_injection(item.get('value'))} "
             f"(valid from {_fact_valid_from(item)}){_fact_marker(item)}"
         )
     occurred = item.get("occurred_at_short") or item.get("occurred_at") or "unknown date"
@@ -151,7 +168,8 @@ def render_line(kind: str, item: dict[str, Any]) -> str:
     if relative:
         occurred = f"{occurred} — {relative}"
     return (
-        f"- [{ref}] [{occurred}] {item.get('kind')}: {item.get('excerpt')}"
+        f"- [{ref}] [{occurred}] {_sanitize_injection(item.get('kind'))}: "
+        f"{_sanitize_injection(item.get('excerpt'))}"
         f"{_episode_marker(item)}"
     )
 

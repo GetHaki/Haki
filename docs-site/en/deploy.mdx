@@ -114,6 +114,13 @@ offers a managed Postgres with the `pgvector` extension.
       - `HAKI_CONSOLE_SERVICE_KEY` — secret shared with the console's
         Next.js backend (self-serve provisioning), never exposed to the
         browser.
+      - `HAKI_API_KEY` — **mandatory in multi-tenant** (Cloud): once set,
+        any `/mcp` call without a valid hk_ bearer is rejected (401).
+      - `HAKI_MCP_PUBLIC_HOST` — public host served by `/mcp` (anti
+        DNS-rebinding): without it, every non-localhost host gets 421.
+      - `HAKI_DODO_API_KEY` / `HAKI_DODO_WEBHOOK_KEY` / `HAKI_DODO_ENV` —
+        Dodo Payments billing. Without them, the API falls back to the
+        legacy billing path (see `.env.example`).
     </Expandable>
   </Step>
   <Step title="Deploy">

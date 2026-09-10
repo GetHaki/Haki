@@ -115,6 +115,14 @@ fort) et que Fly propose un Postgres managé avec l'extension `pgvector`.
       - `HAKI_CONSOLE_SERVICE_KEY` — secret partagé avec le backend
         Next.js de la console (provisioning self-serve), jamais exposé au
         navigateur.
+      - `HAKI_API_KEY` — **obligatoire en multi-tenant** (Cloud) : dès
+        qu'elle est définie, tout appel `/mcp` sans bearer hk_ valide est
+        refusé (401).
+      - `HAKI_MCP_PUBLIC_HOST` — host public servi par `/mcp` (anti
+        DNS-rebinding) : sans lui, tout host non-localhost reçoit 421.
+      - `HAKI_DODO_API_KEY` / `HAKI_DODO_WEBHOOK_KEY` / `HAKI_DODO_ENV` —
+        facturation Dodo Payments. Sans elles, l'API retombe sur le
+        chemin de facturation hérité (voir `.env.example`).
     </Expandable>
   </Step>
   <Step title="Déployer">

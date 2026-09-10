@@ -44,9 +44,27 @@ REASON_ADMIN_ADJUSTMENT = "admin_adjustment"
 
 # A subscriber already receives billing_cloud_plan_monthly_credits per
 # billing cycle (GeniusPay webhook) — the lazy free grant is only for an
-# organization with no active/trialing subscription.
-_ACTIVE_SUBSCRIPTION_STATUSES = ("active", "trialing")
+# organization with no active/trialing subscription. Public (not
+# underscore-prefixed): also the single source of truth for "is this org a
+# subscriber" reused by app/api/routes/billing.py, both for the
+# BillingStatusResponse.is_subscribed flag and for gating the on-demand
+# credits top-up (POST /v1/billing/credits/purchase) to subscribers only
+# (sprint 15 — PAYG requires an active/trialing Cloud subscription first).
+ACTIVE_SUBSCRIPTION_STATUSES = ("active", "trialing")
 _FREE_GRANT_INTERVAL = timedelta(days=30)
+
+# Cloud subscription tiers (sprint 16 — replaces the single 9900 XOF plan).
+# credits/XOF keeps the ~0.5 XOF/credit ratio already used for top-ups
+# (settings.billing_credit_price_xof_per_credit), applied to each tier's
+# price. `org.subscription_plan` stores the dict key (never the display
+# name) — the one stable identifier both checkout() and the GeniusPay
+# webhook use to look up how many credits a cycle payment grants.
+CLOUD_PLANS: dict[str, dict] = {
+    "starter": {"name": "Starter", "price_xof": 10_000, "monthly_credits": 20_000},
+    "growth": {"name": "Growth", "price_xof": 25_000, "monthly_credits": 50_000},
+    "scale": {"name": "Scale", "price_xof": 75_000, "monthly_credits": 150_000},
+}
+DEFAULT_CLOUD_PLAN = "starter"
 
 
 def _org_uuid_from_org_id(org_id: str) -> uuid.UUID | None:
@@ -131,6 +149,46 @@ async def grant_credits(
     return locked
 
 
+async def reset_monthly_credits(
+    session: AsyncSession,
+    org: Organization,
+    amount: int,
+    *,
+    reason: str,
+    reference: str | None = None,
+) -> Organization:
+    """REPLACE the balance with the plan's monthly amount (row-locked).
+
+    Called on `subscription.renewed`: the new cycle's allocation replaces
+    the old one instead of piling on top of it. Unspent credits do NOT
+    roll over — the transaction row records the delta from the old balance
+    to the new one, so the ledger stays a complete, auditable history (a
+    negative delta simply means credits expired unused at the reset).
+    Top-up credits purchased mid-cycle are replaced too: the PAYG packs
+    buy a cycle's worth of overage, not a perpetual balance.
+    """
+    if amount < 0:
+        raise ValueError("reset_monthly_credits amount must be >= 0")
+    locked = await _lock_org(session, org)
+    delta = amount - locked.credit_balance
+    if delta == 0:
+        # Idempotent no-op: same balance after the reset (e.g. a webhook
+        # redelivery that somehow cleared the reference guard). No row.
+        return locked
+    locked.credit_balance = amount
+    session.add(
+        CreditTransaction(
+            org_id=locked.id,
+            delta=delta,
+            reason=reason,
+            reference=reference,
+            balance_after=locked.credit_balance,
+        )
+    )
+    await session.flush()
+    return locked
+
+
 async def try_debit_credit(
     session: AsyncSession,
     org: Organization,
@@ -167,7 +225,7 @@ async def maybe_grant_lazy_free_credits(session: AsyncSession, org: Organization
     window (`org.free_credits_granted_at` unset, or older than 30 days),
     but only for an organization with no active/trialing subscription.
     """
-    if org.subscription_status in _ACTIVE_SUBSCRIPTION_STATUSES:
+    if org.subscription_status in ACTIVE_SUBSCRIPTION_STATUSES:
         return
     now = datetime.now(timezone.utc)
     if (

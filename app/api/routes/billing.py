@@ -32,6 +32,7 @@ from app.billing.credits import (
     REASON_SUBSCRIPTION_GRANT,
     REASON_TOPUP_PURCHASE,
     grant_credits,
+    reset_monthly_credits,
 )
 from app.billing.dodopayments import (
     DodoClient,
@@ -612,12 +613,18 @@ async def _handle_dodo_event(
         plan = CLOUD_PLANS.get(plan_key)
         credits = plan["monthly_credits"] if plan else 0
         if credits > 0:
-            await grant_credits(
+            # renewed = a NEW billing cycle: the allocation REPLACES the
+            # balance (no rollover) instead of incrementing it — otherwise
+            # unspent credits accumulate without end and "monthly credits"
+            # becomes a lie. `active` (first mandate, fresh org at 0) and
+            # `renewed` both land here; the replace semantics make them
+            # identical in effect for a fresh org, and correct for a renewing
+            # one. The webhook-id reference still makes redeliveries no-ops.
+            await reset_monthly_credits(
                 session,
                 org,
                 credits,
                 reason=REASON_SUBSCRIPTION_GRANT,
-                # webhook-id makes redeliveries no-ops (unique per delivery)
                 reference=webhook_id or subscription_id,
             )
         org.subscription_plan = plan_key

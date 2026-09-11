@@ -198,6 +198,11 @@ class Settings(BaseSettings):
     billing_free_monthly_credits: int = 1000  # HAKI_BILLING_FREE_MONTHLY_CREDITS
     billing_cloud_plan_monthly_credits: int = 20000  # HAKI_BILLING_CLOUD_PLAN_MONTHLY_CREDITS
     billing_credit_price_xof_per_credit: float = 0.65  # HAKI_BILLING_CREDIT_PRICE_XOF_PER_CREDIT
+    # Low-balance alert (sprint 18): GET /v1/billing/credits reports
+    # low_balance=true below this, and the console shows a top-up banner.
+    # Default 500: half the 1000 free monthly grant, so free-tier users in
+    # good standing never see the banner.
+    billing_low_balance_threshold: int = 500  # HAKI_BILLING_LOW_BALANCE_THRESHOLD
 
     # Consolidation worker (sprint 16 fix — see app/worker.py): how often
     # the background loop polls for pending `consolidate` jobs. Previously

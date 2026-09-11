@@ -67,6 +67,13 @@ CLOUD_PLANS: dict[str, dict] = {
 DEFAULT_CLOUD_PLAN = "starter"
 
 
+def is_low_balance(balance: int) -> bool:
+    """Pure predicate for the low-balance alert (sprint 18): True when
+    `balance` is below settings.billing_low_balance_threshold. Kept pure
+    (no DB) so it is unit-testable without Postgres."""
+    return balance < settings.billing_low_balance_threshold
+
+
 def _org_uuid_from_org_id(org_id: str) -> uuid.UUID | None:
     """A captured event's/api key's `org_id` string -> the console-
     provisioned Organization.id it refers to, or None.

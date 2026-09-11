@@ -34,6 +34,10 @@ class CreditTransactionOut(BaseModel):
 class CreditsResponse(BaseModel):
     credit_balance: int
     transactions: list[CreditTransactionOut]
+    # True when credit_balance is below billing_low_balance_threshold — the
+    # console shows a "top up" banner. Computed here (not in the console)
+    # so every client shares the same threshold.
+    low_balance: bool = False
 
 
 class CreditsPurchaseRequest(BaseModel):
@@ -97,3 +101,19 @@ class BillingStatusResponse(BaseModel):
     subscription_plan: str | None
     current_period_end: datetime | None
     geniuspay_subscription_id: str | None
+
+
+class PortalRequest(BaseModel):
+    """Same trust model as CheckoutRequest: called by the console backend
+    on behalf of an already-verified Clerk user — never by a browser."""
+
+    owner_ref: str = Field(min_length=1, max_length=256)
+    # The Dodo customer is located by email (the org row stores no
+    # Dodo customer id); the console forwards the Clerk user's email.
+    customer_email: str | None = Field(default=None, max_length=256)
+
+
+class PortalResponse(BaseModel):
+    org_id: uuid.UUID
+    provider: str = "dodo"
+    portal_url: str

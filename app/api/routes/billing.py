@@ -32,6 +32,7 @@ from app.billing.credits import (
     REASON_SUBSCRIPTION_GRANT,
     REASON_TOPUP_PURCHASE,
     grant_credits,
+    is_low_balance,
     reset_monthly_credits,
 )
 from app.billing.dodopayments import (
@@ -53,6 +54,8 @@ from app.schemas.billing import (
     CreditsPurchaseResponse,
     CreditsResponse,
     CreditTransactionOut,
+    PortalRequest,
+    PortalResponse,
 )
 
 logger = logging.getLogger("haki.billing")
@@ -300,7 +303,58 @@ async def billing_credits(
     return CreditsResponse(
         credit_balance=org.credit_balance,
         transactions=[CreditTransactionOut.model_validate(row) for row in rows],
+        low_balance=is_low_balance(org.credit_balance),
     )
+
+
+@router.post("/billing/portal", response_model=PortalResponse)
+async def billing_portal(
+    body: PortalRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> PortalResponse:
+    """Dodo-hosted customer portal URL (cancel, payment method, invoices).
+
+    Same trust model as checkout: called only by the console backend with
+    the service secret. The org row stores no Dodo customer id, so the
+    customer is located by email (forwarded from Clerk by the console) via
+    GET /customers?email= — read-only. 404 when Dodo knows no customer for
+    that email yet (no completed checkout): the console then tells the
+    user to finish a payment first instead of showing a dead link.
+    """
+    _require_console_auth(request)
+    org = await _org_by_owner_ref(session, body.owner_ref)
+    if not body.customer_email:
+        raise ApiError(
+            type="invalid_payload",
+            message="customer_email is required to locate the Dodo customer",
+            field="customer_email",
+            status_code=422,
+        )
+    try:
+        async with DodoClient() as dodo:
+            result = await dodo.list_customers(email=body.customer_email)
+            items = result.get("items") or []
+            if not items:
+                raise ApiError(
+                    type="no_customer",
+                    message="no Dodo customer found for this email yet — complete a checkout first",
+                    status_code=404,
+                )
+            customer = items[0]
+            customer_id = customer.get("customer_id") or customer.get("id")
+            if not customer_id:
+                raise ApiError(
+                    type="billing_provider_error",
+                    message="Dodo customer record has no customer id",
+                    status_code=502,
+                )
+            portal_url = dodo.customer_portal_url(customer_id)
+    except DodoError as exc:
+        raise ApiError(
+            type="billing_provider_error", message=str(exc), status_code=502
+        ) from exc
+    return PortalResponse(org_id=org.id, provider="dodo", portal_url=portal_url)
 
 
 @router.post(

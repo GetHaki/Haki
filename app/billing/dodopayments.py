@@ -153,6 +153,14 @@ class DodoClient:
             json={"cancel_immediately": cancel_immediately},
         )
 
+    # --- Customers (reads; the portal link needs the customer id) -----
+
+    async def list_customers(self, *, email: str) -> dict[str, Any]:
+        """GET /customers?email= — confirmed against the live API
+        (2026-09-11): 200 {"items": [...]}. Used by the customer-portal
+        route to locate the Dodo customer created at checkout."""
+        return await self._request("GET", "/customers", params={"email": email})
+
     # --- Portal --------------------------------------------------------
 
     def customer_portal_url(self, customer_id: str) -> str:

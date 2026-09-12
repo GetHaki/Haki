@@ -54,16 +54,23 @@ async def get_session(request: Request) -> AsyncGenerator[AsyncSession, None]:
         state = request.scope.get("state") or {}
         api_key = state.get("haki_api_key")
         if api_key is not None:
-            def _set_rls_guc(session_: Any, transaction: Any) -> None:
+            def _set_rls_guc(session_: Any, transaction: Any, connection: Any) -> None:
                 """Sync listener on the sync_session's `after_begin`: fired at
                 the start of every transaction, runs on the same greenlet as
                 the transaction's first statement via
                 sync_session.run_sync-free plain Connection.execute. LOCAL
                 (set_config ..., true) — dies with the transaction, never
-                leaks into the pool."""
-                session_.connection().exec_driver_sql(
-                    "SELECT set_config('haki.project_id', %s, true)",
-                    (api_key.project_id,),
+                leaks into the pool.
+
+                Uses the `connection` handed to the event (never
+                session_.connection(): re-entering the session from inside
+                its own after_begin raises InvalidRequestError "concurrent
+                operations are not permitted"). Bound parameters via text():
+                exec_driver_sql's %s placeholder reaches asyncpg
+                untranslated (PostgresSyntaxError at "%")."""
+                connection.execute(
+                    text("SELECT set_config('haki.project_id', :pid, true)"),
+                    {"pid": api_key.project_id},
                 )
 
             sa_event.listen(session.sync_session, "after_begin", _set_rls_guc)

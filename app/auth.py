@@ -145,10 +145,29 @@ class ApiKeyAuthMiddleware:
         unscoped_consolidate = bool(settings.admin_key) and path.rstrip("/") == (
             "/v1/consolidate"
         )
+        # Org settings read/write + member listing for raw hk_ keys
+        # (sprint 18): these become middleware-PROTECTED (key resolved,
+        # state set) so _resolve_caller_org can derive the org from the
+        # key — invite/accept/remove stay middleware-exempt as before,
+        # denied at the route by _require_console_auth.
+        key_org_paths = path.rstrip("/") == "/v1/orgs/settings" or (
+            path.rstrip("/") == "/v1/orgs/members" and scope.get("method") == "GET"
+        )
+        # Dual-trust paths (sprint 18): the routes above AND
+        # GET /v1/billing/summary accept EITHER a raw hk_ key (org derived
+        # from the key) OR the console service secret (account flow). When
+        # key resolution finds nothing here, the middleware must NOT deny:
+        # it passes through and the route decides (service secret vs 401),
+        # otherwise the account flow could never reach these routes.
+        dual_trust_paths = key_org_paths or (
+            path.rstrip("/") == "/v1/billing/summary"
+        )
         protected = path.startswith("/gateway/v1/") or (
             path.startswith("/v1/")
             and not path.startswith("/v1/keys")
-            and not path.startswith("/v1/orgs")
+            and not (
+                path.startswith("/v1/orgs") and not key_org_paths
+            )
             # /v1/billing stays on the console service secret, with ONE
             # exception: GET /v1/billing/summary is a read-only, key-scoped
             # mirror of the org's own balance/plan for the console's
@@ -169,7 +188,7 @@ class ApiKeyAuthMiddleware:
         action = f"{scope['method']} {path}"
 
         key = await resolve_api_key(bearer_token(scope["headers"]))
-        if key is None:
+        if key is None and not dual_trust_paths:
             await self._deny(
                 scope,
                 receive,
@@ -181,6 +200,14 @@ class ApiKeyAuthMiddleware:
                     status_code=401,
                 ),
             )
+            return
+        if key is None:
+            # Dual-trust path with no resolvable key: pass through WITHOUT
+            # setting state — the route applies the service-secret check
+            # itself (account flow) or 401s (anonymous). Plain `receive`
+            # (like the early passthrough above): body buffering happens
+            # later, nothing was consumed yet.
+            await self.app(scope, receive, send)
             return
 
         # Scope binding candidates: query string first.

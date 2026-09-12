@@ -12,7 +12,9 @@ caller, not a multi-tenant surface. Excluded from `ApiKeyAuthMiddleware`
 (app/auth.py) the same way `/v1/keys` already is.
 """
 
-from fastapi import APIRouter, Depends, Request
+import uuid
+
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -86,6 +88,70 @@ async def _org_by_owner_ref(session: AsyncSession, owner_ref: str) -> Organizati
     return org
 
 
+def _key_caller_org_id(request: Request) -> str | None:
+    """The org of the middleware-resolved hk_ key, if any ("org_<uuid>")."""
+    key = (request.scope.get("state") or {}).get("haki_api_key")
+    org_id = str(getattr(key, "org_id", "") or "")
+    return org_id if org_id.startswith("org_") else None
+
+
+async def _resolve_caller_org(
+    session: AsyncSession, request: Request, owner_ref: str | None
+) -> Organization:
+    """Org resolution for the two caller kinds (sprint 18):
+
+    - console service secret + owner_ref (account flow): unchanged —
+      ownership first, membership second via resolve_org_for_user_ref.
+    - raw hk_ key (API-key login): the org is derived from the
+      authenticated key itself; owner_ref must be absent (a present one
+      cannot be honored — it lives in the Clerk namespace — and silently
+      ignoring a caller-supplied scope would repeat the H2 mistake, so it
+      is a 403, same spirit as the C4 org check in app/auth.py).
+
+    Data operations only (settings read/write, member listing): invite,
+    accept and remove keep the pure service-secret trust model below.
+    """
+    try:
+        _require_console_auth(request)
+    except ApiError as service_exc:
+        key_org_id = _key_caller_org_id(request)
+        if key_org_id is None:
+            raise service_exc
+        if owner_ref is not None:
+            raise ApiError(
+                type="forbidden",
+                message="owner_ref is not honored with API-key auth: omit it, the org comes from the key",
+                field="owner_ref",
+                status_code=403,
+            )
+        try:
+            org_uuid = uuid.UUID(key_org_id[len("org_"):])
+        except ValueError:
+            raise ApiError(
+                type="unauthorized",
+                message="a project API key is required",
+                field="Authorization",
+                status_code=401,
+            ) from None
+        org = await session.get(Organization, org_uuid)
+        if org is None:
+            raise ApiError(
+                type="org_not_found",
+                message="no organization for this API key",
+                field="Authorization",
+                status_code=404,
+            )
+        return org
+    if not owner_ref:
+        raise ApiError(
+            type="invalid_payload",
+            message="owner_ref is required",
+            field="owner_ref",
+            status_code=422,
+        )
+    return await _org_by_owner_ref(session, owner_ref)
+
+
 @router.post("/orgs/provision", response_model=ProvisionOrgResponse, status_code=201)
 # 60/minute per client IP. Found live in production: the original 5/minute
 # broke real sign-ups within hours, because every real user's provisioning
@@ -142,11 +208,10 @@ async def provision_org(
 @router.get("/orgs/settings", response_model=OrgSettingsResponse)
 async def get_org_settings(
     request: Request,
-    owner_ref: str,
+    owner_ref: str | None = Query(default=None, min_length=1, max_length=256),
     session: AsyncSession = Depends(get_session),
 ) -> OrgSettingsResponse:
-    _require_console_auth(request)
-    org = await _org_by_owner_ref(session, owner_ref)
+    org = await _resolve_caller_org(session, request, owner_ref)
     return OrgSettingsResponse(
         org_id=f"org_{org.id}", name=org.name, retention_days=org.retention_days
     )
@@ -158,8 +223,7 @@ async def update_org_settings(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> OrgSettingsResponse:
-    _require_console_auth(request)
-    org = await _org_by_owner_ref(session, body.owner_ref)
+    org = await _resolve_caller_org(session, request, body.owner_ref)
     if body.name is not None:
         org.name = body.name
     if body.clear_retention:
@@ -175,18 +239,12 @@ async def update_org_settings(
 @router.get("/orgs/members", response_model=MemberListResponse)
 async def get_members(
     request: Request,
-    owner_ref: str,
+    owner_ref: str | None = Query(default=None, min_length=1, max_length=256),
     session: AsyncSession = Depends(get_session),
 ) -> MemberListResponse:
-    _require_console_auth(request)
-    org = await resolve_org_for_user_ref(session, owner_ref)
-    if org is None:
-        raise ApiError(
-            type="org_not_found",
-            message="no organization for this owner_ref",
-            field="owner_ref",
-            status_code=404,
-        )
+    # Same two-caller rule as settings above (key callers see their own
+    # org's roster); invite/accept/remove below stay service-secret-only.
+    org = await _resolve_caller_org(session, request, owner_ref)
     members = await list_members(session, org)
     return MemberListResponse(members=[MemberOut(**m) for m in members])
 

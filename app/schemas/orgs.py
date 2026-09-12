@@ -1,4 +1,3 @@
-import uuid
 from datetime import datetime
 
 from pydantic import BaseModel, Field
@@ -23,8 +22,30 @@ class ProvisionOrgResponse(BaseModel):
     recovered (only its hash is stored, same contract as POST /v1/keys).
     `org_created` tells the caller which case happened."""
 
-    org_id: uuid.UUID
+    # The "org_<uuid>" string actually stored as ApiKey.org_id — NOT the
+    # bare Organization.id UUID. A caller (the console, then POST /v1/keys)
+    # compares this against caller.org_id verbatim to scope key creation;
+    # returning the bare UUID here silently broke every "create a second
+    # key" attempt with a 403 forbidden_scope (found live, not guessed).
+    org_id: str
     project_id: str
     api_key: str
     org_created: bool
     created_at: datetime
+
+
+class OrgSettingsResponse(BaseModel):
+    org_id: str
+    name: str
+    retention_days: int | None
+
+
+class UpdateOrgSettingsRequest(BaseModel):
+    """PATCH semantics: a field left unset keeps its current value — not
+    the same as passing it explicitly as null, which for retention_days
+    means "keep everything forever"."""
+
+    owner_ref: str | None = Field(default=None, min_length=1, max_length=256)
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    retention_days: int | None = Field(default=None, ge=1, le=3650)
+    clear_retention: bool = False  # explicit "forever" — distinct from "not sent"

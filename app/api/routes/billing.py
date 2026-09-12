@@ -48,6 +48,7 @@ from app.errors import ApiError
 from app.models import CreditTransaction, Organization
 from app.schemas.billing import (
     BillingStatusResponse,
+    BillingSummaryResponse,
     CheckoutRequest,
     CheckoutResponse,
     CreditsPurchaseRequest,
@@ -121,6 +122,68 @@ async def billing_status(
         subscription_plan=org.subscription_plan,
         current_period_end=org.current_period_end,
         geniuspay_subscription_id=org.geniuspay_subscription_id,
+    )
+
+
+@router.get("/billing/summary", response_model=BillingSummaryResponse)
+async def billing_summary(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> BillingSummaryResponse:
+    """The caller's OWN billing numbers, authenticated by their hk_ key.
+
+    No parameters: the org comes from the middleware-resolved key
+    (scope["state"]["haki_api_key"]), so a key can only ever read its own
+    org — there is nothing to tamper with. Read-only: no checkout, no
+    grant, no portal URL (those keep the service-secret + Clerk trust
+    model). Exists for the console's API-key login, which has no Clerk
+    session and therefore cannot call the service-secret routes.
+    """
+    key = (request.scope.get("state") or {}).get("haki_api_key")
+    if key is None or not str(getattr(key, "org_id", "")).startswith("org_"):
+        raise ApiError(
+            type="unauthorized",
+            message="a project API key is required",
+            field="Authorization",
+            status_code=401,
+        )
+    try:
+        org_uuid = uuid.UUID(str(key.org_id)[len("org_"):])
+    except ValueError:
+        raise ApiError(
+            type="unauthorized",
+            message="a project API key is required",
+            field="Authorization",
+            status_code=401,
+        ) from None
+    org = await session.get(Organization, org_uuid)
+    if org is None:
+        raise ApiError(
+            type="org_not_found",
+            message="no organization for this API key",
+            field="Authorization",
+            status_code=404,
+        )
+    rows = (
+        (
+            await session.execute(
+                select(CreditTransaction)
+                .where(CreditTransaction.org_id == org.id)
+                .order_by(CreditTransaction.created_at.desc())
+                .limit(20)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return BillingSummaryResponse(
+        org_id=org.id,
+        credit_balance=org.credit_balance,
+        low_balance=is_low_balance(org.credit_balance),
+        subscription_status=org.subscription_status,
+        subscription_plan=org.subscription_plan,
+        current_period_end=org.current_period_end,
+        transactions=[CreditTransactionOut.model_validate(row) for row in rows],
     )
 
 

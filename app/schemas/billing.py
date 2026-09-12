@@ -103,6 +103,25 @@ class BillingStatusResponse(BaseModel):
     geniuspay_subscription_id: str | None
 
 
+class BillingSummaryResponse(BaseModel):
+    """Read-only billing mirror for a raw hk_ key (GET /v1/billing/summary).
+
+    Same numbers as BillingStatusResponse + CreditsResponse combined, but
+    authenticated by the customer's own API key instead of the console
+    service secret + Clerk session — for the console's API-key login,
+    which has no Clerk session. Key-scoped by construction: the org is
+    derived from the authenticated key, never from a request parameter.
+    """
+
+    org_id: uuid.UUID
+    credit_balance: int
+    low_balance: bool = False
+    subscription_status: str | None
+    subscription_plan: str | None
+    current_period_end: datetime | None
+    transactions: list[CreditTransactionOut]
+
+
 class PortalRequest(BaseModel):
     """Same trust model as CheckoutRequest: called by the console backend
     on behalf of an already-verified Clerk user — never by a browser."""

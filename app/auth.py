@@ -149,7 +149,15 @@ class ApiKeyAuthMiddleware:
             path.startswith("/v1/")
             and not path.startswith("/v1/keys")
             and not path.startswith("/v1/orgs")
-            and not path.startswith("/v1/billing")
+            # /v1/billing stays on the console service secret, with ONE
+            # exception: GET /v1/billing/summary is a read-only, key-scoped
+            # mirror of the org's own balance/plan for the console's
+            # API-key login (which has no Clerk session). Matched exactly —
+            # every other /v1/billing/* route keeps the service secret.
+            and not (
+                path.startswith("/v1/billing")
+                and path.rstrip("/") != "/v1/billing/summary"
+            )
             and not path.startswith("/v1/webhooks")
             and not path.startswith("/v1/cli/device")
             and not unscoped_consolidate
